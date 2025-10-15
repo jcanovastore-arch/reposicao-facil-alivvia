@@ -17,6 +17,10 @@ import requests
 import base64
 from urllib.parse import urlparse
 
+# ======== URLs padrão (GOOGLE DRIVE) ========
+PADRAO_URL_DEFAULT = "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/export?format=xlsx"
+PADRAO_URL_EDIT    = "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/edit"
+
 # =============== Utils ===============
 def br_to_float(x):
     if pd.isna(x):
@@ -390,10 +394,11 @@ def _normalize_onedrive_url(url: str) -> str:
 def baixar_padrao(url: str, destino: str) -> dict:
     """
     Baixa um XLSX do 'url' para 'destino', valida se é Excel e retorna metadados.
-    Suporta: OneDrive (1drv.ms / onedrive.live.com), Google Drive export, Dropbox (?dl=1), GitHub raw.
+    Suporta: Google Drive (export xlsx), GitHub raw, Dropbox (?dl=1), OneDrive (1drv.ms/onedrive.live.com).
     """
     if not url or not url.strip():
         raise RuntimeError("URL do arquivo padrão não informada.")
+    # normaliza OneDrive se for o caso
     use_url = _normalize_onedrive_url(url.strip())
     try:
         r = requests.get(use_url, timeout=30, allow_redirects=True)
@@ -474,15 +479,21 @@ with st.sidebar:
     LT = st.number_input("Lead time (dias)", value=0, step=1, min_value=0)
     st.markdown("**Arquivo fixo (mesma pasta):** `Padrao_produtos.xlsx`")
 
-    # ---- URL e botão para baixar Padrao_produtos.xlsx
     st.markdown("---")
     st.subheader("Padrão (KITS/CAT) por link")
     padrao_url = st.text_input(
-        "URL direta do Padrao_produtos.xlsx (OneDrive/1drv.ms, Drive export, Dropbox ?dl=1, GitHub raw)",
-        value=st.session_state.get("padrao_url", "")
+        "URL direta do Padrao_produtos.xlsx (Drive recomendado)",
+        value=st.session_state.get("padrao_url", PADRAO_URL_DEFAULT)
     )
     if padrao_url != st.session_state.get("padrao_url"):
         st.session_state.padrao_url = padrao_url
+
+    if st.button("Resetar para Drive (padrão)", use_container_width=True):
+        st.session_state.padrao_url = PADRAO_URL_DEFAULT
+        st.success("URL resetada para o Google Drive (xlsx export).")
+
+    # Link de atalho para editar/substituir no Drive
+    st.markdown(f"[🔗 Abrir no Google Drive para editar]({PADRAO_URL_EDIT})")
 
     if st.button("Baixar padrão", use_container_width=True):
         try:
@@ -507,7 +518,7 @@ if st.button("Gerar Compra", type="primary"):
     try:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         cat_path_default = os.path.join(base_dir, "Padrao_produtos.xlsx")
-        cat_path = st.session_state.get("padrao_override_path", cat_path_default)
+        cat_path = st.session_state.get("padrao_override_path", cat_path_default)  # usa override se baixado
         cat = carregar_padrao_produtos(cat_path)
 
         dfs, tipos = [], {}
