@@ -13,7 +13,9 @@ import numpy as np
 import pandas as pd
 from unidecode import unidecode
 import streamlit as st
-import requests  # << novo (download Padrao por URL)
+import requests
+import base64
+from urllib.parse import urlparse
 
 # =============== Utils ===============
 def br_to_float(x):
@@ -206,7 +208,6 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
              (df["codigo_sku"] if "codigo_sku" in df.columns else None))
         )
         if sku_series is None:
-            # fallback: primeira coluna que contenha 'sku'
             sku_series = df[next(c for c in df.columns if "sku" in c.lower())]
         df["SKU"] = sku_series.map(norm_sku)
 
@@ -221,13 +222,11 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
         return df[["SKU","Estoque_Fisico","Preco"]].copy()
 
     if tipo == "VENDAS":
-        # SKU = primeira coluna que contenha 'sku'
         sku_col = next((c for c in df.columns if "sku" in c.lower()), None)
         if sku_col is None:
             raise RuntimeError("VENDAS inválido: não achei coluna de SKU (ex.: SKU, Model SKU, Variation SKU).")
         df["SKU"] = df[sku_col].map(norm_sku)
 
-        # Quantidade = melhor match por palavras (qtde/quant/venda/order)
         cand_qty = []
         for c in df.columns:
             cl = c.lower()
@@ -367,31 +366,47 @@ def sha256_of_csv(df: pd.DataFrame) -> str:
     csv_bytes = df.to_csv(index=False).encode("utf-8")
     return hashlib.sha256(csv_bytes).hexdigest()
 
-# ---- NOVO: helpers para baixar Padrao por URL
 def sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
+
+def _normalize_onedrive_url(url: str) -> str:
+    """
+    Aceita links do OneDrive (incluindo 1drv.ms) e converte para um endpoint de download direto.
+    Para links públicos, usamos o endpoint 'shares' (não requer token).
+    """
+    try:
+        u = urlparse(url)
+        host = (u.netloc or "").lower()
+        path = (u.path or "").lower()
+        if "onedrive.live.com" in host and "download" in path:
+            return url  # já é direto
+        if "1drv.ms" in host or "onedrive.live.com" in host:
+            enc = base64.urlsafe_b64encode(url.encode("utf-8")).decode("ascii").rstrip("=")
+            return f"https://api.onedrive.com/v1.0/shares/u!{enc}/root/content"
+    except Exception:
+        pass
+    return url
 
 def baixar_padrao(url: str, destino: str) -> dict:
     """
     Baixa um XLSX do 'url' para 'destino', valida se é Excel e retorna metadados.
-    Lida com links diretos (GitHub raw / Dropbox ?dl=1 / Google Drive export / OneDrive compartilhado).
+    Suporta: OneDrive (1drv.ms / onedrive.live.com), Google Drive export, Dropbox (?dl=1), GitHub raw.
     """
     if not url or not url.strip():
         raise RuntimeError("URL do arquivo padrão não informada.")
+    use_url = _normalize_onedrive_url(url.strip())
     try:
-        r = requests.get(url.strip(), timeout=30)
+        r = requests.get(use_url, timeout=30, allow_redirects=True)
         r.raise_for_status()
     except Exception as e:
         raise RuntimeError(f"Falha ao baixar o padrão: {e}")
 
     content = r.content
-    # valida abrindo com pandas
     try:
-        pd.ExcelFile(io.BytesIO(content))
+        pd.ExcelFile(io.BytesIO(content))  # valida
     except Exception as e:
         raise RuntimeError(f"Arquivo baixado não é um XLSX válido: {e}")
 
-    # salva no destino
     with open(destino, "wb") as f:
         f.write(content)
 
@@ -459,11 +474,11 @@ with st.sidebar:
     LT = st.number_input("Lead time (dias)", value=0, step=1, min_value=0)
     st.markdown("**Arquivo fixo (mesma pasta):** `Padrao_produtos.xlsx`")
 
-    # ---- NOVO: URL e botão para baixar Padrao_produtos.xlsx
+    # ---- URL e botão para baixar Padrao_produtos.xlsx
     st.markdown("---")
     st.subheader("Padrão (KITS/CAT) por link")
     padrao_url = st.text_input(
-        "URL direta do Padrao_produtos.xlsx (GitHub raw / Dropbox ?dl=1 / Drive export / OneDrive compartilhado)",
+        "URL direta do Padrao_produtos.xlsx (OneDrive/1drv.ms, Drive export, Dropbox ?dl=1, GitHub raw)",
         value=st.session_state.get("padrao_url", "")
     )
     if padrao_url != st.session_state.get("padrao_url"):
@@ -492,7 +507,7 @@ if st.button("Gerar Compra", type="primary"):
     try:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         cat_path_default = os.path.join(base_dir, "Padrao_produtos.xlsx")
-        cat_path = st.session_state.get("padrao_override_path", cat_path_default)  # << usa override se existir
+        cat_path = st.session_state.get("padrao_override_path", cat_path_default)
         cat = carregar_padrao_produtos(cat_path)
 
         dfs, tipos = [], {}
