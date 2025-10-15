@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 from unidecode import unidecode
 import streamlit as st
+import requests  # << novo (download Padrao por URL)
 
 # =============== Utils ===============
 def br_to_float(x):
@@ -366,6 +367,42 @@ def sha256_of_csv(df: pd.DataFrame) -> str:
     csv_bytes = df.to_csv(index=False).encode("utf-8")
     return hashlib.sha256(csv_bytes).hexdigest()
 
+# ---- NOVO: helpers para baixar Padrao por URL
+def sha256_bytes(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
+
+def baixar_padrao(url: str, destino: str) -> dict:
+    """
+    Baixa um XLSX do 'url' para 'destino', valida se é Excel e retorna metadados.
+    Lida com links diretos (GitHub raw / Dropbox ?dl=1 / Google Drive export / OneDrive compartilhado).
+    """
+    if not url or not url.strip():
+        raise RuntimeError("URL do arquivo padrão não informada.")
+    try:
+        r = requests.get(url.strip(), timeout=30)
+        r.raise_for_status()
+    except Exception as e:
+        raise RuntimeError(f"Falha ao baixar o padrão: {e}")
+
+    content = r.content
+    # valida abrindo com pandas
+    try:
+        pd.ExcelFile(io.BytesIO(content))
+    except Exception as e:
+        raise RuntimeError(f"Arquivo baixado não é um XLSX válido: {e}")
+
+    # salva no destino
+    with open(destino, "wb") as f:
+        f.write(content)
+
+    meta = {
+        "bytes": len(content),
+        "sha256": sha256_bytes(content),
+        "from_url": url,
+        "saved_to": destino,
+    }
+    return meta
+
 def exportar_xlsx(df_final: pd.DataFrame, h: int, params: dict, pendencias: list | None = None) -> bytes:
     for c in ["Vendas_h_ML","Vendas_h_Shopee","Estoque_Fisico","Compra_Sugerida","Reserva_30d","Folga_Fisico","Necessidade","ML_60d","Shopee_60d","TOTAL_60d"]:
         if (df_final[c] < 0).any() or (df_final[c].astype(float) % 1 != 0).any():
@@ -405,6 +442,11 @@ st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide
 st.title("Reposição Logística — Alivvia")
 st.caption("FULL por anúncio; compra por componente; Shopee explode antes; painel de estoques; prévia por SKU; filtro por fornecedor.")
 
+# exibe meta do padrão baixado, se houver (informativo)
+if st.session_state.get("padrao_meta"):
+    m = st.session_state["padrao_meta"]
+    st.caption(f"Padrão em uso: {os.path.basename(m['saved_to'])} • {m['bytes']:,} bytes • SHA256 {m['sha256'][:12]}…")
+
 # ---- Estado: mantém o resultado calculado para evitar recálculo
 if "df_final" not in st.session_state:
     st.session_state.df_final = None
@@ -417,6 +459,27 @@ with st.sidebar:
     LT = st.number_input("Lead time (dias)", value=0, step=1, min_value=0)
     st.markdown("**Arquivo fixo (mesma pasta):** `Padrao_produtos.xlsx`")
 
+    # ---- NOVO: URL e botão para baixar Padrao_produtos.xlsx
+    st.markdown("---")
+    st.subheader("Padrão (KITS/CAT) por link")
+    padrao_url = st.text_input(
+        "URL direta do Padrao_produtos.xlsx (GitHub raw / Dropbox ?dl=1 / Drive export / OneDrive compartilhado)",
+        value=st.session_state.get("padrao_url", "")
+    )
+    if padrao_url != st.session_state.get("padrao_url"):
+        st.session_state.padrao_url = padrao_url
+
+    if st.button("Baixar padrão", use_container_width=True):
+        try:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            override_path = os.path.join(base_dir, "Padrao_produtos_atualizado.xlsx")
+            meta = baixar_padrao(st.session_state.get("padrao_url", ""), override_path)
+            st.session_state.padrao_override_path = override_path
+            st.session_state.padrao_meta = meta
+            st.success(f"Baixado com sucesso! SHA256: {meta['sha256'][:12]}…")
+        except Exception as e:
+            st.error(str(e))
+
 col1, col2, col3 = st.columns(3)
 with col1: full_file   = st.file_uploader("FULL (Magiic)")
 with col2: fisico_file = st.file_uploader("Estoque Físico (CSV/XLSX/XLS)")
@@ -428,7 +491,8 @@ st.divider()
 if st.button("Gerar Compra", type="primary"):
     try:
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        cat_path = os.path.join(base_dir, "Padrao_produtos.xlsx")
+        cat_path_default = os.path.join(base_dir, "Padrao_produtos.xlsx")
+        cat_path = st.session_state.get("padrao_override_path", cat_path_default)  # << usa override se existir
         cat = carregar_padrao_produtos(cat_path)
 
         dfs, tipos = [], {}
