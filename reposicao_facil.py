@@ -1,6 +1,8 @@
 # Reposição Logística — Alivvia (Streamlit)
-# Multi-empresa (ALIVVIA / JCA) + Plano do Mês + Compras Manuais + Saldo
-# Sem alterar regras de cálculo originais.
+# App com: multi-empresa, download do padrão por URL, semanais (organização),
+# compras manuais (saldo no mês), autosave da sessão (JSON),
+# FULL por anúncio; compra por componente; Shopee explode antes; painel de estoques;
+# prévia por SKU; filtro por fornecedor. Resultados ficam em session_state (sem recálculo).
 
 import os
 import io
@@ -8,19 +10,12 @@ import json
 import hashlib
 import datetime as dt
 from dataclasses import dataclass
-from typing import Dict, List, Any
 
 import numpy as np
 import pandas as pd
 from unidecode import unidecode
 import streamlit as st
 import requests
-import base64
-from urllib.parse import urlparse
-
-# ======== URLs padrão (GOOGLE DRIVE) ========
-PADRAO_URL_DEFAULT = "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/export?format=xlsx"
-PADRAO_URL_EDIT    = "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/edit"
 
 # =============== Utils ===============
 def br_to_float(x):
@@ -53,30 +48,26 @@ def norm_sku(x: str) -> str:
         return ""
     return unidecode(str(x)).strip().upper()
 
-def sha256_bytes(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
-def sha256_of_csv(df: pd.DataFrame) -> str:
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
-    return hashlib.sha256(csv_bytes).hexdigest()
-
 @dataclass
 class Catalogo:
     catalogo_simples: pd.DataFrame
     kits_reais: pd.DataFrame
 
 # =============== Padrão produtos (KITS + CAT) ===============
-def carregar_padrao_produtos(caminho: str) -> Catalogo:
+def carregar_padrao_produtos(caminho_ou_bytes) -> Catalogo:
     try:
-        xls = pd.ExcelFile(caminho)
+        if isinstance(caminho_ou_bytes, bytes):
+            xls = pd.ExcelFile(io.BytesIO(caminho_ou_bytes))
+        else:
+            xls = pd.ExcelFile(caminho_ou_bytes)
     except Exception as e:
-        raise RuntimeError(f"Não consegui abrir '{caminho}'. Deixe na mesma pasta do app. Erro: {e}")
+        raise RuntimeError(f"Não consegui abrir '{caminho_ou_bytes}'. Deixe na mesma pasta do app. Erro: {e}")
 
     def load_sheet(opts):
         for n in opts:
             if n in xls.sheet_names:
                 return pd.read_excel(xls, n)
-        raise RuntimeError(f"Aba não encontrada. Esperado uma de {opts} no '{caminho}'.")
+        raise RuntimeError(f"Aba não encontrada. Esperado uma de {opts}.")
 
     df_kits = load_sheet(["KITS", "KITS_REAIS", "kits", "kits_reais"]).copy()
     df_cat  = load_sheet(["CATALOGO_SIMPLES", "CATALOGO", "catalogo_simples", "catalogo"]).copy()
@@ -142,7 +133,7 @@ def load_any_table(uploaded_file) -> pd.DataFrame:
 
     df.columns = [norm_header(c) for c in df.columns]
 
-    # FULL com header na 3ª linha
+    # FULL com header na 3ª linha (caso tenha 2 de título)
     if ("sku" not in df.columns) and ("codigo" not in df.columns) and ("codigo_sku" not in df.columns) and len(df) > 0:
         try:
             uploaded_file.seek(0)
@@ -230,7 +221,7 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
     if tipo == "VENDAS":
         sku_col = next((c for c in df.columns if "sku" in c.lower()), None)
         if sku_col is None:
-            raise RuntimeError("VENDAS inválido: não achei coluna de SKU.")
+            raise RuntimeError("VENDAS inválido: não achei coluna de SKU (ex.: SKU, Model SKU, Variation SKU).")
         df["SKU"] = df[sku_col].map(norm_sku)
 
         cand_qty = []
@@ -244,7 +235,7 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
             if score > 0:
                 cand_qty.append((score, c))
         if not cand_qty:
-            raise RuntimeError("VENDAS inválido: não achei coluna de Quantidade.")
+            raise RuntimeError("VENDAS inválido: não achei coluna de Quantidade (ex.: Qtde. Vendas, Quantidade, Orders).")
         cand_qty.sort(reverse=True)
         qcol = cand_qty[0][1]
 
@@ -253,7 +244,7 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
 
     raise RuntimeError("Tipo de arquivo desconhecido.")
 
-# =============== Explosão e Cálculo (inalterado) ===============
+# =============== Explosão e Cálculo ===============
 def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_col: str) -> pd.DataFrame:
     base = df.copy()
     base["kit_sku"] = base[sku_col].map(norm_sku)
@@ -269,16 +260,19 @@ def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_co
 def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     kits = construir_kits_efetivo(cat)
 
+    # FULL
     full = full_df.copy()
     full["SKU"]             = full["SKU"].map(norm_sku)
     full["Vendas_Qtd_60d"]  = full["Vendas_Qtd_60d"].astype(int)
     full["Estoque_Full"]    = full["Estoque_Full"].astype(int)
     full["Em_Transito"]     = full["Em_Transito"].astype(int)
 
+    # Shopee/MT
     shp = vendas_df.copy()
     shp["SKU"]            = shp["SKU"].map(norm_sku)
     shp["Quantidade_60d"] = shp["Quantidade"].astype(int)
 
+    # Explodir -> componentes
     ml_comp = explodir_por_kits(
         full[["SKU","Vendas_Qtd_60d"]].rename(columns={"SKU":"kit_sku","Vendas_Qtd_60d":"Qtd"}),
         kits,"kit_sku","Qtd"
@@ -295,6 +289,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     demanda[["ML_60d","Shopee_60d"]] = demanda[["ML_60d","Shopee_60d"]].fillna(0).astype(int)
     demanda["TOTAL_60d"] = np.maximum(demanda["ML_60d"] + demanda["Shopee_60d"], demanda["ML_60d"]).astype(int)
 
+    # Físico
     fis = fisico_df.copy()
     fis["SKU"]            = fis["SKU"].map(norm_sku)
     fis["Estoque_Fisico"] = fis["Estoque_Fisico"].fillna(0).astype(int)
@@ -304,6 +299,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     base["Estoque_Fisico"] = base["Estoque_Fisico"].fillna(0).astype(int)
     base["Preco"]          = base["Preco"].fillna(0.0)
 
+    # Planejamento por anúncio
     fator = (1.0 + g/100.0) ** (h/30.0)
     fk = full.copy()
     fk["vendas_dia"]     = fk["Vendas_Qtd_60d"] / 60.0
@@ -319,17 +315,22 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     base = base.merge(necessidade, on="SKU", how="left")
     base["Necessidade"] = base["Necessidade"].fillna(0).astype(int)
 
+    # Reserva Shopee 30d
     base["Demanda_dia"]  = base["TOTAL_60d"] / 60.0
     base["Reserva_30d"]  = np.round(base["Demanda_dia"] * 30).astype(int)
     base["Folga_Fisico"] = (base["Estoque_Fisico"] - base["Reserva_30d"]).clip(lower=0).astype(int)
 
+    # Compra
     base["Compra_Sugerida"] = (base["Necessidade"] - base["Folga_Fisico"]).clip(lower=0).astype(int)
 
+    # status_reposicao = nao_repor ⇒ zera compra
     mask_nao = base["status_reposicao"].str.lower().str.contains("nao_repor", na=False)
     base.loc[mask_nao, "Compra_Sugerida"] = 0
 
+    # Valores
     base["Valor_Compra_R$"] = (base["Compra_Sugerida"].astype(float) * base["Preco"].astype(float)).round(2)
 
+    # Vendas no horizonte h
     base["Vendas_h_ML"]     = np.round(base["ML_60d"] * (h/60.0)).astype(int)
     base["Vendas_h_Shopee"] = np.round(base["Shopee_60d"] * (h/60.0)).astype(int)
 
@@ -342,6 +343,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
         "ML_60d","Shopee_60d","TOTAL_60d","Reserva_30d","Folga_Fisico","Necessidade"
     ]].reset_index(drop=True)
 
+    # Painel de estoques
     fis_unid  = int(fis["Estoque_Fisico"].sum())
     fis_valor = float((fis["Estoque_Fisico"] * fis["Preco"]).sum())
 
@@ -356,50 +358,20 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     painel = {"full_unid": full_unid, "full_valor": full_valor, "fisico_unid": fis_unid, "fisico_valor": fis_valor}
     return df_final, painel
 
-# =============== Download de padrão via link ===============
-def _normalize_onedrive_url(url: str) -> str:
-    try:
-        u = urlparse(url)
-        host = (u.netloc or "").lower()
-        path = (u.path or "").lower()
-        if "onedrive.live.com" in host and "download" in path:
-            return url
-        if "1drv.ms" in host or "onedrive.live.com" in host:
-            enc = base64.urlsafe_b64encode(url.encode("utf-8")).decode("ascii").rstrip("=")
-            return f"https://api.onedrive.com/v1.0/shares/u!{enc}/root/content"
-    except Exception:
-        pass
-    return url
+# =============== Export XLSX (sem recálculo) ===============
+def sha256_of_csv(df: pd.DataFrame) -> str:
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    return hashlib.sha256(csv_bytes).hexdigest()
 
-def baixar_padrao(url: str, destino: str) -> dict:
-    if not url or not url.strip():
-        raise RuntimeError("URL do arquivo padrão não informada.")
-    use_url = _normalize_onedrive_url(url.strip())
-    try:
-        r = requests.get(use_url, timeout=30, allow_redirects=True)
-        r.raise_for_status()
-    except Exception as e:
-        raise RuntimeError(f"Falha ao baixar o padrão: {e}")
-    content = r.content
-    try:
-        pd.ExcelFile(io.BytesIO(content))
-    except Exception as e:
-        raise RuntimeError(f"Arquivo baixado não é um XLSX válido: {e}")
-    with open(destino, "wb") as f:
-        f.write(content)
-    return {"bytes": len(content), "sha256": sha256_bytes(content), "from_url": url, "saved_to": destino}
-
-# =============== Export XLSX (lista final) ===============
-def exportar_xlsx_lista_final(df_final: pd.DataFrame, h: int, params: dict) -> bytes:
-    for c in ["Vendas_h_ML","Vendas_h_Shopee","Estoque_Fisico","Compra_Sugerida",
-              "Reserva_30d","Folga_Fisico","Necessidade","ML_60d","Shopee_60d","TOTAL_60d"]:
+def exportar_xlsx(df_final: pd.DataFrame, h: int, params: dict, pendencias: list | None = None) -> bytes:
+    for c in ["Vendas_h_ML","Vendas_h_Shopee","Estoque_Fisico","Compra_Sugerida","Reserva_30d","Folga_Fisico","Necessidade","ML_60d","Shopee_60d","TOTAL_60d"]:
         if (df_final[c] < 0).any() or (df_final[c].astype(float) % 1 != 0).any():
             raise RuntimeError(f"Auditoria: campo {c} precisa ser inteiro e ≥ 0.")
-    if not np.allclose(df_final["Valor_Compra_R$"].values,
-                       (df_final["Compra_Sugerida"] * df_final["Preco"]).round(2).values):
+    if not np.allclose(df_final["Valor_Compra_R$"].values, (df_final["Compra_Sugerida"] * df_final["Preco"]).round(2).values):
         raise RuntimeError("Auditoria: Valor_Compra_R$ inconsistente com Compra × Preco.")
 
     hash_str = sha256_of_csv(df_final)
+
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         lista = df_final[df_final["Compra_Sugerida"] > 0].copy()
@@ -409,6 +381,9 @@ def exportar_xlsx_lista_final(df_final: pd.DataFrame, h: int, params: dict) -> b
             width = max(12, int(lista[col].astype(str).map(len).max()) + 2)
             ws.set_column(i, i, min(width, 40))
         ws.freeze_panes(1, 0); ws.autofilter(0, 0, len(lista), len(lista.columns)-1)
+
+        if pendencias:
+            pd.DataFrame(pendencias).to_excel(writer, sheet_name="Pendencias", index=False)
 
         ctrl = pd.DataFrame([{
             "data_hora": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -422,352 +397,327 @@ def exportar_xlsx_lista_final(df_final: pd.DataFrame, h: int, params: dict) -> b
     output.seek(0)
     return output.read()
 
-# =============== Export XLSX (Plano/Compras/Saldo por empresa) ===============
-def exportar_plano_compras_saldo(snapshots: Dict[str, pd.DataFrame],
-                                 compras: Dict[str, pd.DataFrame],
-                                 saldos: Dict[str, pd.DataFrame]) -> bytes:
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        for empresa in ["ALIVVIA","JCA"]:
-            if empresa in snapshots and snapshots[empresa] is not None:
-                snapshots[empresa].to_excel(writer, sheet_name=f"{empresa}_Plano", index=False)
-            if empresa in compras and compras[empresa] is not None:
-                compras[empresa].to_excel(writer, sheet_name=f"{empresa}_Compras", index=False)
-            if empresa in saldos and saldos[empresa] is not None:
-                saldos[empresa].to_excel(writer, sheet_name=f"{empresa}_Saldo", index=False)
-    output.seek(0)
-    return output.read()
-
-# =============== Sessão (persistência JSON) ===============
-def salvar_sessao_json(state: dict) -> bytes:
-    serial = {}
-    for k, v in state.items():
-        try:
-            if isinstance(v, pd.DataFrame):
-                serial[k] = {"__df__": True, "data": v.to_dict(orient="records")}
-            else:
-                serial[k] = v
-        except Exception:
-            pass
-    b = json.dumps(serial, ensure_ascii=False).encode("utf-8")
-    return b
-
-def carregar_sessao_json(b: bytes) -> dict:
-    raw = json.loads(b.decode("utf-8"))
-    out = {}
-    for k, v in raw.items():
-        if isinstance(v, dict) and v.get("__df__") and "data" in v:
-            out[k] = pd.DataFrame(v["data"])
-        else:
-            out[k] = v
-    return out
-
 # =============== UI ===============
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 st.title("Reposição Logística — Alivvia")
-st.caption("Multi-empresa (ALIVVIA/JCA). FULL por anúncio; compra por componente; Shopee explode antes; plano do mês; compras manuais; saldo por empresa.")
+st.caption("FULL por anúncio; compra por componente; Shopee explode antes; painel de estoques; prévia por SKU; filtro por fornecedor. Resultados ficam em memória (sem recálculo).")
 
-# ---- Estado inicial
+# CSS de polimento
+st.markdown("""
+<style>
+[data-testid="stExpander"] > details {
+  border: 1px solid #2b2e36 !important;
+  border-radius: 10px !important;
+  overflow: hidden;
+}
+[data-testid="stExpander"] summary {
+  font-weight: 600;
+}
+.semanais-box {
+  background: #0f1116;
+  border: 1px solid #2b2e36;
+  border-radius: 10px;
+  padding: .75rem;
+}
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  margin: 2px 4px 2px 0;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid #58a6ff33;
+  color: #c9d1d9;
+  background: #1f6feb22;
+  white-space: nowrap;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ---- Estado: mantém resultados e configurações
 def ensure_state():
-    if "padrao_url" not in st.session_state:
-        st.session_state.padrao_url = PADRAO_URL_DEFAULT
-    if "padrao_meta" not in st.session_state:
-        st.session_state.padrao_meta = None
-    if "padrao_override_path" not in st.session_state:
-        st.session_state.padrao_override_path = None
-    for emp in ["ALIVVIA","JCA"]:
-        key = f"{emp}_df_final"
-        if key not in st.session_state: st.session_state[key] = None
-        key = f"{emp}_painel"
-        if key not in st.session_state: st.session_state[key] = None
-        key = f"{emp}_snapshot"
-        if key not in st.session_state: st.session_state[key] = None
-        key = f"{emp}_compras"
-        if key not in st.session_state: st.session_state[key] = pd.DataFrame(columns=["data_compra","empresa","fornecedor","SKU","quantidade","obs"])
-        key = f"{emp}_semanais"
-        if key not in st.session_state: st.session_state[key] = []  # lista de SKUs
-        key = f"{emp}_limites"
-        if key not in st.session_state: st.session_state[key] = {}  # SKU -> limite_dias override
+    if "empresas" not in st.session_state:
+        st.session_state.empresas = ["ALIVVIA","JCA"]
+    for emp in st.session_state.empresas:
+        st.session_state.setdefault(f"df_final_{emp}", None)
+        st.session_state.setdefault(f"painel_{emp}", None)
+        st.session_state.setdefault(f"uploads_{emp}", {"full": None, "fisico": None, "vendas": None})
+        st.session_state.setdefault(f"compras_{emp}", [])  # lista de dicts: {"sku","qtd","data"}
+        st.session_state.setdefault(f"semanais_{emp}", set())
+    st.session_state.setdefault("empresa_atual", "ALIVVIA")
+    st.session_state.setdefault("autosave", False)
+    st.session_state.setdefault("padrao_url", "")  # Google Drive export / Onedrive / Raw github
+    st.session_state.setdefault("padrao_bytes", None)
+    st.session_state.setdefault("catalogo", None)
+    st.session_state.setdefault("mostrar_so_semanais", False)
 ensure_state()
 
-# exibe meta do padrão baixado, se houver
-if st.session_state.get("padrao_meta"):
-    m = st.session_state["padrao_meta"]
-    st.caption(f"Padrão em uso: {os.path.basename(m['saved_to'])} • {m['bytes']:,} bytes • SHA256 {m['sha256'][:12]}…")
+def autosave_if_on():
+    if st.session_state.autosave:
+        _dados = export_session_snapshot()
+        st.session_state["_last_autosave"] = _dados
 
+def export_session_snapshot() -> bytes:
+    # Exporta só o essencial
+    payload = {
+        "empresa_atual": st.session_state.empresa_atual,
+        "autosave": st.session_state.autosave,
+        "padrao_url": st.session_state.padrao_url,
+        "semanais": {e:list(st.session_state[f"semanais_{e}"]) for e in st.session_state.empresas},
+        "compras": {e:st.session_state[f"compras_{e}"] for e in st.session_state.empresas},
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+
+def import_session_snapshot(json_bytes: bytes):
+    try:
+        payload = json.loads(json_bytes.decode("utf-8"))
+    except Exception:
+        st.error("JSON inválido.")
+        return
+    st.session_state.empresa_atual = payload.get("empresa_atual", "ALIVVIA")
+    st.session_state.autosave = payload.get("autosave", False)
+    st.session_state.padrao_url = payload.get("padrao_url", st.session_state.padrao_url)
+    sem = payload.get("semanais", {})
+    for e in st.session_state.empresas:
+        st.session_state[f"semanais_{e}"] = set(sem.get(e, []))
+    comps = payload.get("compras", {})
+    for e in st.session_state.empresas:
+        st.session_state[f"compras_{e}"] = comps.get(e, [])
+    st.success("Sessão importada.")
+
+# --------- Sidebar
 with st.sidebar:
     st.subheader("Parâmetros")
     h  = st.selectbox("Horizonte (dias)", [30, 60, 90], index=1)
     g  = st.number_input("Crescimento % ao mês", value=0.0, step=1.0)
     LT = st.number_input("Lead time (dias)", value=0, step=1, min_value=0)
 
-    st.markdown("---")
-    st.subheader("Janela de compra (data limite)")
-    janela_dias = st.number_input("Comprar dentro de (dias)", value=30, step=1, min_value=1)
+    st.markdown("**Arquivo fixo (mesma pasta):** `Padrao_produtos.xlsx`")
 
     st.markdown("---")
-    st.subheader("Padrão (KITS/CAT) por link")
-    padrao_url = st.text_input(
-        "URL direta do Padrao_produtos.xlsx (Drive recomendado)",
-        value=st.session_state.get("padrao_url", PADRAO_URL_DEFAULT)
-    )
-    if padrao_url != st.session_state.get("padrao_url"):
-        st.session_state.padrao_url = padrao_url
+    st.subheader("Empresa")
+    st.session_state.empresa_atual = st.selectbox("Empresa ativa", st.session_state.empresas, index=0)
 
-    if st.button("Resetar para Drive (padrão)", use_container_width=True):
-        st.session_state.padrao_url = PADRAO_URL_DEFAULT
-        st.success("URL resetada para o Google Drive (xlsx export).")
+    # URL padrão (Drive recomendado)
+    st.markdown("**Padrão (KITS/CAT) por link**")
+    if not st.session_state.padrao_url:
+        st.session_state.padrao_url = ""  # cole aqui se quiser default
+    st.session_state.padrao_url = st.text_input("URL direta do Padrao_produtos.xlsx (Google Drive export / OneDrive / Dropbox dl=1 / Raw GitHub)", value=st.session_state.padrao_url)
 
-    st.markdown(f"[🔗 Abrir no Google Drive para editar]({PADRAO_URL_EDIT})")
-
-    if st.button("Baixar padrão", use_container_width=True):
+    btn_dl = st.button("Baixar padrão")
+    if btn_dl:
+        url = st.session_state.padrao_url.strip()
         try:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            override_path = os.path.join(base_dir, "Padrao_produtos_atualizado.xlsx")
-            meta = baixar_padrao(st.session_state.get("padrao_url", ""), override_path)
-            st.session_state.padrao_override_path = override_path
-            st.session_state.padrao_meta = meta
-            st.success(f"Baixado com sucesso! SHA256: {meta['sha256'][:12]}…")
+            if not url:
+                raise RuntimeError("Cole uma URL.")
+            # Download
+            r = requests.get(url, timeout=30)
+            r.raise_for_status()
+            st.session_state.padrao_bytes = r.content
+            st.session_state.catalogo = carregar_padrao_produtos(st.session_state.padrao_bytes)
+            st.success("Padrão carregado do link com sucesso.")
+            autosave_if_on()
         except Exception as e:
-            st.error(str(e))
+            st.error(f"Falha ao baixar o padrão: {e}")
 
+    # Sessão (auto-save + salvar/carregar JSON)
     st.markdown("---")
     st.subheader("Sessão")
-    colA, colB = st.columns(2)
-    with colA:
+    st.session_state.autosave = st.toggle("Autosave (JSON) a cada mudança", value=st.session_state.autosave)
+    cA, cB = st.columns(2)
+    with cA:
         if st.button("Salvar sessão (JSON)"):
-            b = salvar_sessao_json(st.session_state)
-            st.download_button("Baixar sessão.json", b, file_name="sessao_compras.json", mime="application/json", use_container_width=True)
-    with colB:
-        up = st.file_uploader("Carregar sessão (JSON)", type=["json"])
-        if up is not None:
+            data = export_session_snapshot()
+            st.download_button("Baixar sessão.json", data=data, file_name="sessao_reposicao.json", mime="application/json")
+    with cB:
+        up_json = st.file_uploader("Carregar sessão (JSON)", type=["json"], label_visibility="collapsed")
+        if up_json is not None:
             try:
-                loaded = carregar_sessao_json(up.read())
-                st.session_state.update(loaded)
-                st.success("Sessão carregada.")
+                import_session_snapshot(up_json.read())
             except Exception as e:
-                st.error(f"Falha ao carregar sessão: {e}")
+                st.error(f"Erro ao importar sessão: {e}")
 
-# ====== Abas por empresa ======
-tab_a, tab_j = st.tabs(["🏢 ALIVVIA", "🏢 JCA"])
+# ------- Uploads por empresa
+empresa = st.session_state.empresa_atual
+uploads = st.session_state[f"uploads_{empresa}"]
 
-def bloco_empresa(EMPRESA: str, tab):
-    with tab:
-        st.subheader(f"{EMPRESA} — Entradas")
-        col1, col2, col3 = st.columns(3)
-        with col1: full_file   = st.file_uploader(f"{EMPRESA}: FULL (Magiic)", key=f"{EMPRESA}_FULL")
-        with col2: fisico_file = st.file_uploader(f"{EMPRESA}: Estoque Físico (CSV/XLSX/XLS)", key=f"{EMPRESA}_FIS")
-        with col3: vendas_file = st.file_uploader(f"{EMPRESA}: Shopee/MT (vendas por SKU)", key=f"{EMPRESA}_VND")
-
-        st.markdown("")
-        if st.button(f"Gerar Compra — {EMPRESA}", type="primary"):
-            try:
-                base_dir = os.path.dirname(os.path.abspath(__file__))
-                cat_path_default = os.path.join(base_dir, "Padrao_produtos.xlsx")
-                cat_path = st.session_state.get("padrao_override_path", cat_path_default)
-                cat = carregar_padrao_produtos(cat_path)
-
-                uploads = [full_file, fisico_file, vendas_file]
-                dfs = []
-                tipos_presentes = set()
-                for upf in uploads:
-                    if upf is None:
-                        continue
-                    df_raw = load_any_table(upf)
-                    t = mapear_tipo(df_raw)
-                    if t == "DESCONHECIDO":
-                        st.error(f"Arquivo '{upf.name}' não reconhecido.")
-                        st.stop()
-                    dfs.append((t, mapear_colunas(df_raw, t)))
-                    tipos_presentes.add(t)
-
-                faltantes = {"FULL","FISICO","VENDAS"} - tipos_presentes
-                if faltantes:
-                    st.error(f"Entradas inválidas ({EMPRESA}). Faltou: {', '.join(sorted(faltantes))}.")
-                    st.stop()
-
-                full_df   = [df for t, df in dfs if t == "FULL"][0]
-                fisico_df = [df for t, df in dfs if t == "FISICO"][0]
-                vendas_df = [df for t, df in dfs if t == "VENDAS"][0]
-
-                df_final, painel = calcular(full_df, fisico_df, vendas_df, cat, h=h, g=g, LT=LT)
-
-                st.session_state[f"{EMPRESA}_df_final"] = df_final
-                st.session_state[f"{EMPRESA}_painel"]   = painel
-                st.success(f"{EMPRESA}: Cálculo concluído.")
-            except Exception as e:
-                st.error(str(e))
-                st.stop()
-
-        df_final = st.session_state.get(f"{EMPRESA}_df_final")
-        painel   = st.session_state.get(f"{EMPRESA}_painel")
-
-        if df_final is not None:
-            # Painel
-            st.subheader(f"{EMPRESA} — 📊 Painel de Estoques")
-            cA, cB, cC, cD = st.columns(4)
-            cA.metric("Full (un)",  f"{painel['full_unid']:,}".replace(",", "."))
-            cB.metric("Full (R$)",  f"R$ {painel['full_valor']:,.2f}")
-            cC.metric("Físico (un)",f"{painel['fisico_unid']:,}".replace(",", "."))
-            cD.metric("Físico (R$)",f"R$ {painel['fisico_valor']:,.2f}")
-            st.divider()
-
-            # Filtro e Semanais
-            st.subheader(f"{EMPRESA} — Itens")
-            fornecedores = sorted(df_final["fornecedor"].fillna("").unique())
-            colf1, colf2 = st.columns([2,1])
-            with colf1:
-                sel_fornec = st.multiselect("Filtrar por Fornecedor", fornecedores, key=f"{EMPRESA}_forn")
-            with colf2:
-                so_semanais = st.checkbox("Mostrar apenas SKUs semanais", key=f"{EMPRESA}_so_sem")
-
-            mostra = df_final if not sel_fornec else df_final[df_final["fornecedor"].isin(sel_fornec)]
-
-            # Gerenciar SKUs semanais (sem mexer na planilha)
-            with st.expander(f"⚙️ {EMPRESA}: Gerenciar SKUs semanais (toggle no app)"):
-                skus = sorted(df_final["SKU"].unique())
-                atuais = set(st.session_state.get(f"{EMPRESA}_semanais", []))
-                sel_sem = st.multiselect("Marcar como semanais", skus, default=sorted(atuais), key=f"{EMPRESA}_sem_sel")
-                st.session_state[f"{EMPRESA}_semanais"] = sel_sem
-                st.caption("Isso só filtra/organiza. Não altera cálculo.")
-
-            if so_semanais:
-                semanais = set(st.session_state.get(f"{EMPRESA}_semanais", []))
-                mostra = mostra[mostra["SKU"].isin(semanais)]
-
-            # Data limite
-            data_criacao = dt.datetime.now().date()
-            mostra = mostra.copy()
-            mostra["data_limite"] = (dt.date.today() + dt.timedelta(days=int(janela_dias))).strftime("%Y-%m-%d")
-
-            # Prévia
-            with st.expander(f"🔎 Prévia {EMPRESA}"):
-                st.dataframe(
-                    mostra[[
-                        "SKU","fornecedor","ML_60d","Shopee_60d","TOTAL_60d",
-                        "Estoque_Fisico","Reserva_30d","Folga_Fisico",
-                        "Necessidade","Compra_Sugerida","Preco","Valor_Compra_R$","data_limite"
-                    ]],
-                    use_container_width=True,
-                    height=380
-                )
-
-            st.subheader(f"{EMPRESA} — Itens para comprar")
-            st.dataframe(
-                mostra[mostra["Compra_Sugerida"] > 0][[
-                    "SKU","fornecedor","Vendas_h_ML","Vendas_h_Shopee",
-                    "Estoque_Fisico","Preco","Compra_Sugerida","Valor_Compra_R$","data_limite"
-                ]],
-                use_container_width=True
-            )
-            compra_total = int(mostra["Compra_Sugerida"].sum())
-            valor_total  = float(mostra["Valor_Compra_R$"].sum())
-            st.success(f"{EMPRESA}: {len(mostra[mostra['Compra_Sugerida']>0])} SKUs com compra > 0 | Compra total: {compra_total} un | Valor: R$ {valor_total:,.2f}")
-
-            colx1, colx2, colx3 = st.columns(3)
-            with colx1:
-                if st.checkbox(f"{EMPRESA}: Gerar XLSX (Lista_Final + Controle)", key=f"{EMPRESA}_chk_exp"):
-                    try:
-                        xlsx_bytes = exportar_xlsx_lista_final(mostra, h=h, params={"g": g, "LT": LT, "empresa": EMPRESA})
-                        st.download_button(
-                            label=f"Baixar XLSX — {EMPRESA}_Compra_{h}d.xlsx",
-                            data=xlsx_bytes,
-                            file_name=f"{EMPRESA}_Compra_{h}d.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key=f"{EMPRESA}_btn_dl"
-                        )
-                        st.info("Planilha gerada a partir do DataFrame exibido (paridade garantida).")
-                    except Exception as e:
-                        st.error(f"Exportação bloqueada: {e}")
-            with colx2:
-                if st.button(f"Salvar plano do mês — {EMPRESA}"):
-                    snap = mostra.rename(columns={"Compra_Sugerida":"Compra_Planejada"}).copy()
-                    snap["empresa"] = EMPRESA
-                    snap["h"] = h; snap["g"] = g; snap["LT"] = LT
-                    snap["data_criacao"] = dt.datetime.now().strftime("%Y-%m-%d")
-                    snap["data_limite"]  = (dt.date.today() + dt.timedelta(days=int(janela_dias))).strftime("%Y-%m-%d")
-                    st.session_state[f"{EMPRESA}_snapshot"] = snap[[
-                        "empresa","SKU","fornecedor","Compra_Planejada","Preco",
-                        "ML_60d","Shopee_60d","TOTAL_60d","Reserva_30d","Folga_Fisico","Necessidade",
-                        "h","g","LT","data_criacao","data_limite"
-                    ]].reset_index(drop=True)
-                    st.success(f"Plano salvo para {EMPRESA}.")
-            with colx3:
-                if st.button(f"Limpar plano — {EMPRESA}"):
-                    st.session_state[f"{EMPRESA}_snapshot"] = None
-                    st.success(f"Plano limpo para {EMPRESA}.")
-
-# Render blocos das duas empresas
-bloco_empresa("ALIVVIA", tab_a)
-bloco_empresa("JCA", tab_j)
+col1, col2, col3 = st.columns(3)
+with col1: up_full   = st.file_uploader(f"FULL (Magiic) — {empresa}", key=f"full_{empresa}")
+with col2: up_fisico = st.file_uploader(f"Estoque Físico (CSV/XLSX/XLS) — {empresa}", key=f"fisico_{empresa}")
+with col3: up_vendas = st.file_uploader(f"Shopee / Mercado Turbo (vendas por SKU) — {empresa}", key=f"vendas_{empresa}")
 
 st.divider()
-st.header("📝 Compras Efetuadas (manual) e Saldo por empresa")
 
-def editor_compras(EMPRESA: str):
-    st.subheader(f"{EMPRESA} — Compras Efetuadas (manual)")
-    dfc = st.session_state.get(f"{EMPRESA}_compras")
-    if dfc is None or dfc.empty:
-        dfc = pd.DataFrame(columns=["data_compra","empresa","fornecedor","SKU","quantidade","obs"])
-    # defaults
-    hoje = dt.date.today().strftime("%Y-%m-%d")
-    dfc = dfc.copy()
-    if "data_compra" not in dfc.columns: dfc["data_compra"] = hoje
-    if "empresa" not in dfc.columns: dfc["empresa"] = EMPRESA
+# ------- Botão: calcula por empresa e salva no estado
+if st.button(f"Gerar Compra — {empresa}", type="primary"):
+    try:
+        # cat (padrão)
+        if st.session_state.catalogo is None:
+            # tenta carregar arquivo local se existir
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            cat_path = os.path.join(base_dir, "Padrao_produtos.xlsx")
+            if os.path.exists(cat_path):
+                st.session_state.catalogo = carregar_padrao_produtos(cat_path)
+            else:
+                raise RuntimeError("Padrão não carregado. Baixe o arquivo por link ou deixe Padrao_produtos.xlsx na pasta do app.")
 
-    st.caption("Adicione/edite manualmente as linhas de compra.")
-    edited = st.data_editor(
-        dfc,
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config={
-            "data_compra": st.column_config.DateColumn("data_compra", format="YYYY-MM-DD"),
-            "empresa": st.column_config.TextColumn("empresa"),
-            "fornecedor": st.column_config.TextColumn("fornecedor"),
-            "SKU": st.column_config.TextColumn("SKU"),
-            "quantidade": st.column_config.NumberColumn("quantidade", min_value=0, step=1),
-            "obs": st.column_config.TextColumn("obs"),
-        },
-        key=f"{EMPRESA}_editor"
-    )
-    st.session_state[f"{EMPRESA}_compras"] = edited
+        dfs, tipos = [], {}
+        for up in [up_full, up_fisico, up_vendas]:
+            if up is None:
+                continue
+            df_raw = load_any_table(up)
+            t = mapear_tipo(df_raw)
+            if t == "DESCONHECIDO":
+                st.error(f"Arquivo '{up.name}' não reconhecido. Reexporte com colunas corretas.")
+                st.stop()
+            tipos[t] = up.name
+            dfs.append((t, mapear_colunas(df_raw, t)))
 
-    # Calcula saldo se houver plano
-    snap = st.session_state.get(f"{EMPRESA}_snapshot")
-    if snap is not None and not snap.empty:
-        compras_ok = edited.copy()
-        compras_ok = compras_ok[compras_ok["empresa"] == EMPRESA]
-        compras_ok["quantidade"] = pd.to_numeric(compras_ok["quantidade"], errors="coerce").fillna(0).astype(int)
-        agg = compras_ok.groupby(["empresa","SKU"], as_index=False)["quantidade"].sum().rename(columns={"quantidade":"Comprado"})
-        saldo = snap.merge(agg, on=["empresa","SKU"], how="left")
-        saldo["Comprado"] = saldo["Comprado"].fillna(0).astype(int)
-        saldo["Saldo_A_Comprar"] = (saldo["Compra_Planejada"] - saldo["Comprado"]).clip(lower=0).astype(int)
-        st.subheader(f"{EMPRESA} — Saldo a Comprar")
+        tipos_presentes = set([t for t, _ in dfs])
+        faltantes = {"FULL", "FISICO", "VENDAS"} - tipos_presentes
+        if faltantes:
+            st.error(f"Entradas inválidas ({empresa}). Faltou: {', '.join(sorted(faltantes))}. Detectei: {', '.join(sorted(tipos_presentes))}.")
+            st.stop()
+
+        full_df   = [df for t, df in dfs if t == "FULL"][0]
+        fisico_df = [df for t, df in dfs if t == "FISICO"][0]
+        vendas_df = [df for t, df in dfs if t == "VENDAS"][0]
+
+        df_final, painel = calcular(full_df, fisico_df, vendas_df, st.session_state.catalogo, h=h, g=g, LT=LT)
+
+        # ► Salva por empresa
+        st.session_state[f"df_final_{empresa}"] = df_final
+        st.session_state[f"painel_{empresa}"]   = painel
+        autosave_if_on()
+        st.success(f"Cálculo concluído para {empresa}. Use os filtros abaixo sem recálculo.")
+    except Exception as e:
+        st.error(str(e))
+        st.stop()
+
+# ================= RENDERIZAÇÃO PÓS-CÁLCULO POR EMPRESA ================
+df_final = st.session_state.get(f"df_final_{empresa}")
+painel   = st.session_state.get(f"painel_{empresa}")
+
+if df_final is not None:
+    base = df_final.copy()
+
+    # Painel
+    st.subheader(f"📊 Painel de Estoques — {empresa}")
+    cA, cB, cC, cD = st.columns(4)
+    cA.metric("Full (un)",  f"{painel['full_unid']:,}".replace(",", "."))
+    cB.metric("Full (R$)",  f"R$ {painel['full_valor']:,.2f}")
+    cC.metric("Físico (un)",f"{painel['fisico_unid']:,}".replace(",", "."))
+    cD.metric("Físico (R$)",f"R$ {painel['fisico_valor']:,.2f}")
+
+    st.divider()
+
+    # ===== Semanais (organização)
+    all_skus = sorted(base["SKU"].unique().tolist())
+    sem_key = f"semanais_{empresa}"
+
+    st.markdown("### 📅 Semanais (organização)")
+    with st.expander(f"{empresa}: Gerenciar SKUs semanais", expanded=False):
+        sel = st.multiselect("Selecionar SKUs", all_skus, help="Somente organização/planejamento. Não altera cálculo.")
+        c1, c2, c3 = st.columns([1,1,2])
+        with c1:
+            if st.button("➕ Adicionar aos semanais"):
+                st.session_state[sem_key].update(sel)
+                autosave_if_on()
+                st.success(f"{len(sel)} SKU(s) adicionados.")
+        with c2:
+            if st.button("➖ Remover dos semanais"):
+                st.session_state[sem_key].difference_update(sel)
+                autosave_if_on()
+                st.info(f"{len(sel)} SKU(s) removidos.")
+
+        atuais = sorted(list(st.session_state[sem_key]))
+        st.caption(f"Atuais: {len(atuais)} SKU(s) semanais")
+        if atuais:
+            st.markdown('<div class="semanais-box">' + " ".join([f'<span class="badge">{x}</span>' for x in atuais]) + "</div>", unsafe_allow_html=True)
+
+    st.session_state.mostrar_so_semanais = st.checkbox("Mostrar apenas SKUs semanais", value=st.session_state.mostrar_so_semanais)
+
+    # ===== Filtro por Fornecedor
+    fornecedores = sorted(base["fornecedor"].fillna("").unique())
+    sel_fornec = st.multiselect("Filtrar por Fornecedor", fornecedores, key=f"filt_fornec_{empresa}")
+
+    mostra = base if not sel_fornec else base[base["fornecedor"].isin(sel_fornec)]
+
+    if st.session_state.mostrar_so_semanais:
+        mostra = mostra[mostra["SKU"].isin(st.session_state[sem_key])]
+
+    # ===== Compras manuais do mês (saldo)
+    st.markdown("---")
+    st.subheader(f"📝 Compras manuais do mês — {empresa} (sem subir planilha)")
+    c1, c2, c3 = st.columns([2,1,1])
+    with c1:
+        sku_m = st.selectbox("SKU", sorted(all_skus), key=f"cmp_sku_{empresa}")
+    with c2:
+        qtd_m = st.number_input("Quantidade", min_value=1, step=1, value=1, key=f"cmp_qtd_{empresa}")
+    with c3:
+        data_m = st.date_input("Data", value=dt.date.today(), key=f"cmp_data_{empresa}")
+
+    if st.button("Adicionar compra manual"):
+        st.session_state[f"compras_{empresa}"].append({"sku": sku_m, "qtd": int(qtd_m), "data": str(data_m)})
+        autosave_if_on()
+        st.success("Compra registrada.")
+    if st.button("Limpar compras manuais do mês"):
+        st.session_state[f"compras_{empresa}"] = []
+        autosave_if_on()
+        st.info("Limpo.")
+
+    # Aplica saldo de compras manuais ao resultado do mês corrente (deduz da Compra_Sugerida)
+    if st.session_state[f"compras_{empresa}"]:
+        mov = pd.DataFrame(st.session_state[f"compras_{empresa}"])
+        mov["sku"] = mov["sku"].map(norm_sku)
+        mov["qtd"] = mov["qtd"].astype(int)
+        mov_agg = mov.groupby("sku", as_index=False)["qtd"].sum().rename(columns={"sku":"SKU","qtd":"Comprado_Manual_Mes"})
+        mostra = mostra.merge(mov_agg, on="SKU", how="left")
+        mostra["Comprado_Manual_Mes"] = mostra["Comprado_Manual_Mes"].fillna(0).astype(int)
+        mostra["Compra_Sugerida"] = (mostra["Compra_Sugerida"] - mostra["Comprado_Manual_Mes"]).clip(lower=0)
+        mostra["Valor_Compra_R$"] = (mostra["Compra_Sugerida"].astype(float) * mostra["Preco"].astype(float)).round(2)
+
+    # ===== Prévia por SKU
+    with st.expander(f"🔎 Prévia por SKU ({empresa})"):
+        sku_opts = sorted(mostra["SKU"].unique())
+        sel_skus = st.multiselect("Escolha 1 ou mais SKUs", sku_opts, key=f"filt_sku_prev_{empresa}")
+        prev = mostra if not sel_skus else mostra[mostra["SKU"].isin(sel_skus)]
         st.dataframe(
-            saldo[["SKU","fornecedor","Compra_Planejada","Comprado","Saldo_A_Comprar","Preco","data_criacao","data_limite"]],
-            use_container_width=True
+            prev[[
+                "SKU","fornecedor","ML_60d","Shopee_60d","TOTAL_60d",
+                "Estoque_Fisico","Reserva_30d","Folga_Fisico",
+                "Necessidade","Compra_Sugerida","Preco"
+            ]],
+            use_container_width=True,
+            height=380
         )
-        return edited, saldo
-    else:
-        st.info(f"Sem plano salvo para {EMPRESA}. Gere e clique 'Salvar plano do mês — {EMPRESA}'.")
-        return edited, pd.DataFrame()
+        st.caption("Compra = Necessidade − Folga (nunca negativa). Vendas 60d já explodidas e Shopee normalizada.")
 
-colL, colR = st.columns(2)
-with colL:
-    comp_a, saldo_a = editor_compras("ALIVVIA")
-with colR:
-    comp_j, saldo_j = editor_compras("JCA")
+    st.subheader(f"Itens para comprar — {empresa} (copiável)")
+    st.dataframe(
+        mostra[mostra["Compra_Sugerida"] > 0][[
+            "SKU","fornecedor","Vendas_h_ML","Vendas_h_Shopee",
+            "Estoque_Fisico","Preco","Compra_Sugerida","Valor_Compra_R$"
+        ]],
+        use_container_width=True
+    )
 
-st.subheader("📤 Exportar Plano/Compras/Saldo — ambas empresas")
-if st.button("Exportar XLSX consolidado (abas separadas por empresa)"):
-    snaps = {"ALIVVIA": st.session_state.get("ALIVVIA_snapshot"),
-             "JCA":     st.session_state.get("JCA_snapshot")}
-    compras = {"ALIVVIA": st.session_state.get("ALIVVIA_compras"),
-               "JCA":     st.session_state.get("JCA_compras")}
-    saldos  = {"ALIVVIA": saldo_a, "JCA": saldo_j}
-    x = exportar_plano_compras_saldo(snaps, compras, saldos)
-    st.download_button("Baixar Plano_Compras_Saldo.xlsx", x,
-                       file_name="Plano_Compras_Saldo.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    compra_total = int(mostra["Compra_Sugerida"].sum())
+    valor_total  = float(mostra["Valor_Compra_R$"].sum())
+    st.success(f"{len(mostra[mostra['Compra_Sugerida']>0])} SKUs com compra > 0 | Compra total: {compra_total} un | Valor: R$ {valor_total:,.2f}")
 
-st.caption("© Alivvia — simples, robusto e auditável. Empresas separadas, sem misturar estoques nem compras.")
+    st.subheader("Exportação XLSX (Lista_Final + Controle)")
+    if st.checkbox("Gerar planilha XLSX com hash e sanity (sem recálculo)?", key=f"chk_export_{empresa}"):
+        try:
+            xlsx_bytes = exportar_xlsx(mostra, h=h, params={"g": g, "LT": LT, "empresa": empresa})
+            st.download_button(
+                label=f"Baixar XLSX — Compra_Sugerida_{empresa}_{h}d.xlsx",
+                data=xlsx_bytes,
+                file_name=f"Compra_Sugerida_{empresa}_{h}d.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"btn_dl_{empresa}"
+            )
+            st.info("Planilha gerada a partir do mesmo DataFrame exibido (paridade garantida).")
+        except Exception as e:
+            st.error(f"Exportação bloqueada pela Auditoria: {e}")
+
+st.caption("© Alivvia — simples, robusto e auditável.")
