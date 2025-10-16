@@ -1,408 +1,307 @@
 # -*- coding: utf-8 -*-
 import io
-import os
-import math
-import time
-import zipfile
+import re
 import requests
 import numpy as np
 import pandas as pd
+from unidecode import unidecode
 import streamlit as st
 
-# =============== CONFIGS RÁPIDAS ===============
-# ID da sua planilha de Padrão (KITS/CAT) no Google Sheets (a MESMA que você vem usando)
-GSHEET_ID_PADRAO = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"  # troque se quiser
-# Nome do arquivo local padrão (se existir na pasta, será usado)
-PADRAO_LOCAL = "Padrao_produtos.xlsx"
-# =============================================
-
+# =========================================================
+# CONFIGURAÇÕES
+# =========================================================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
-# ---------- helpers ----------
-def read_any_table(file, **kwargs):
-    """Lê CSV/XLS/XLSX automaticamente."""
-    name = file.name if hasattr(file, "name") else str(file)
-    lower = name.lower()
-    if lower.endswith(".csv"):
-        return pd.read_csv(file, **kwargs)
-    elif lower.endswith(".xlsx") or lower.endswith(".xls"):
-        return pd.read_excel(file, **kwargs)
-    else:
-        # tenta Excel por padrão
-        try:
-            return pd.read_excel(file, **kwargs)
-        except Exception:
-            return pd.read_csv(file, **kwargs)
+# >>>>>>>>>>>> PLANILHA FIXA (SUA) — NÃO PRECISA PREENCHER NADA <<<<<<<<<<<<<
+SHEET_ID_DEFAULT = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"  # <-- sua planilha fixa
 
-def to_number(x):
-    try:
-        if pd.isna(x): 
-            return 0.0
-        s = str(x).replace(".", "").replace(",", ".")
-        return float(s)
-    except Exception:
-        try:
-            return float(x)
-        except Exception:
-            return 0.0
+# Nomes de abas esperadas no Google Sheets
+TAB_KITS = "KITS"
+TAB_CAT = "CATALOGO_SIMPLES"
 
-def baixar_padroes_do_drive(gsheet_id: str) -> bytes:
-    """
-    Baixa a planilha Google Sheets (arquivo inteiro) via export endpoint em XLSX.
-    """
-    export_url = f"https://docs.google.com/spreadsheets/d/{gsheet_id}/export?format=xlsx"
-    r = requests.get(export_url, timeout=30)
+# =========================================================
+# FUNÇÕES UTILITÁRIAS
+# =========================================================
+def _norm(s: str) -> str:
+    if s is None:
+        return ""
+    s = unidecode(str(s)).strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+def _read_google_sheet_xlsx(sheet_id: str) -> bytes:
+    """Baixa toda a planilha Google Sheets como XLSX."""
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+    r = requests.get(url, timeout=30)
     r.raise_for_status()
     return r.content
 
-def garantir_padroes_em_memoria():
-    """
-    Tenta ler o padrão (KITS/CAT) local; se não tiver, usa o de sessão;
-    se não tiver também, tenta baixar do Google.
-    """
-    # 1) Local
-    if os.path.exists(PADRAO_LOCAL):
+def _read_sheet_tab(xlsx_bytes: bytes, sheet_name: str) -> pd.DataFrame:
+    """Lê uma aba específica como DataFrame."""
+    with io.BytesIO(xlsx_bytes) as fh:
         try:
-            xf = pd.ExcelFile(PADRAO_LOCAL)
-            return xf
+            df = pd.read_excel(fh, sheet_name=sheet_name, engine="openpyxl")
         except Exception:
-            pass
+            df = pd.read_excel(fh, sheet_name=sheet_name)
+    return df
 
-    # 2) Sessão (em bytes)
-    if "padrao_bytes" in st.session_state and st.session_state["padrao_bytes"]:
-        try:
-            bio = io.BytesIO(st.session_state["padrao_bytes"])
-            xf = pd.ExcelFile(bio)
-            return xf
-        except Exception:
-            pass
-
-    # 3) Google (download)
-    try:
-        content = baixar_padroes_do_drive(st.session_state.get("PADRAO_GSHEET_ID", GSHEET_ID_PADRAO))
-        st.session_state["padrao_bytes"] = content
-        return pd.ExcelFile(io.BytesIO(content))
-    except Exception as e:
-        st.info("Use o botão **Baixar padrão** ou mantenha um `Padrao_produtos.xlsx` na mesma pasta do app.")
-        return None
-
-def montar_padroes(xf: pd.ExcelFile):
+def _try_map_columns(df: pd.DataFrame, mapping: dict, required: list, ctx: str):
     """
-    Lê as abas KITS e CATALOGO_SIMPLES (se existirem) do padrão.
+    Faz mapeamento tolerante de colunas para padronizar nomes.
+    mapping = {destino: [possiveis_nomes]}
+    required = ['sku', ...]
+    ctx = contexto para mensagem de erro.
     """
-    kits = None
-    cat  = None
-    for name in xf.sheet_names:
-        lname = name.strip().lower()
-        if "kit" in lname:
-            try:
-                kits = xf.parse(name)
-            except Exception:
-                pass
-        if "catalogo" in lname or "catálogo" in lname or "catalogo_simples" in lname:
-            try:
-                cat = xf.parse(name)
-            except Exception:
-                pass
-    return kits, cat
-
-def padronizar_catalogo(cat: pd.DataFrame) -> pd.DataFrame:
-    """
-    Tenta padronizar catálogo mínimo: sku, fornecedor, preco (se existir).
-    """
-    if cat is None or cat.empty:
-        return pd.DataFrame(columns=["sku", "fornecedor"])
-
-    df = cat.copy()
-    cols = [c.lower() for c in df.columns]
-    df.columns = cols
-
-    # tenta encontrar colunas prováveis
-    # sku
-    if "sku" not in df.columns:
-        # tenta synonyms
-        for c in ["codigo", "código", "produto", "sku_id", "id"]:
-            if c in df.columns:
-                df["sku"] = df[c].astype(str)
+    cols = {_norm(c): c for c in df.columns}
+    new_cols = {}
+    for dest, options in mapping.items():
+        achou = None
+        for opt in options:
+            optn = _norm(opt)
+            # match exato
+            if optn in cols:
+                achou = cols[optn]
                 break
-    else:
-        df["sku"] = df["sku"].astype(str)
-
-    # fornecedor
-    if "fornecedor" not in df.columns:
-        for c in ["vendor", "fabricante", "marca"]:
-            if c in df.columns:
-                df["fornecedor"] = df[c].astype(str)
+            # match por "contém"
+            for k_norm, k_raw in cols.items():
+                if optn in k_norm:
+                    achou = k_raw
+                    break
+            if achou:
                 break
-    if "fornecedor" not in df.columns:
-        df["fornecedor"] = ""
+        if achou:
+            new_cols[achou] = dest
 
-    # preço (opcional)
-    if "preco" not in df.columns:
-        for c in ["preço", "price", "valor", "vl"]:
-            if c in df.columns:
-                df["preco"] = df[c].apply(to_number)
-                break
-    if "preco" not in df.columns:
-        df["preco"] = np.nan
+    df2 = df.rename(columns=new_cols).copy()
+    faltantes = [c for c in required if c not in df2.columns]
+    if faltantes:
+        raise KeyError(
+            f"Colunas obrigatórias ausentes em {ctx}: {faltantes}\n"
+            f"Colunas lidas: {list(df.columns)}"
+        )
+    return df2
 
-    return df[["sku", "fornecedor", "preco"]].copy()
-
-def padronizar_estoque(df: pd.DataFrame) -> pd.DataFrame:
+# ---------------------------------------------------------
+# LEITURA DO GOOGLE SHEETS (sempre)
+# ---------------------------------------------------------
+@st.cache_data(show_spinner=False, ttl=5*60)
+def carregar_kits_catalogo(sheet_id: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Espera coluna 'sku' e 'estoque' (ou parecidas).
+    Sempre baixa do Google Sheets (xlsx) e devolve (kits, catalogo).
     """
-    if df is None or df.empty:
+    xlsx = _read_google_sheet_xlsx(sheet_id)
+    kits = _read_sheet_tab(xlsx, TAB_KITS)
+    catalogo = _read_sheet_tab(xlsx, TAB_CAT)
+
+    kits_map = {
+        "kit_sku": ["kit_sku", "sku_kit", "sku kit"],
+        "component_sku": ["component_sku", "sku_componente", "componente", "component", "sku componente"],
+        "qty_por_kit": ["qty_por_kit", "quantidade", "qtd_por_kit", "qtd", "quantidade_por_kit"]
+    }
+    kits = _try_map_columns(kits, kits_map, ["kit_sku", "component_sku", "qty_por_kit"], "KITS")
+
+    cat_map = {
+        "sku": ["sku", "codigo", "codigo_sku", "id_sku", "produto"],
+        "fornecedor": ["fornecedor", "vendor", "fabricante", "marca"],
+        "preco": ["preco", "valor", "custo", "preco_unitario"]
+    }
+    catalogo = _try_map_columns(catalogo, cat_map, ["sku", "fornecedor", "preco"], "CATALOGO")
+
+    # Normalizações
+    for col in ["kit_sku", "component_sku", "sku", "fornecedor"]:
+        if col in kits.columns:
+            kits[col] = kits[col].astype(str).str.strip()
+        if col in catalogo.columns:
+            catalogo[col] = catalogo[col].astype(str).str.strip()
+
+    if "qty_por_kit" in kits.columns:
+        catalogo["preco"] = pd.to_numeric(catalogo["preco"], errors="coerce").fillna(0.0)
+        kits["qty_por_kit"] = pd.to_numeric(kits["qty_por_kit"], errors="coerce").fillna(0).astype(int)
+
+    return kits, catalogo
+
+# ---------------------------------------------------------
+# UPLOADS
+# ---------------------------------------------------------
+def ler_full(file) -> pd.DataFrame:
+    """ FULL (Magiic) — vendas por anúncio/SKU (últimos 60d). """
+    if file is None:
+        return pd.DataFrame(columns=["sku", "qtd"])
+    df = pd.read_csv(file, sep=None, engine="python") if file.name.lower().endswith(".csv") else pd.read_excel(file)
+    mapa = {
+        "sku": ["sku", "codigo", "sku_anuncio", "sku produto", "id_sku", "anuncio_sku"],
+        "qtd": ["qtd", "quantidade", "qtd_vendida", "vendido", "sold"]
+    }
+    df = _try_map_columns(df, mapa, ["sku", "qtd"], "FULL (Magiic)")
+    df["sku"] = df["sku"].astype(str).str.strip()
+    df["qtd"] = pd.to_numeric(df["qtd"], errors="coerce").fillna(0).astype(int)
+    return df[["sku", "qtd"]]
+
+def ler_estoque(file) -> pd.DataFrame:
+    """ Estoque físico — saldo por SKU. """
+    if file is None:
         return pd.DataFrame(columns=["sku", "estoque"])
+    df = pd.read_csv(file, sep=None, engine="python") if file.name.lower().endswith(".csv") else pd.read_excel(file)
+    mapa = {
+        "sku": ["sku", "codigo", "id_sku", "produto"],
+        "estoque": ["estoque", "saldo", "qtde", "quantidade", "stock"]
+    }
+    df = _try_map_columns(df, mapa, ["sku", "estoque"], "Estoque Físico")
+    df["sku"] = df["sku"].astype(str).str.strip()
+    df["estoque"] = pd.to_numeric(df["estoque"], errors="coerce").fillna(0).astype(int)
+    return df[["sku", "estoque"]]
 
-    d = df.copy()
-    d.columns = [c.lower() for c in d.columns]
+def ler_shopee(file) -> pd.DataFrame:
+    """ Shopee/Mercado Turbo — vendas por SKU (opcional). """
+    if file is None:
+        return pd.DataFrame(columns=["sku", "qtd"])
+    df = pd.read_csv(file, sep=None, engine="python") if file.name.lower().endswith(".csv") else pd.read_excel(file)
+    mapa = {
+        "sku": ["sku", "codigo", "id_sku", "produto"],
+        "qtd": ["qtd", "quantidade", "vendido", "qty"]
+    }
+    df = _try_map_columns(df, mapa, ["sku", "qtd"], "Shopee/Mercado Turbo")
+    df["sku"] = df["sku"].astype(str).str.strip()
+    df["qtd"] = pd.to_numeric(df["qtd"], errors="coerce").fillna(0).astype(int)
+    return df[["sku", "qtd"]]
 
-    # sku
-    if "sku" not in d.columns:
-        for c in ["codigo", "código", "produto", "id", "ean"]:
-            if c in d.columns:
-                d["sku"] = d[c].astype(str)
-                break
-    else:
-        d["sku"] = d["sku"].astype(str)
-
-    # estoque
-    if "estoque" not in d.columns:
-        for c in ["qtd", "quantidade", "saldo", "stock", "qty"]:
-            if c in d.columns:
-                d["estoque"] = d[c].apply(to_number)
-                break
-    if "estoque" not in d.columns:
-        d["estoque"] = 0
-
-    return d[["sku", "estoque"]].groupby("sku", as_index=False)["estoque"].sum()
-
-def padronizar_vendas(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Espera 'sku' e 'vendas_60d' (ou algo convertível).
-    """
-    if df is None or df.empty:
-        return pd.DataFrame(columns=["sku", "vendas_60d"])
-
-    d = df.copy()
-    d.columns = [c.lower() for c in d.columns]
-
-    if "sku" not in d.columns:
-        for c in ["codigo", "código", "produto", "id", "ean"]:
-            if c in d.columns:
-                d["sku"] = d[c].astype(str)
-                break
-    else:
-        d["sku"] = d["sku"].astype(str)
-
-    # tenta vendas no horizonte 60d
-    vcol = None
-    for c in ["vendas_60d", "vendas60", "vendas", "qty_sold", "qtd_vendida", "vendidos"]:
-        if c in d.columns:
-            vcol = c
-            break
-
-    if vcol is None:
-        # se tiver datas, etc… mas vamos só pôr zeros
-        d["vendas_60d"] = 0.0
-    else:
-        d["vendas_60d"] = d[vcol].apply(to_number)
-
-    return d[["sku", "vendas_60d"]].groupby("sku", as_index=False)["vendas_60d"].sum()
-
-def calcular_compra(estoque: pd.DataFrame,
-                    vendas: pd.DataFrame,
+# ---------------------------------------------------------
+# CÁLCULO SIMPLIFICADO DE REPOSIÇÃO
+# ---------------------------------------------------------
+def calcular_compra(df_vendas: pd.DataFrame,
+                    df_estoque: pd.DataFrame,
                     catalogo: pd.DataFrame,
                     horizonte_dias: int,
                     crescimento_pct: float,
-                    leadtime_dias: int):
+                    lead_time_dias: int) -> pd.DataFrame:
     """
-    Regra simples:
-    demanda = (vendas_60d/60) * horizonte * (1+%crescimento) - estoque
-    compra = max(ceil(demanda), 0)
+    Consumo médio diário = vendas_60d / 60
+    Aplica crescimento (% ao mês)
+    Estoque alvo = consumo * (horizonte + lead_time)
+    Compra = max(alvo - estoque, 0)
     """
-    base = pd.merge(catalogo, estoque, on="sku", how="left")
-    base = pd.merge(base, vendas, on="sku", how="left")
+    vendas = df_vendas.groupby("sku", as_index=False)["qtd"].sum().rename(columns={"qtd": "vendas_60d"})
+    estoque = df_estoque.groupby("sku", as_index=False)["estoque"].sum()
+    base = pd.merge(catalogo, vendas, on="sku", how="left")
+    base = pd.merge(base, estoque, on="sku", how="left")
 
-    base["estoque"]   = base["estoque"].fillna(0.0)
-    base["vendas_60d"] = base["vendas_60d"].fillna(0.0)
+    base["vendas_60d"] = base["vendas_60d"].fillna(0).astype(float)
+    base["estoque"] = base["estoque"].fillna(0).astype(float)
 
-    # previsão simples
-    vendas_diarias = base["vendas_60d"] / 60.0
-    fator = 1.0 + (crescimento_pct / 100.0)
-    demanda = vendas_diarias * float(horizonte_dias + leadtime_dias) * fator
+    consumo_dia = base["vendas_60d"] / 60.0
+    fator_cresc = (1.0 + (crescimento_pct / 100.0))
+    consumo_dia_aj = consumo_dia * fator_cresc
+    alvo = consumo_dia_aj * float(horizonte_dias + lead_time_dias)
+    sugerir = np.maximum(alvo - base["estoque"], 0.0)
 
-    base["demanda"] = demanda
-    base["compra_sugerida"] = np.maximum(np.ceil(base["demanda"] - base["estoque"]), 0).astype(int)
+    base["consumo_dia"] = consumo_dia_aj.round(4)
+    base["estoque_alvo"] = alvo.round(2)
+    base["sugestao_compra"] = np.floor(sugerir).astype(int)
+    base["custo_previsto"] = (base["sugestao_compra"] * base["preco"]).round(2)
 
-    cols_ordem = ["sku", "fornecedor", "preco", "estoque", "vendas_60d", "demanda", "compra_sugerida"]
-    for c in cols_ordem:
-        if c not in base.columns:
-            base[c] = np.nan
-    base = base[cols_ordem].copy()
+    cols = ["sku", "fornecedor", "preco", "vendas_60d", "estoque", "consumo_dia",
+            "estoque_alvo", "sugestao_compra", "custo_previsto"]
+    return base[cols].sort_values(["fornecedor", "sku"]).reset_index(drop=True)
 
-    # totas simplórios por fornecedor já saem via filtro; não exibimos resumo
-    return base
+# =========================================================
+# UI
+# =========================================================
+st.title("Reposição Logística — Alivvia")
 
-
-# ---------- SIDEBAR ----------
+# Parâmetros
 with st.sidebar:
     st.header("Parâmetros")
 
-    horizonte = st.number_input("Horizonte (dias)", min_value=7, max_value=120, value=60, step=1)
-    cresc_pct = st.number_input("Crescimento % ao mês", min_value=-100.0, max_value=500.0, value=0.0, step=0.5, format="%.2f")
-    leadtime  = st.number_input("Lead time (dias)", min_value=0, max_value=60, value=0, step=1)
+    horizonte = st.number_input("Horizonte (dias)", min_value=1, max_value=180, value=60, step=1)
+    crescimento = st.number_input("Crescimento % ao mês", min_value=-100.0, max_value=300.0, value=0.0, step=0.5)
+    lead = st.number_input("Lead time (dias)", min_value=0, max_value=60, value=0, step=1)
 
-    st.markdown("**Arquivo local opcional:**")
-    if os.path.exists(PADRAO_LOCAL):
-        st.success(f"{PADRAO_LOCAL}", icon="📄")
-    else:
-        st.info(f"Se existir `{PADRAO_LOCAL}` na pasta, será usado como padrão.", icon="ℹ️")
+    st.markdown("---")
+    st.subheader("Padrão (KITS/CAT) do Google Sheets")
+    # Planilha fixa (não edita ID)
+    colb1, colb2 = st.columns([1,1])
+    with colb1:
+        st.markdown(
+            f"[🔗 Abrir no Drive](https://docs.google.com/spreadsheets/d/{SHEET_ID_DEFAULT}/edit)",
+            unsafe_allow_html=True
+        )
+    with colb2:
+        if st.button("Recarregar padrão"):
+            carregar_kits_catalogo.clear()
 
-    st.markdown("**Padrão (KITS/CAT) por link**")
+# Empresa (apenas visual)
+empresa = st.radio("Empresa ativa", ["ALIVVIA", "JCA"], horizontal=True)
 
-    # Guardamos o ID no estado (para você não precisar digitar sempre)
-    st.session_state.setdefault("PADRAO_GSHEET_ID", GSHEET_ID_PADRAO)
+# Sempre carrega do Google Sheets FIXO
+try:
+    kits_df, cat_df = carregar_kits_catalogo(SHEET_ID_DEFAULT)
+except Exception as e:
+    st.error(f"Falha ao carregar o padrão do Google Sheets: {e}")
+    st.stop()
 
-    st.text_input("ID da planilha (Google Sheets):",
-                  value=st.session_state["PADRAO_GSHEET_ID"],
-                  key="PADRAO_GSHEET_ID")
-
-    cols_btn = st.columns([1, 1])
-    with cols_btn[0]:
-        if st.button("🔗 Abrir no Drive (editar)"):
-            url_edit = f"https://docs.google.com/spreadsheets/d/{st.session_state['PADRAO_GSHEET_ID']}/edit#gid=0"
-            st.markdown(f"[Abrir planilha no Drive]({url_edit})")
-    with cols_btn[1]:
-        if st.button("⬇️ Baixar padrão"):
-            try:
-                content = baixar_padroes_do_drive(st.session_state["PADRAO_GSHEET_ID"])
-                st.session_state["padrao_bytes"] = content
-                st.success("Padrão baixado com sucesso em memória!")
-            except Exception as e:
-                st.error(f"Falha ao baixar: {e}")
-
-# ---------- TÍTULO ----------
-st.title("Reposição Logística — Alivvia")
-st.caption("FULL por anúncio; compra por componente; Shopee explode antes; painel de estoques; prévia por SKU; filtro por fornecedor. Resultados ficam em memória (sem recálculo automático).")
-
-# ---------- UPLOADS ----------
-st.subheader("Uploads")
+# Uploads
+st.subheader(f"Uploads — {empresa}")
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    st.markdown("**FULL (Magiic)**")
-    up_full = st.file_uploader("Arraste/Selecione (CSV/XLSX/XLS)", type=["csv", "xlsx", "xls"], key="fullu")
+    st.caption("FULL (Magiic) — vendas por SKU")
+    up_full = st.file_uploader("Arraste/Selecione (CSV/XLSX/XLS)", type=["csv", "xlsx", "xls"], key="full_up")
 
 with col2:
-    st.markdown("**Estoque Físico (CSV/XLSX/XLS)**")
-    up_estoque = st.file_uploader("Arraste/Selecione (CSV/XLSX/XLS)", type=["csv", "xlsx", "xls"], key="estq")
+    st.caption("Estoque Físico — saldo por SKU")
+    up_estoque = st.file_uploader("Arraste/Selecione (CSV/XLSX/XLS)", type=["csv", "xlsx", "xls"], key="est_up")
 
 with col3:
-    st.markdown("**Shopee / Mercado Turbo (vendas por SKU)**")
-    up_vendas = st.file_uploader("Arraste/Selecione (CSV/XLSX/XLS)", type=["csv", "xlsx", "xls"], key="vend")
+    st.caption("Shopee / Mercado Turbo — vendas por SKU (opcional)")
+    up_shopee = st.file_uploader("Arraste/Selecione (CSV/XLSX/XLS)", type=["csv", "xlsx", "xls"], key="shop_up")
 
-# ---------- LEITURA PADRÃO ----------
-xf = garantir_padroes_em_memoria()
-kits, cat = (None, None)
-if xf is not None:
-    try:
-        kits, cat = montar_padroes(xf)
-    except Exception:
-        kits, cat = (None, None)
+df_full = ler_full(up_full)
+df_shop = ler_shopee(up_shopee)
+df_estoque = ler_estoque(up_estoque)
 
-catalogo = padronizar_catalogo(cat)
-
-# ---------- LEITURA FULL/ESTOQUE/VENDAS ----------
-df_estq = pd.DataFrame(columns=["sku", "estoque"])
-df_vend = pd.DataFrame(columns=["sku", "vendas_60d"])
-
-if up_estoque is not None:
-    try:
-        df_estq = padronizar_estoque(read_any_table(up_estoque))
-    except Exception as e:
-        st.warning(f"Não consegui ler ESTOQUE: {e}")
-
-if up_vendas is not None:
-    try:
-        df_vend = padronizar_vendas(read_any_table(up_vendas))
-    except Exception as e:
-        st.warning(f"Não consegui ler VENDAS: {e}")
-
-# FULL não é obrigatório aqui (muitos times não precisam dele para o cálculo simples).
-# Se quiser, você pode usar o FULL para enriquecer, mas vamos ignorar por simplicidade robusta.
-
-# ---------- CÁLCULO ----------
-if catalogo is None or catalogo.empty:
-    st.error("Catálogo do padrão vazio/ausente. Abra/baixe o padrão e tente novamente.")
+# Consolida vendas
+df_vendas = pd.concat([df_full, df_shop], ignore_index=True) if not df_shop.empty else df_full.copy()
+if df_vendas.empty and df_estoque.empty:
+    st.info("Envie pelo menos FULL (vendas) e Estoque para gerar a compra.")
     st.stop()
 
-df_final = calcular_compra(
-    estoque=df_estq,
-    vendas=df_vend,
-    catalogo=catalogo,
-    horizonte_dias=int(horizonte),
-    crescimento_pct=float(cresc_pct),
-    leadtime_dias=int(leadtime),
-)
+st.markdown("—")
 
-# ---------- FILTROS (Fornecedor / SKU) ----------
-st.subheader("Filtros")
+# Botão gerar
+if st.button(f"Gerar Compra — {empresa}"):
+    try:
+        resultado = calcular_compra(
+            df_vendas=df_vendas,
+            df_estoque=df_estoque,
+            catalogo=cat_df,
+            horizonte_dias=int(horizonte),
+            crescimento_pct=float(crescimento),
+            lead_time_dias=int(lead),
+        )
+    except KeyError as e:
+        st.error(f"Erro de cabeçalho: {e}")
+        st.stop()
 
-colf1, colf2 = st.columns([1, 1])
+    st.success("Compra gerada!")
 
-with colf1:
-    fornecedores = sorted(df_final["fornecedor"].fillna("").astype(str).unique(), key=lambda s: s.lower())
-    sel_fornec = st.multiselect("Filtrar por fornecedor (opcional)", options=fornecedores, default=[])
+    # Filtros: fornecedor e SKU (autocomplete)
+    st.subheader("Filtros")
+    fornecedores = sorted(resultado["fornecedor"].dropna().unique().tolist())
+    f_sel = st.multiselect("Filtrar por fornecedor", fornecedores, placeholder="Escolha fornecedores…")
 
-with colf2:
-    skus = sorted(df_final["sku"].fillna("").astype(str).unique(), key=lambda s: s.lower())
-    sel_skus = st.multiselect("Filtrar por SKU (opcional)", options=skus, default=[])
+    skus = sorted(resultado["sku"].dropna().unique().tolist())
+    sku_sel = st.multiselect("Buscar SKU(s)", skus, placeholder="Digite para buscar…")
 
-df_view = df_final.copy()
-if sel_fornec:
-    df_view = df_view[df_view["fornecedor"].astype(str).isin(sel_fornec)]
-if sel_skus:
-    df_view = df_view[df_view["sku"].astype(str).isin(sel_skus)]
+    df_view = resultado.copy()
+    if f_sel:
+        df_view = df_view[df_view["fornecedor"].isin(f_sel)]
+    if sku_sel:
+        df_view = df_view[df_view["sku"].isin(sku_sel)]
 
-# ---------- PRÉVIA (tabela principal) ----------
-st.subheader("Prévia (após filtros)")
-st.dataframe(
-    df_view.style.format({
-        "preco": "R$ {:.2f}",
-        "estoque": "{:.0f}",
-        "vendas_60d": "{:.0f}",
-        "demanda": "{:.1f}",
-        "compra_sugerida": "{:.0f}",
-    }),
-    use_container_width=True,
-    height=480
-)
+    st.dataframe(df_view, use_container_width=True, hide_index=True)
 
-# ---------- EXPORT ----------
-st.markdown("---")
-colx1, colx2 = st.columns([1, 1])
-with colx1:
-    st.download_button(
-        "💾 Baixar compra (CSV)",
-        data=df_view.to_csv(index=False).encode("utf-8"),
-        file_name="compra_sugerida.csv",
-        mime="text/csv",
-    )
-with colx2:
-    st.download_button(
-        "📗 Baixar compra (XLSX)",
-        data=lambda: _to_xlsx_bytes(df_view),
-        file_name="compra_sugerida.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-# util p/ xlsx
-def _to_xlsx_bytes(df: pd.DataFrame) -> bytes:
-    bio = io.BytesIO()
-    with pd.ExcelWriter(bio, engine="xlsxwriter") as w:
-        df.to_excel(w, index=False, sheet_name="Compra")
-        w.book.close()
-    bio.seek(0)
-    return bio.getvalue()
+    # Exportar CSV
+    csv = df_view.to_csv(index=False).encode("utf-8-sig")
+    st.download_button("Baixar CSV da compra", data=csv, file_name=f"compra_{empresa.lower()}.csv", mime="text/csv")
+else:
+    st.caption("Preencha os uploads e clique em **Gerar Compra**.")
