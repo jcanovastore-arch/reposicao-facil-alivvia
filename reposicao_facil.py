@@ -1,114 +1,44 @@
 # Reposição Logística — Alivvia (Streamlit)
 # FULL por anúncio; compra por componente; Shopee explode antes; painel de estoques;
-# prévia por SKU; filtro por fornecedor. Resultados por EMPRESA, sem recálculo ao filtrar.
+# prévia por SKU; filtro por fornecedor. Resultados ficam em session_state (sem recálculo).
 
 import os
 import io
-import json
 import hashlib
 import datetime as dt
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-import requests
 from unidecode import unidecode
 import streamlit as st
+import requests
 
 # ============================
-# Configurações gerais
+# Google Sheets (Padrão KITS/CAT)
 # ============================
-st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
-
-# Estado persistente (JSON local)
-APP_STATE_FILE = "estado_app.json"       # salva automaticamente (por empresa)
-EMPRESAS = ["ALIVVIA", "JCA"]            # duas empresas separadas
+# ID da SUA planilha do Google Sheets
+SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"
+PADRAO_URL_EDIT   = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit"
+PADRAO_URL_EXPORT = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=xlsx"
 PADRAO_LOCAL_NOME = "Padrao_produtos.xlsx"
 
-# Google Sheets - seu ID padrão (pode editar se trocar de planilha no futuro)
-SHEET_ID_DEFAULT = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"
-PADRAO_URL_EDIT_BASE   = "https://docs.google.com/spreadsheets/d/{}/edit"
-PADRAO_URL_EXPORT_BASE = "https://docs.google.com/spreadsheets/d/{}/export?format=xlsx"
-
-
-# ============================
-# Helpers de estado (persistência)
-# ============================
-def _load_json(path: str) -> dict:
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-def _save_json(path: str, data: dict):
+def baixar_padrao_do_drive(url_export: str, destino: str):
+    """Baixa o XLSX público do Google Sheets e salva em `destino`.
+    Sempre retorna exatamente (ok: bool, msg: str)."""
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        st.warning(f"Não consegui salvar estado: {e}")
-
-def get_state() -> dict:
-    if "STATE" not in st.session_state:
-        st.session_state.STATE = _load_json(APP_STATE_FILE) or {}
-        # estrutura base
-        for emp in EMPRESAS:
-            st.session_state.STATE.setdefault(emp, {})
-            st.session_state.STATE[emp].setdefault("compras_manuais", [])   # compras digitadas
-            st.session_state.STATE[emp].setdefault("semanais", [])          # lista de SKUs semanais
-        # global
-        st.session_state.STATE.setdefault("gsheet_edit_link", PADRAO_URL_EDIT_BASE.format(SHEET_ID_DEFAULT))
-        st.session_state.STATE.setdefault("auto_baixar_padrao", False)
-    return st.session_state.STATE
-
-def save_state():
-    _save_json(APP_STATE_FILE, st.session_state.STATE)
-
-
-STATE = get_state()
-
-
-# ============================
-# Google Sheets (editar/baixar padrão)
-# ============================
-def gsheet_to_export_xlsx_link(edit_or_share_link: str) -> str:
-    """
-    Converte link de edição/compartilhamento do Google Sheets em link de export XLSX.
-    Ex.: https://docs.google.com/spreadsheets/d/{ID}/edit -> .../export?format=xlsx
-    """
-    if not edit_or_share_link:
-        return ""
-    try:
-        if "/spreadsheets/d/" in edit_or_share_link:
-            after = edit_or_share_link.split("/spreadsheets/d/")[1]
-            sheet_id = after.split("/")[0]
-            return PADRAO_URL_EXPORT_BASE.format(sheet_id)
-    except Exception:
-        pass
-    return ""
-
-def baixar_padrao_do_drive(url_export: str, destino: str) -> tuple[bool, str]:
-    """
-    Baixa o XLSX do Google Sheets (público) para `destino`.
-    """
-    try:
-        if not url_export:
-            return False, "Link de exportação vazio."
         r = requests.get(url_export, timeout=30)
         if r.status_code != 200:
-            return False, f"HTTP {r.status_code} ao baixar."
+            return (False, f"HTTP {r.status_code} ao baixar: {url_export}")
         with open(destino, "wb") as f:
             f.write(r.content)
         if not os.path.exists(destino) or os.path.getsize(destino) < 1024:
-            return False, "Arquivo baixado ficou muito pequeno / vazio."
-        return True, f"Padrão salvo em: {destino}"
+            return (False, "Arquivo baixado ficou muito pequeno / vazio.")
+        return (True, f"Padrão salvo em: {destino}")
     except Exception as e:
-        return False, f"Erro ao baixar: {e}"
+        return (False, f"Erro: {e}")
 
-
-# =============== Utils (originais) ===============
+# =============== Utils ===============
 def br_to_float(x):
     if pd.isna(x):
         return np.nan
@@ -145,13 +75,12 @@ class Catalogo:
     catalogo_simples: pd.DataFrame
     kits_reais: pd.DataFrame
 
-
 # =============== Padrão produtos (KITS + CAT) ===============
 def carregar_padrao_produtos(caminho: str) -> Catalogo:
     try:
         xls = pd.ExcelFile(caminho)
     except Exception as e:
-        raise RuntimeError(f"Não consegui abrir '{caminho}'. Baixe na sidebar. Erro: {e}")
+        raise RuntimeError(f"Não consegui abrir '{caminho}'. Deixe na mesma pasta do app. Erro: {e}")
 
     def load_sheet(opts):
         for n in opts:
@@ -206,8 +135,7 @@ def construir_kits_efetivo(cat: Catalogo) -> pd.DataFrame:
     kits = kits.drop_duplicates(subset=["kit_sku", "component_sku"], keep="first")
     return kits
 
-
-# =============== Leitura genérica (robusta) ===============
+# =============== Leitura genérica ===============
 def load_any_table(uploaded_file) -> pd.DataFrame:
     if uploaded_file is None:
         return None
@@ -216,14 +144,9 @@ def load_any_table(uploaded_file) -> pd.DataFrame:
         if name.endswith(".csv"):
             uploaded_file.seek(0)
             df = pd.read_csv(uploaded_file, dtype=str, keep_default_na=False, sep=None, engine="python")
-        elif name.endswith(".xlsx"):
-            uploaded_file.seek(0)
-            df = pd.read_excel(uploaded_file, dtype=str, keep_default_na=False, engine="openpyxl")
-        elif name.endswith(".xls"):
-            uploaded_file.seek(0)
-            df = pd.read_excel(uploaded_file, dtype=str, keep_default_na=False, engine="xlrd")
         else:
-            raise RuntimeError("Formato não suportado. Use CSV/XLSX/XLS.")
+            uploaded_file.seek(0)
+            df = pd.read_excel(uploaded_file, dtype=str, keep_default_na=False)
     except Exception as e:
         raise RuntimeError(f"Não consegui ler o arquivo '{uploaded_file.name}': {e}")
 
@@ -247,7 +170,6 @@ def load_any_table(uploaded_file) -> pd.DataFrame:
     for c in list(df.columns):
         df = df[~df[c].astype(str).str.contains(r"^TOTALS?$|^TOTAIS?$", case=False, na=False)]
     return df.reset_index(drop=True)
-
 
 # =============== Detecção por conteúdo (tolerante) ===============
 def mapear_tipo(df: pd.DataFrame) -> str:
@@ -275,8 +197,7 @@ def mapear_tipo(df: pd.DataFrame) -> str:
 
     return "DESCONHECIDO"
 
-
-# =============== Mapeamento de colunas (tolerante) ===============
+# =============== Mapeamento de colunas ===============
 def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
     if tipo == "FULL":
         if "sku" in df.columns:
@@ -350,8 +271,7 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
 
     raise RuntimeError("Tipo de arquivo desconhecido.")
 
-
-# =============== Explosão e Cálculo (SEU CÁLCULO ORIGINAL) ===============
+# =============== Explosão e Cálculo ===============
 def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_col: str) -> pd.DataFrame:
     base = df.copy()
     base["kit_sku"] = base[sku_col].map(norm_sku)
@@ -449,8 +369,21 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
         "Estoque_Fisico","Preco","Compra_Sugerida","Valor_Compra_R$",
         "ML_60d","Shopee_60d","TOTAL_60d","Reserva_30d","Folga_Fisico","Necessidade"
     ]].reset_index(drop=True)
-    return df_final
 
+    # Painel de estoques
+    fis_unid  = int(fis["Estoque_Fisico"].sum())
+    fis_valor = float((fis["Estoque_Fisico"] * fis["Preco"]).sum())
+
+    full_stock_comp = explodir_por_kits(
+        full[["SKU","Estoque_Full"]].rename(columns={"SKU":"kit_sku","Estoque_Full":"Qtd"}),
+        kits,"kit_sku","Qtd"
+    )
+    full_stock_comp = full_stock_comp.merge(fis[["SKU","Preco"]], on="SKU", how="left")
+    full_unid  = int(full["Estoque_Full"].sum())
+    full_valor = float((full_stock_comp["Quantidade"].fillna(0) * full_stock_comp["Preco"].fillna(0.0)).sum())
+
+    painel = {"full_unid": full_unid, "full_valor": full_valor, "fisico_unid": fis_unid, "fisico_valor": fis_valor}
+    return df_final, painel
 
 # =============== Export XLSX (sem recálculo) ===============
 def sha256_of_csv(df: pd.DataFrame) -> str:
@@ -458,12 +391,10 @@ def sha256_of_csv(df: pd.DataFrame) -> str:
     return hashlib.sha256(csv_bytes).hexdigest()
 
 def exportar_xlsx(df_final: pd.DataFrame, h: int, params: dict, pendencias: list | None = None) -> bytes:
-    for c in ["Vendas_h_ML","Vendas_h_Shopee","Estoque_Fisico","Compra_Sugerida",
-              "Reserva_30d","Folga_Fisico","Necessidade","ML_60d","Shopee_60d","TOTAL_60d"]:
+    for c in ["Vendas_h_ML","Vendas_h_Shopee","Estoque_Fisico","Compra_Sugerida","Reserva_30d","Folga_Fisico","Necessidade","ML_60d","Shopee_60d","TOTAL_60d"]:
         if (df_final[c] < 0).any() or (df_final[c].astype(float) % 1 != 0).any():
             raise RuntimeError(f"Auditoria: campo {c} precisa ser inteiro e ≥ 0.")
-    if not np.allclose(df_final["Valor_Compra_R$"].values,
-                       (df_final["Compra_Sugerida"] * df_final["Preco"]).round(2).values):
+    if not np.allclose(df_final["Valor_Compra_R$"].values, (df_final["Compra_Sugerida"] * df_final["Preco"]).round(2).values):
         raise RuntimeError("Auditoria: Valor_Compra_R$ inconsistente com Compra × Preco.")
 
     hash_str = sha256_of_csv(df_final)
@@ -493,86 +424,65 @@ def exportar_xlsx(df_final: pd.DataFrame, h: int, params: dict, pendencias: list
     output.seek(0)
     return output.read()
 
-
-# ============================
-# UI
-# ============================
+# =============== UI ===============
+st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 st.title("Reposição Logística — Alivvia")
-st.caption("FULL por anúncio; compra por componente; Shopee explode antes; painel de estoques; prévia por SKU; filtro por fornecedor. Resultados por EMPRESA e sem recálculo ao filtrar.")
+st.caption("FULL por anúncio; compra por componente; Shopee explode antes; painel de estoques; prévia por SKU; filtro por fornecedor. Resultados ficam em memória (sem recálculo).")
 
-# ---- Empresa ativa (separação real de uploads/estado) ----
-empresa_ativa = st.radio("Empresa ativa", EMPRESAS, horizontal=True, key="empresa_ativa_top")
+# ---- Estado: mantém o resultado calculado para evitar recálculo
+if "df_final" not in st.session_state:
+    st.session_state.df_final = None
+    st.session_state.painel = None
 
-# ---- Parâmetros ----
 with st.sidebar:
     st.subheader("Parâmetros")
     h  = st.selectbox("Horizonte (dias)", [30, 60, 90], index=1)
     g  = st.number_input("Crescimento % ao mês", value=0.0, step=1.0)
     LT = st.number_input("Lead time (dias)", value=0, step=1, min_value=0)
 
-    st.markdown("**Arquivo local opcional (será usado no cálculo):**")
+    st.markdown("**Arquivo local opcional:**")
     st.code(PADRAO_LOCAL_NOME, language=None)
     st.caption("Se existir na mesma pasta, será usado para cálculo.")
 
-    st.markdown("---")
-    st.subheader("Padrão (KITS/CAT) por link")
-    # campo para armazenar o link de edição do Google (persistente)
-    link_edit_atual = st.text_input(
-        "URL de edição do Google (editar/abrir)",
-        value=STATE.get("gsheet_edit_link", "")
-    )
-    if link_edit_atual != STATE.get("gsheet_edit_link"):
-        STATE["gsheet_edit_link"] = link_edit_atual
-        save_state()
-
-    if STATE.get("gsheet_edit_link"):
-        st.markdown(
-            f"[🔗 Abrir no Google Sheets (editar)]({STATE['gsheet_edit_link']})",
-            help="Abre a planilha para editar KITS e CATALOGO_SIMPLES."
-        )
-
-    # Campo de link manual (backup) — sempre visível
-    link_export_manual = st.text_input(
-        "URL direta para baixar (opcional)",
-        value=gsheet_to_export_xlsx_link(STATE.get("gsheet_edit_link","")),
-        help="Se precisar, cole aqui um link '.../export?format=xlsx'. O botão abaixo usará este link."
+    # ---- BLOCO: Padrão (KITS/CAT) por link (Drive)
+    st.markdown("### Padrão (KITS/CAT) por link")
+    st.markdown(
+        f"[🔗 Abrir no Drive (editar)]({PADRAO_URL_EDIT})",
+        help="Abre a planilha no Google Sheets para editar KITS e CATALOGO_SIMPLES."
     )
 
-    # Auto baixar
     auto_flag = st.checkbox(
         "Baixar padrão automaticamente ao abrir",
-        value=STATE.get("auto_baixar_padrao", False),
+        value=st.session_state.get("auto_baixar_padrao", False),
         help="Se ligado, ao abrir o app ele baixa do Google Sheets e salva como 'Padrao_produtos.xlsx'."
     )
-    if auto_flag != STATE.get("auto_baixar_padrao"):
-        STATE["auto_baixar_padrao"] = auto_flag
-        save_state()
+    st.session_state["auto_baixar_padrao"] = auto_flag
 
-    # Botão baixar
     if st.button("⬇ Baixar padrão", use_container_width=True):
-        url_export = link_export_manual.strip() or gsheet_to_export_xlsx_link(STATE.get("gsheet_edit_link",""))
-        ok, msg = baixar_padrao_do_drive(url_export, PADRAO_LOCAL_NOME)
-        st.success(msg) if ok else st.warning(msg)
+        res = baixar_padrao_do_drive(PADRAO_URL_EXPORT, PADRAO_LOCAL_NOME)
+        ok, msg = (res if isinstance(res, tuple) and len(res) == 2 else (False, str(res)))
+        st.success(msg) if ok else st.warning(f"Não consegui baixar o padrão automaticamente: {msg}")
 
-# Auto baixar ao abrir (uma vez por sessão)
-if STATE.get("auto_baixar_padrao") and not st.session_state.get("baixou_padrao_auto"):
-    url_export = gsheet_to_export_xlsx_link(STATE.get("gsheet_edit_link",""))
-    ok, _msg = baixar_padrao_do_drive(url_export, PADRAO_LOCAL_NOME)
-    st.session_state["baixou_padrao_auto"] = True
+    if st.session_state.get("auto_baixar_padrao") and not st.session_state.get("baixou_padrao_auto"):
+        res = baixar_padrao_do_drive(PADRAO_URL_EXPORT, PADRAO_LOCAL_NOME)
+        ok, msg = (res if isinstance(res, tuple) and len(res) == 2 else (False, str(res)))
+        if ok:
+            st.info("Padrão baixado automaticamente do Drive.")
+        else:
+            st.warning(f"Não consegui baixar o padrão automaticamente: {msg}")
+        st.session_state["baixou_padrao_auto"] = True
 
 st.divider()
 
-# ---- Uploads por empresa (separados) ----
-st.subheader(f"Uploads — {empresa_ativa}")
 col1, col2, col3 = st.columns(3)
-with col1: full_file   = st.file_uploader(f"FULL (Magiic) — {empresa_ativa}", type=["csv","xlsx","xls"], key=f"full_{empresa_ativa}")
-with col2: fisico_file = st.file_uploader(f"Estoque Físico — {empresa_ativa}", type=["csv","xlsx","xls"], key=f"fisico_{empresa_ativa}")
-with col3: shopee_file = st.file_uploader(f"Shopee / Mercado Turbo (vendas por SKU) — {empresa_ativa}", type=["csv","xlsx","xls"], key=f"vendas_{empresa_ativa}")
+with col1: full_file   = st.file_uploader("FULL (Magiic)")
+with col2: fisico_file = st.file_uploader("Estoque Físico (CSV/XLSX/XLS)")
+with col3: shopee_file = st.file_uploader("Shopee / Mercado Turbo (vendas por SKU)")
 
 st.divider()
 
-# ------- Botão: calcular por EMPRESA e salvar no estado -------
-if st.button(f"Gerar Compra — {empresa_ativa}", type="primary"):
+# ------- Botão: somente calcula e salva no estado
+if st.button("Gerar Compra", type="primary"):
     try:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         cat_path = os.path.join(base_dir, PADRAO_LOCAL_NOME)
@@ -602,64 +512,40 @@ if st.button(f"Gerar Compra — {empresa_ativa}", type="primary"):
 
         df_final, painel = calcular(full_df, fisico_df, vendas_df, cat, h=h, g=g, LT=LT)
 
-        # ► Salva o resultado no estado da EMPRESA (sem recálculo ao filtrar)
-        st.session_state[f"{empresa_ativa}_df_final"] = df_final
-        st.session_state[f"{empresa_ativa}_painel"]   = painel
+        # ► Salva o resultado no estado (não some ao clicar em filtros)
+        st.session_state.df_final = df_final
+        st.session_state.painel   = painel
 
-        st.success(f"Cálculo concluído para {empresa_ativa}. Use os filtros abaixo sem recálculo.")
+        st.success("Cálculo concluído. Use os filtros abaixo sem recálculo.")
     except Exception as e:
         st.error(str(e))
         st.stop()
 
-# ================= RENDERIZAÇÃO PÓS-CÁLCULO (por EMPRESA, sem recálculo) ================
-df_key = f"{empresa_ativa}_df_final"
-painel_key = f"{empresa_ativa}_painel"
-
-if st.session_state.get(df_key) is not None:
-    df_final = st.session_state[df_key].copy()
-    painel   = st.session_state.get(painel_key, {})
+# ================= RENDERIZAÇÃO PÓS-CÁLCULO (sem recálculo) ================
+if st.session_state.df_final is not None:
+    df_final = st.session_state.df_final.copy()
+    painel   = st.session_state.painel
 
     # Painel
     st.subheader("📊 Painel de Estoques")
     cA, cB, cC, cD = st.columns(4)
-    cA.metric("Full (un)",  f"{painel.get('full_unid',0):,}".replace(",", "."))
-    cB.metric("Full (R$)",  f"R$ {painel.get('full_valor',0.0):,.2f}")
-    cC.metric("Físico (un)",f"{painel.get('fisico_unid',0):,}".replace(",", "."))
-    cD.metric("Físico (R$)",f"R$ {painel.get('fisico_valor',0.0):,.2f}")
+    cA.metric("Full (un)",  f"{painel['full_unid']:,}".replace(",", "."))
+    cB.metric("Full (R$)",  f"R$ {painel['full_valor']:,.2f}")
+    cC.metric("Físico (un)",f"{painel['fisico_unid']:,}".replace(",", "."))
+    cD.metric("Físico (R$)",f"R$ {painel['fisico_valor']:,.2f}")
 
     st.divider()
 
-    # ===== Filtro por Fornecedor (sidebar, por empresa)
-    with st.sidebar:
-        st.subheader(f"Filtro por fornecedor — {empresa_ativa}")
-        fornecedores = sorted(df_final["fornecedor"].fillna("").unique())
-        sel_fornec = st.multiselect(
-            "Escolha fornecedores",
-            fornecedores,
-            key=f"filt_fornec_{empresa_ativa}"
-        )
+    # ===== Filtro por Fornecedor (persistente)
+    fornecedores = sorted(df_final["fornecedor"].fillna("").unique())
+    sel_fornec = st.multiselect("Filtrar por Fornecedor", fornecedores, key="filt_fornec")
 
     mostra = df_final if not sel_fornec else df_final[df_final["fornecedor"].isin(sel_fornec)]
-
-    # ===== Semanais (marcar no app por empresa)
-    with st.expander(f"⚙️ {empresa_ativa}: Gerenciar SKUs semanais"):
-        sku_opts = sorted(mostra["SKU"].astype(str).unique())
-        sem_atual = STATE[empresa_ativa].get("semanais", [])
-        sem_select = st.multiselect("Marcar como semanais", sku_opts, default=sem_atual, key=f"sem_{empresa_ativa}")
-        if sem_select != sem_atual:
-            STATE[empresa_ativa]["semanais"] = sem_select
-            save_state()
-        st.caption("Só organiza/filtra; não altera o cálculo.")
-
-    mostrar_semanais = st.checkbox("Mostrar apenas SKUs semanais", value=False, key=f"only_sem_{empresa_ativa}")
-    if mostrar_semanais:
-        sem_set = set(STATE[empresa_ativa].get("semanais", []))
-        mostra = mostra[mostra["SKU"].astype(str).isin(sem_set)]
 
     # ===== Prévia por SKU com lista (evita erro de digitação)
     with st.expander("🔎 Prévia por SKU (opcional)"):
         sku_opts = sorted(mostra["SKU"].unique())
-        sel_skus = st.multiselect("Escolha 1 ou mais SKUs", sku_opts, key=f"filt_sku_preview_{empresa_ativa}")
+        sel_skus = st.multiselect("Escolha 1 ou mais SKUs", sku_opts, key="filt_sku_preview")
         prev = mostra if not sel_skus else mostra[mostra["SKU"].isin(sel_skus)]
         st.dataframe(
             prev[[
@@ -672,98 +558,32 @@ if st.session_state.get(df_key) is not None:
         )
         st.caption("Compra = Necessidade − Folga (nunca negativa). Vendas 60d já explodidas e Shopee normalizada.")
 
-    # ===== Plano do mês + compras manuais + saldo (por empresa)
-    st.subheader("Plano do mês + compras manuais + saldo")
-    with st.form(f"compras_{empresa_ativa}"):
-        colx, coly, colz = st.columns([2, 1, 1])
-        with colx:
-            sku_in = st.text_input("SKU", value="", key=f"cmp_sku_{empresa_ativa}")
-        with coly:
-            qtd_in = st.number_input("Qtd comprada", min_value=0, value=0, step=1, key=f"cmp_qtd_{empresa_ativa}")
-        with colz:
-            data_in = st.date_input("Data", value=dt.date.today(), key=f"cmp_data_{empresa_ativa}")
-        add = st.form_submit_button("Adicionar compra do dia")
-        if add and sku_in and qtd_in > 0:
-            nova = {"data": str(data_in), "SKU": str(sku_in).upper().strip(), "qtd": int(qtd_in)}
-            STATE[empresa_ativa]["compras_manuais"].append(nova)
-            save_state()
-            st.success(f"Compra adicionada: {nova}")
-
-    compras_df = pd.DataFrame(STATE[empresa_ativa].get("compras_manuais", []))
-    mostra_adj = mostra.copy()
-    mostra_adj["qtd_comprada"] = 0
-    if not compras_df.empty:
-        agg = compras_df.groupby("SKU", as_index=False)["qtd"].sum().rename(columns={"qtd": "qtd_comprada"})
-        mostra_adj = mostra_adj.merge(agg, on="SKU", how="left")
-        mostra_adj["qtd_comprada"] = mostra_adj["qtd_comprada"].fillna(0).astype(int)
-        mostra_adj["Compra_Sugerida"] = (mostra_adj["Compra_Sugerida"] - mostra_adj["qtd_comprada"]).clip(lower=0).astype(int)
-
-    mostra_adj["Valor_Compra_R$"] = (mostra_adj["Compra_Sugerida"] * mostra_adj["Preco"]).astype(float)
-
-    # ===== Itens para comprar (após filtros e ajustes)
-    st.subheader(f"Itens para comprar — {empresa_ativa}")
-    tver = mostra_adj[mostra_adj["Compra_Sugerida"] > 0].copy()
+    st.subheader("Itens para comprar (copiável)")
     st.dataframe(
-        tver[[
+        mostra[mostra["Compra_Sugerida"] > 0][[
             "SKU","fornecedor","Vendas_h_ML","Vendas_h_Shopee",
-            "Estoque_Fisico","Preco","qtd_comprada","Compra_Sugerida","Valor_Compra_R$"
+            "Estoque_Fisico","Preco","Compra_Sugerida","Valor_Compra_R$"
         ]],
-        use_container_width=True,
-        height=420
+        use_container_width=True
     )
 
-    compra_total = int(mostra_adj["Compra_Sugerida"].sum())
-    valor_total  = float(mostra_adj["Valor_Compra_R$"].sum())
-    st.success(f"{len(tver)} SKUs com compra > 0 | Compra total: {compra_total} un | Valor: R$ {valor_total:,.2f}")
+    compra_total = int(mostra["Compra_Sugerida"].sum())
+    valor_total  = float(mostra["Valor_Compra_R$"].sum())
+    st.success(f"{len(mostra[mostra['Compra_Sugerida']>0])} SKUs com compra > 0 | Compra total: {compra_total} un | Valor: R$ {valor_total:,.2f}")
 
-    # Resumo por fornecedor (após filtros/ajustes)
-    with st.expander("📦 Resumo por fornecedor (após filtros/ajustes)"):
-        if not tver.empty:
-            grp = (tver.groupby("fornecedor", dropna=False, as_index=False)
-                      .agg(SKUs=("SKU","nunique"),
-                           Qtd_Total=("Compra_Sugerida","sum"),
-                           Valor_Total=("Valor_Compra_R$","sum"))
-                      .sort_values(["Valor_Total","Qtd_Total"], ascending=[False, False]))
-            st.dataframe(grp, use_container_width=True)
-        else:
-            st.caption("Sem itens para comprar.")
-
-    # ===== Exportação XLSX (Lista_Final + Controle) — usa o DataFrame filtrado/ajustado
     st.subheader("Exportação XLSX (Lista_Final + Controle)")
-    if st.checkbox("Gerar planilha XLSX com hash e sanity (sem recálculo)?", key=f"chk_export_{empresa_ativa}"):
+    if st.checkbox("Gerar planilha XLSX com hash e sanity (sem recálculo)?", key="chk_export"):
         try:
-            xlsx_bytes = exportar_xlsx(mostra_adj, h=h, params={"g": g, "LT": LT})
+            xlsx_bytes = exportar_xlsx(mostra, h=h, params={"g": g, "LT": LT})
             st.download_button(
-                label=f"Baixar XLSX — Compra_{empresa_ativa}_{h}d.xlsx",
+                label=f"Baixar XLSX — Compra_Sugerida_{h}d.xlsx",
                 data=xlsx_bytes,
-                file_name=f"Compra_{empresa_ativa}_{h}d.xlsx",
+                file_name=f"Compra_Sugerida_{h}d.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key=f"btn_dl_{empresa_ativa}"
+                key="btn_dl"
             )
             st.info("Planilha gerada a partir do mesmo DataFrame exibido (paridade garantida).")
         except Exception as e:
             st.error(f"Exportação bloqueada pela Auditoria: {e}")
-
-    # Compras manuais já registradas (visual)
-    with st.expander(f"🧾 Compras manuais registradas — {empresa_ativa}"):
-        if not compras_df.empty:
-            st.dataframe(compras_df, use_container_width=True)
-        else:
-            st.caption("Sem compras manuais registradas ainda.")
-
-# ===== SALVAR/BAIXAR ESTADO (backup manual) =====
-st.markdown("---")
-col_a, col_b = st.columns([1,1])
-with col_a:
-    if st.button("💾 Salvar estado agora (forçado)"):
-        save_state()
-        st.success("Estado salvo.")
-
-with col_b:
-    jb = json.dumps(STATE, ensure_ascii=False, indent=2).encode("utf-8")
-    st.download_button("⬇️ Baixar JSON de estado", data=jb, file_name="estado_app_backup.json", mime="application/json")
-
-# Auto save no final
-save_state()
 
 st.caption("© Alivvia — simples, robusto e auditável.")
