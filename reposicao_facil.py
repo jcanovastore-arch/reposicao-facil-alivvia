@@ -274,7 +274,7 @@ def mapear_tipo(df: pd.DataFrame) -> str:
 
     if tem_sku_std and (tem_vendas60 or tem_estoque_full_like or tem_transito_like):
         return "FULL"
-    if tem_sku_std and tem_estoque_generico e tem_preco:
+    if tem_sku_std and tem_estoque_generico and tem_preco:
         return "FISICO"
     if tem_sku_std and tem_qtd_livre and not tem_preco:
         return "VENDAS"
