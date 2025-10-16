@@ -1,8 +1,10 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
 # - Sem acesso automático ao Google Sheets.
-# - Carrega o Padrão (KITS/CAT) SOMENTE ao clicar no botão.
+# - Carrega o Padrão (KITS/CAT) SOMENTE ao clicar em botões.
 # - Baixa o XLSX inteiro do Sheets (não depende de gid) e auto-detecta as abas.
+# - Mantém a lógica e a UX já validadas.
+# - ADIÇÃO: campo de link alternativo + botão "Carregar deste link" no sidebar.
 
 import io
 import re
@@ -33,6 +35,7 @@ st.session_state.setdefault("painel", None)
 st.session_state.setdefault("catalogo_df", None)
 st.session_state.setdefault("kits_df", None)
 st.session_state.setdefault("loaded_at", None)
+st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK)
 
 # ====== Requests / Google Sheets (XLSX inteiro) ======
 def _requests_session() -> requests.Session:
@@ -64,6 +67,41 @@ def baixar_xlsx_do_sheets(sheet_id: str) -> bytes:
         ) from e
     except Exception as e:
         raise RuntimeError(f"Erro de rede ao baixar XLSX: {url} | {e}") from e
+    return r.content
+
+# ====== EXTRA: utilitários para link alternativo ======
+def extract_sheet_id_from_url(url: str) -> Optional[str]:
+    """Extrai o sheet_id de um link do Google Sheets (/d/<ID>/...)."""
+    if not url:
+        return None
+    m = re.search(r"/d/([a-zA-Z0-9\-_]+)/", url)
+    return m.group(1) if m else None
+
+def baixar_xlsx_por_link_google(url: str) -> bytes:
+    """
+    Aceita QUALQUER link do Google Sheets:
+      - .../edit...
+      - .../view...
+      - .../copy...
+      - .../export?format=xlsx...
+    Converte para export xlsx se necessário e baixa o arquivo.
+    """
+    sess = _requests_session()
+
+    # Se já for link de export XLSX, usa direto
+    if "export?format=xlsx" in url:
+        r = sess.get(url, timeout=30)
+        r.raise_for_status()
+        return r.content
+
+    # Caso contrário, extrai o ID e monta export xlsx
+    sheet_id = extract_sheet_id_from_url(url)
+    if not sheet_id:
+        raise RuntimeError("Link inválido do Google Sheets (não encontrei /d/<ID>/).")
+    export_url = gs_export_xlsx_url(sheet_id)
+
+    r = sess.get(export_url, timeout=30)
+    r.raise_for_status()
     return r.content
 
 # ====== Utils de dados ======
@@ -118,8 +156,7 @@ def construir_kits_efetivo(cat: Catalogo) -> pd.DataFrame:
     return kits
 
 # ====== Carregar Padrão do XLSX (auto-detecta abas) ======
-def carregar_padrao_do_xlsx(sheet_id: str) -> Catalogo:
-    content = baixar_xlsx_do_sheets(sheet_id)
+def _carregar_padrao_de_content(content: bytes) -> Catalogo:
     try:
         xls = pd.ExcelFile(io.BytesIO(content))
     except Exception as e:
@@ -182,6 +219,14 @@ def carregar_padrao_do_xlsx(sheet_id: str) -> Catalogo:
 
     return Catalogo(catalogo_simples=df_cat, kits_reais=df_kits)
 
+def carregar_padrao_do_xlsx(sheet_id: str) -> Catalogo:
+    content = baixar_xlsx_do_sheets(sheet_id)
+    return _carregar_padrao_de_content(content)
+
+def carregar_padrao_do_link(url: str) -> Catalogo:
+    content = baixar_xlsx_por_link_google(url)
+    return _carregar_padrao_de_content(content)
+
 # ====== Uploads genéricos ======
 def load_any_table(uploaded_file) -> Optional[pd.DataFrame]:
     if uploaded_file is None:
@@ -198,6 +243,7 @@ def load_any_table(uploaded_file) -> Optional[pd.DataFrame]:
         raise RuntimeError(f"Não consegui ler o arquivo '{uploaded_file.name}': {e}")
 
     df.columns = [norm_header(c) for c in df.columns]
+    # FULL às vezes tem header na 3ª linha
     if ("sku" not in df.columns) and ("codigo" not in df.columns) and ("codigo_sku" not in df.columns) and len(df) > 0:
         try:
             uploaded_file.seek(0)
@@ -228,7 +274,7 @@ def mapear_tipo(df: pd.DataFrame) -> str:
 
     if tem_sku_std and (tem_vendas60 or tem_estoque_full_like or tem_transito_like):
         return "FULL"
-    if tem_sku_std and tem_estoque_generico and tem_preco:
+    if tem_sku_std and tem_estoque_generico e tem_preco:
         return "FISICO"
     if tem_sku_std and tem_qtd_livre and not tem_preco:
         return "VENDAS"
@@ -455,12 +501,14 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("Padrão (KITS/CAT) — Google Sheets")
-    st.caption("A planilha é fixa; se trocar, altere o ID no código e faça deploy.")
+    st.caption("A planilha é fixa; se trocar, altere o ID no código e faça deploy. Se der falha, use o link alternativo abaixo.")
+
+    # Botões principais (ID fixo - mantém o comportamento atual)
     colA, colB = st.columns([1, 1])
     with colA:
         if st.button("Carregar padrão agora", use_container_width=True):
             try:
-                cat = carregar_padrao_do_xlsx(DEFAULT_SHEET_ID)
+                cat = carregar_padrao_do_xlsx(DEFAULT_SHEET_ID)  # ID fixo
                 st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku":"sku"})
                 st.session_state.kits_df = cat.kits_reais
                 st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -473,13 +521,32 @@ with st.sidebar:
     with colB:
         st.link_button("🔗 Abrir no Drive (editar)", DEFAULT_SHEET_LINK, use_container_width=True)
 
+    # NOVO: alternativa manual de link (opcional)
+    st.text_input(
+        "Link alternativo do Google Sheets (opcional)",
+        key="alt_sheet_link",
+        help="Cole um link da planilha. Se necessário, o app converte para export XLSX e carrega."
+    )
+    if st.button("Carregar deste link", use_container_width=True):
+        try:
+            cat = carregar_padrao_do_link(st.session_state.alt_sheet_link.strip())
+            st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku":"sku"})
+            st.session_state.kits_df = cat.kits_reais
+            st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            st.success("Padrão carregado com sucesso a partir do link informado.")
+        except Exception as e:
+            st.session_state.catalogo_df = None
+            st.session_state.kits_df = None
+            st.session_state.loaded_at = None
+            st.error(str(e))
+
 # Empresa
 st.subheader("Empresa")
 empresa = st.radio("Empresa ativa", ["ALIVVIA", "JCA"], horizontal=True)
 
 # Status do padrão
 if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
-    st.info("➡️ Clique em **Carregar padrão agora** (sidebar) para ler KITS/CAT.\n"
+    st.info("➡️ Clique em **Carregar padrão agora** (ou use o **link alternativo**) para ler KITS/CAT.\n"
             "Depois envie FULL / Estoque / Vendas e gere a compra.")
 else:
     st.success(f"Padrão carregado em {st.session_state.loaded_at}")
