@@ -1,16 +1,15 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# - NENHUM acesso automático ao Google Sheets.
-# - Só lê o padrão (KITS/CAT) quando você clicar no botão "Carregar padrão agora".
-# - Link padrão já preenchido; pode trocar na UI e recarregar.
-# - Mantém a lógica original de cálculo/UX.
+# - Sem acesso automático ao Google Sheets.
+# - Carrega o Padrão (KITS/CAT) SOMENTE ao clicar no botão.
+# - Baixa o XLSX inteiro do Sheets (não depende de gid) e auto-detecta as abas.
 
 import io
 import re
 import hashlib
 import datetime as dt
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -19,98 +18,55 @@ import streamlit as st
 import requests
 from requests.adapters import HTTPAdapter, Retry
 
-# ==========================
-# Config Streamlit (primeira chamada)
-# ==========================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
-# ==========================
-# Defaults
-# ==========================
+# ====== SUA PLANILHA FIXA (apenas o ID/URL) ======
 DEFAULT_SHEET_LINK = (
     "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/"
     "edit?usp=sharing&ouid=109458533144345974874&rtpof=true&sd=true"
 )
-DEFAULT_GID_KITS = "1589453187"   # confirmei com você
-DEFAULT_GID_CAT  = "0"            # ajuste se o catálogo tiver outro gid
+DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"  # fixo
 
-# ==========================
-# Estado
-# ==========================
-st.session_state.setdefault("SHEET_LINK", DEFAULT_SHEET_LINK)  # link que você pode trocar na UI
-st.session_state.setdefault("SHEET_ID", None)                  # só é preenchido quando clicar no botão
-st.session_state.setdefault("GID_KITS", DEFAULT_GID_KITS)
-st.session_state.setdefault("GID_CATALOGO", DEFAULT_GID_CAT)
-
-st.session_state.setdefault("catalogo_df", None)  # DataFrame do catálogo carregado
-st.session_state.setdefault("kits_df", None)      # DataFrame de kits carregado
-st.session_state.setdefault("loaded_at", None)    # timestamp carregamento
-
-st.session_state.setdefault("df_final", None)     # resultado de cálculo
+# ====== Estado ======
+st.session_state.setdefault("df_final", None)
 st.session_state.setdefault("painel", None)
+st.session_state.setdefault("catalogo_df", None)
+st.session_state.setdefault("kits_df", None)
+st.session_state.setdefault("loaded_at", None)
 
-# ==========================
-# Utils de Sheets/requests
-# ==========================
-def _is_google_sheets_url(url: str) -> bool:
-    return bool(re.match(r"^https://docs\.google\.com/spreadsheets/d/[A-Za-z0-9\-_]+", (url or "").strip()))
-
-def parse_google_sheets_link(url: str) -> Tuple[Optional[str], Optional[str]]:
-    """Aceita links de edição (…/edit#gid=...) ou export (…/export?format=csv&gid=...)."""
-    if not url or not _is_google_sheets_url(url):
-        return None, None
-    m = re.search(r"/spreadsheets/d/([A-Za-z0-9\-_]+)", url)
-    sheet_id = m.group(1) if m else None
-    gid = None
-    m_gid = re.search(r"(?:[#?&])gid=(\d+)", url)
-    if m_gid:
-        gid = m_gid.group(1)
-    return sheet_id, gid
-
-def gs_export_csv_url(sheet_id: str, gid: str) -> str:
-    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
-
+# ====== Requests / Google Sheets (XLSX inteiro) ======
 def _requests_session() -> requests.Session:
     s = requests.Session()
-    retries = Retry(
-        total=3, backoff_factor=0.6,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"],
-    )
+    retries = Retry(total=3, backoff_factor=0.6, status_forcelist=[429, 500, 502, 503, 504], allowed_methods=["GET"])
     s.mount("https://", HTTPAdapter(max_retries=retries))
     s.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/125.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/125.0 Safari/537.36"
     })
     return s
 
-def read_gs_csv(sheet_id: str, gid: str) -> pd.DataFrame:
-    url = gs_export_csv_url(sheet_id, gid)
+def gs_export_xlsx_url(sheet_id: str) -> str:
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+
+def baixar_xlsx_do_sheets(sheet_id: str) -> bytes:
+    url = gs_export_xlsx_url(sheet_id)
     try:
         sess = _requests_session()
         r = sess.get(url, timeout=30)
         r.raise_for_status()
     except requests.HTTPError as e:
         status = getattr(e.response, "status_code", None)
-        msg = (f"Falha ao baixar CSV do Google Sheets (HTTP {status}).\n"
-               f"URL: {url}\n"
-               f"Dicas:\n"
-               f"• Compartilhar: 'Qualquer pessoa com o link' → Leitor.\n"
-               f"• Teste em aba anônima.\n"
-               f"• Confirme o gid da aba (abra a aba e veja '#gid=').")
-        raise RuntimeError(msg) from e
+        raise RuntimeError(
+            f"Falha ao baixar XLSX do Google Sheets (HTTP {status}).\n"
+            f"URL: {url}\n"
+            f"1) Compartilhe a planilha como 'Qualquer pessoa com o link – Leitor'\n"
+            f"2) Teste o link em janela anônima\n"
+        ) from e
     except Exception as e:
-        raise RuntimeError(f"Erro de rede ao baixar CSV: {url} | {e}") from e
+        raise RuntimeError(f"Erro de rede ao baixar XLSX: {url} | {e}") from e
+    return r.content
 
-    try:
-        return pd.read_csv(io.BytesIO(r.content), dtype=str, keep_default_na=False)
-    except Exception as e:
-        raise RuntimeError(f"CSV inválido (não deu pra ler): {url} | {e}") from e
-
-# ==========================
-# Utils de dados
-# ==========================
+# ====== Utils de dados ======
 def norm_header(s: str) -> str:
     s = (s or "").strip()
     s = unidecode(s).lower()
@@ -126,38 +82,27 @@ def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def br_to_float(x):
-    if pd.isna(x):
-        return np.nan
-    if isinstance(x, (int, float, np.integer, np.floating)):
-        return float(x)
+    if pd.isna(x): return np.nan
+    if isinstance(x, (int, float, np.integer, np.floating)): return float(x)
     s = str(x).strip()
-    if s == "":
-        return np.nan
-    s = s.replace("\u00a0", " ")
-    s = s.replace("R$", "").replace(" ", "")
-    s = s.replace(".", "").replace(",", ".")
-    try:
-        return float(s)
-    except Exception:
-        return np.nan
+    if s == "": return np.nan
+    s = s.replace("\u00a0", " ").replace("R$", "").replace(" ", "").replace(".", "").replace(",", ".")
+    try: return float(s)
+    except Exception: return np.nan
 
 def norm_sku(x: str) -> str:
-    if pd.isna(x):
-        return ""
+    if pd.isna(x): return ""
     return unidecode(str(x)).strip().upper()
 
 def exige_colunas(df: pd.DataFrame, obrig: list, nome_tabela: str):
     faltam = [c for c in obrig if c not in df.columns]
     if faltam:
-        raise ValueError(
-            f"Colunas obrigatórias ausentes em {nome_tabela}: {faltam}\n"
-            f"Colunas lidas: {list(df.columns)}"
-        )
+        raise ValueError(f"Colunas obrigatórias ausentes em {nome_tabela}: {faltam}\nColunas lidas: {list(df.columns)}")
 
 @dataclass
 class Catalogo:
-    catalogo_simples: pd.DataFrame  # component_sku, fornecedor, status_reposicao (opcional)
-    kits_reais: pd.DataFrame        # kit_sku, component_sku, qty (>=1)
+    catalogo_simples: pd.DataFrame  # component_sku, fornecedor, status_reposicao
+    kits_reais: pd.DataFrame        # kit_sku, component_sku, qty
 
 def construir_kits_efetivo(cat: Catalogo) -> pd.DataFrame:
     kits = cat.kits_reais.copy()
@@ -172,19 +117,25 @@ def construir_kits_efetivo(cat: Catalogo) -> pd.DataFrame:
     kits = kits.drop_duplicates(subset=["kit_sku", "component_sku"], keep="first")
     return kits
 
-# ==========================
-# Carregar Padrão (apenas quando clicar no botão)
-# ==========================
-def carregar_padrao_do_sheets(link: str, gid_kits: str, gid_cat: str) -> Catalogo:
-    sheet_id, gid_link = parse_google_sheets_link(link)
-    if not sheet_id:
-        raise RuntimeError("Link do Google Sheets inválido. Cole a URL completa da planilha/aba.")
-    # salva o ID no estado (apenas agora)
-    st.session_state.SHEET_ID = sheet_id
+# ====== Carregar Padrão do XLSX (auto-detecta abas) ======
+def carregar_padrao_do_xlsx(sheet_id: str) -> Catalogo:
+    content = baixar_xlsx_do_sheets(sheet_id)
+    try:
+        xls = pd.ExcelFile(io.BytesIO(content))
+    except Exception as e:
+        raise RuntimeError(f"Arquivo XLSX inválido vindo do Google Sheets: {e}")
 
-    # --- KITS ---
-    kits = read_gs_csv(sheet_id, gid_kits)
-    kits = normalize_cols(kits)
+    def load_sheet(opts):
+        for n in opts:
+            if n in xls.sheet_names:
+                return pd.read_excel(xls, n, dtype=str, keep_default_na=False)
+        raise RuntimeError(f"Aba não encontrada. Esperado uma de {opts}. Abas existentes: {xls.sheet_names}")
+
+    df_kits = load_sheet(["KITS", "KITS_REAIS", "kits", "kits_reais"]).copy()
+    df_cat  = load_sheet(["CATALOGO_SIMPLES", "CATALOGO", "catalogo_simples", "catalogo"]).copy()
+
+    # KITS
+    df_kits = normalize_cols(df_kits)
     possiveis_kits = {
         "kit_sku": ["kit_sku", "kit", "sku_kit"],
         "component_sku": ["component_sku", "componente", "sku_componente", "component", "sku_component"],
@@ -193,21 +144,19 @@ def carregar_padrao_do_sheets(link: str, gid_kits: str, gid_cat: str) -> Catalog
     rename_k = {}
     for alvo, candidatas in possiveis_kits.items():
         for c in candidatas:
-            if c in kits.columns:
+            if c in df_kits.columns:
                 rename_k[c] = alvo
                 break
-    kits = kits.rename(columns=rename_k)
-    exige_colunas(kits, ["kit_sku", "component_sku", "qty"], "KITS")
-    kits = kits[["kit_sku", "component_sku", "qty"]].copy()
-    kits["kit_sku"] = kits["kit_sku"].map(norm_sku)
-    kits["component_sku"] = kits["component_sku"].map(norm_sku)
-    kits["qty"] = kits["qty"].map(br_to_float).fillna(0).astype(int)
-    kits = kits[kits["qty"] >= 1]
-    kits = kits.drop_duplicates(subset=["kit_sku", "component_sku"], keep="first")
+    df_kits = df_kits.rename(columns=rename_k)
+    exige_colunas(df_kits, ["kit_sku", "component_sku", "qty"], "KITS")
+    df_kits = df_kits[["kit_sku", "component_sku", "qty"]].copy()
+    df_kits["kit_sku"] = df_kits["kit_sku"].map(norm_sku)
+    df_kits["component_sku"] = df_kits["component_sku"].map(norm_sku)
+    df_kits["qty"] = df_kits["qty"].map(br_to_float).fillna(0).astype(int)
+    df_kits = df_kits[df_kits["qty"] >= 1].drop_duplicates(subset=["kit_sku", "component_sku"], keep="first")
 
-    # --- CATALOGO ---
-    catalogo = read_gs_csv(sheet_id, gid_cat)
-    catalogo = normalize_cols(catalogo)
+    # CATALOGO
+    df_cat = normalize_cols(df_cat)
     possiveis_cat = {
         "component_sku": ["component_sku", "sku", "produto", "item", "codigo", "sku_componente"],
         "fornecedor": ["fornecedor", "supplier", "fab", "marca"],
@@ -216,27 +165,24 @@ def carregar_padrao_do_sheets(link: str, gid_kits: str, gid_cat: str) -> Catalog
     rename_c = {}
     for alvo, candidatas in possiveis_cat.items():
         for c in candidatas:
-            if c in catalogo.columns:
+            if c in df_cat.columns:
                 rename_c[c] = alvo
                 break
-    catalogo = catalogo.rename(columns=rename_c)
-    if "component_sku" not in catalogo.columns:
-        raise ValueError("CATALOGO precisa ter coluna 'component_sku' (ou 'sku').")
-    if "fornecedor" not in catalogo.columns:
-        catalogo["fornecedor"] = ""
-    if "status_reposicao" not in catalogo.columns:
-        catalogo["status_reposicao"] = ""
+    df_cat = df_cat.rename(columns=rename_c)
+    if "component_sku" not in df_cat.columns:
+        raise ValueError("CATALOGO precisa ter a coluna 'component_sku' (ou 'sku').")
+    if "fornecedor" not in df_cat.columns:
+        df_cat["fornecedor"] = ""
+    if "status_reposicao" not in df_cat.columns:
+        df_cat["status_reposicao"] = ""
+    df_cat["component_sku"] = df_cat["component_sku"].map(norm_sku)
+    df_cat["fornecedor"] = df_cat["fornecedor"].fillna("").astype(str)
+    df_cat["status_reposicao"] = df_cat["status_reposicao"].fillna("").astype(str)
+    df_cat = df_cat.drop_duplicates(subset=["component_sku"], keep="last")
 
-    catalogo["component_sku"] = catalogo["component_sku"].map(norm_sku)
-    catalogo["fornecedor"] = catalogo["fornecedor"].fillna("").astype(str)
-    catalogo["status_reposicao"] = catalogo["status_reposicao"].fillna("").astype(str)
-    catalogo = catalogo.drop_duplicates(subset=["component_sku"], keep="last")
+    return Catalogo(catalogo_simples=df_cat, kits_reais=df_kits)
 
-    return Catalogo(catalogo_simples=catalogo, kits_reais=kits)
-
-# ==========================
-# Leitura genérica dos uploads
-# ==========================
+# ====== Uploads genéricos ======
 def load_any_table(uploaded_file) -> Optional[pd.DataFrame]:
     if uploaded_file is None:
         return None
@@ -252,7 +198,6 @@ def load_any_table(uploaded_file) -> Optional[pd.DataFrame]:
         raise RuntimeError(f"Não consegui ler o arquivo '{uploaded_file.name}': {e}")
 
     df.columns = [norm_header(c) for c in df.columns]
-    # FULL com header na 3ª linha
     if ("sku" not in df.columns) and ("codigo" not in df.columns) and ("codigo_sku" not in df.columns) and len(df) > 0:
         try:
             uploaded_file.seek(0)
@@ -270,9 +215,7 @@ def load_any_table(uploaded_file) -> Optional[pd.DataFrame]:
         df = df[~df[c].astype(str).str.contains(r"^TOTALS?$|^TOTAIS?$", case=False, na=False)]
     return df.reset_index(drop=True)
 
-# ==========================
-# Detecção & Mapeamento
-# ==========================
+# ====== Detecção & Mapeamento ======
 def mapear_tipo(df: pd.DataFrame) -> str:
     cols = [c.lower() for c in df.columns]
     tem_sku_std  = any(c in {"sku","codigo","codigo_sku"} for c in cols) or any("sku" in c for c in cols)
@@ -319,13 +262,12 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
         )
         if sku_series is None:
             cand = next((c for c in df.columns if "sku" in c.lower()), None)
-            if cand is None:
-                raise RuntimeError("FÍSICO inválido: não achei coluna de SKU.")
+            if cand is None: raise RuntimeError("FÍSICO inválido: não achei coluna de SKU.")
             sku_series = df[cand]
         df["SKU"] = sku_series.map(norm_sku)
 
         c_q = [c for c in df.columns if c in ["estoque_atual","qtd","quantidade"] or ("estoque" in c)]
-        if not c_q: raise RuntimeError("FÍSICO inválido: faltou Estoque (estoque_atual/qtd/quantidade).")
+        if not c_q: raise RuntimeError("FÍSICO inválido: faltou Estoque.")
         df["Estoque_Fisico"] = df[c_q[0]].map(br_to_float).fillna(0).astype(int)
 
         c_p = [c for c in df.columns if c in ["preco","preco_compra","custo","custo_medio","preco_medio","preco_unitario"]]
@@ -337,21 +279,19 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
     if tipo == "VENDAS":
         sku_col = next((c for c in df.columns if "sku" in c.lower()), None)
         if sku_col is None:
-            raise RuntimeError("VENDAS inválido: não achei coluna de SKU (ex.: SKU, Model SKU, Variation SKU).")
+            raise RuntimeError("VENDAS inválido: não achei coluna de SKU.")
         df["SKU"] = df[sku_col].map(norm_sku)
 
         cand_qty = []
         for c in df.columns:
-            cl = c.lower()
-            score = 0
-            if "qtde"  in cl: score += 3
+            cl = c.lower(); score = 0
+            if "qtde" in cl: score += 3
             if "quant" in cl: score += 2
             if "venda" in cl: score += 1
             if "order" in cl: score += 1
-            if score > 0:
-                cand_qty.append((score, c))
+            if score > 0: cand_qty.append((score, c))
         if not cand_qty:
-            raise RuntimeError("VENDAS inválido: não achei coluna de Quantidade (ex.: Qtde. Vendas, Quantidade, Orders).")
+            raise RuntimeError("VENDAS inválido: não achei coluna de Quantidade.")
         cand_qty.sort(reverse=True)
         qcol = cand_qty[0][1]
         df["Quantidade"] = df[qcol].map(br_to_float).fillna(0).astype(int)
@@ -359,9 +299,7 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
 
     raise RuntimeError("Tipo de arquivo desconhecido.")
 
-# ==========================
-# Explosão & Cálculo
-# ==========================
+# ====== Explosão & Cálculo ======
 def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_col: str) -> pd.DataFrame:
     base = df.copy()
     base["kit_sku"] = base[sku_col].map(norm_sku)
@@ -457,16 +395,13 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     painel = {"full_unid": full_unid, "full_valor": full_valor, "fisico_unid": fis_unid, "fisico_valor": fis_valor}
     return df_final, painel
 
-# ==========================
-# Export XLSX
-# ==========================
+# ====== Export XLSX ======
 def sha256_of_csv(df: pd.DataFrame) -> str:
     csv_bytes = df.to_csv(index=False).encode("utf-8")
     return hashlib.sha256(csv_bytes).hexdigest()
 
 def exportar_xlsx(df_final: pd.DataFrame, h: int, params: dict, pendencias: list | None = None) -> bytes:
-    int_cols = ["Vendas_h_ML","Vendas_h_Shopee","Estoque_Fisico","Compra_Sugerida",
-                "Reserva_30d","Folga_Fisico","Necessidade","ML_60d","Shopee_60d","TOTAL_60d"]
+    int_cols = ["Vendas_h_ML","Vendas_h_Shopee","Estoque_Fisico","Compra_Sugerida","Reserva_30d","Folga_Fisico","Necessidade","ML_60d","Shopee_60d","TOTAL_60d"]
     for c in int_cols:
         bad = df_final.index[(df_final[c] < 0) | (df_final[c].astype(float) % 1 != 0)]
         if len(bad) > 0:
@@ -508,11 +443,9 @@ def exportar_xlsx(df_final: pd.DataFrame, h: int, params: dict, pendencias: list
     output.seek(0)
     return output.read()
 
-# ==========================
-# UI
-# ==========================
+# ====== UI ======
 st.title("Reposição Logística — Alivvia")
-st.caption("Sem acesso automático ao Google Sheets. Clique em **Carregar padrão agora** para ler KITS/CAT.")
+st.caption("Padrão KITS/CAT carregado do Google Sheets (XLSX) **somente** ao clicar no botão.")
 
 with st.sidebar:
     st.subheader("Parâmetros")
@@ -522,19 +455,12 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("Padrão (KITS/CAT) — Google Sheets")
-    st.session_state.SHEET_LINK = st.text_input("Link da planilha (edit/export)", value=st.session_state.SHEET_LINK)
-    st.session_state.GID_KITS = st.text_input("gid KITS", value=st.session_state.GID_KITS)
-    st.session_state.GID_CATALOGO = st.text_input("gid CATALOGO", value=st.session_state.GID_CATALOGO)
-
+    st.caption("A planilha é fixa; se trocar, altere o ID no código e faça deploy.")
     colA, colB = st.columns([1, 1])
     with colA:
         if st.button("Carregar padrão agora", use_container_width=True):
             try:
-                cat = carregar_padrao_do_sheets(
-                    st.session_state.SHEET_LINK,
-                    st.session_state.GID_KITS,
-                    st.session_state.GID_CATALOGO
-                )
+                cat = carregar_padrao_do_xlsx(DEFAULT_SHEET_ID)
                 st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku":"sku"})
                 st.session_state.kits_df = cat.kits_reais
                 st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -545,8 +471,7 @@ with st.sidebar:
                 st.session_state.loaded_at = None
                 st.error(str(e))
     with colB:
-        abrir_url = st.session_state.SHEET_LINK if _is_google_sheets_url(st.session_state.SHEET_LINK) else DEFAULT_SHEET_LINK
-        st.link_button("🔗 Abrir no Drive (editar)", abrir_url, use_container_width=True)
+        st.link_button("🔗 Abrir no Drive (editar)", DEFAULT_SHEET_LINK, use_container_width=True)
 
 # Empresa
 st.subheader("Empresa")
@@ -554,11 +479,10 @@ empresa = st.radio("Empresa ativa", ["ALIVVIA", "JCA"], horizontal=True)
 
 # Status do padrão
 if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
-    st.info("✅ Link padrão já preenchido.\n\n➡️ Clique em **Carregar padrão agora** na barra lateral para ler KITS/CAT.\n\n"
-            "Depois envie os 3 arquivos (FULL, Estoque Físico, Vendas) e gere a compra.")
+    st.info("➡️ Clique em **Carregar padrão agora** (sidebar) para ler KITS/CAT.\n"
+            "Depois envie FULL / Estoque / Vendas e gere a compra.")
 else:
-    st.success(f"Padrão carregado em {st.session_state.loaded_at} • Sheet ID: {st.session_state.SHEET_ID} • "
-               f"GIDs: KITS={st.session_state.GID_KITS}, CAT={st.session_state.GID_CATALOGO}")
+    st.success(f"Padrão carregado em {st.session_state.loaded_at}")
 
 # Uploads
 st.subheader("Uploads")
@@ -622,7 +546,6 @@ if st.button(f"Gerar Compra — {empresa}", type="primary"):
             catalogo_simples=st.session_state.catalogo_df.rename(columns={"sku":"component_sku"}),
             kits_reais=st.session_state.kits_df
         )
-
         df_final, painel = calcular(full_df, fisico_df, vendas_df, cat, h=h, g=g, LT=LT)
 
         st.session_state.df_final = df_final
@@ -652,11 +575,6 @@ if st.session_state.df_final is not None:
     sel_fornec = st.multiselect("Filtrar visão por Fornecedor", fornecedores_da_compra, key="filt_fornec_compra")
     mostra = df_final if not sel_fornec else df_final[df_final["fornecedor"].isin(sel_fornec)]
 
-    if sel_fornec:
-        st.info(f"Filtro ativo: {len(sel_fornec)} fornecedor(es) • {mostra['SKU'].nunique()} SKUs na visão.")
-    else:
-        st.caption("Nenhum filtro por fornecedor aplicado na visão.")
-
     with st.expander("🔎 Prévia por SKU (opcional)"):
         sku_opts = sorted(mostra["SKU"].unique())
         sel_skus = st.multiselect("Escolha 1 ou mais SKUs", sku_opts, key="filt_sku_preview")
@@ -670,7 +588,7 @@ if st.session_state.df_final is not None:
             use_container_width=True,
             height=380
         )
-        st.caption("Compra = Necessidade − Folga (nunca negativa). Vendas 60d já explodidas e Shopee normalizada.")
+        st.caption("Compra = Necessidade − Folga (nunca negativa).")
 
     st.subheader("Itens para comprar (copiável)")
     st.dataframe(
