@@ -4,7 +4,10 @@
 # - Carrega o Padrão (KITS/CAT) SOMENTE ao clicar em botões.
 # - Baixa o XLSX inteiro do Sheets (não depende de gid) e auto-detecta as abas.
 # - Mantém a lógica e a UX já validadas.
-# - ADIÇÃO: campo de link alternativo + botão "Carregar deste link" no sidebar.
+# - ADIÇÕES:
+#   1) Campo de link alternativo + botão "Carregar deste link" no sidebar.
+#   2) Uploads fixos do mês (FULL + VENDAS) por empresa, com limpar.
+#   3) Seção "Alocação por Lote (proporcional a 60 dias)" que NÃO usa estoque.
 
 import io
 import re
@@ -36,6 +39,8 @@ st.session_state.setdefault("catalogo_df", None)
 st.session_state.setdefault("kits_df", None)
 st.session_state.setdefault("loaded_at", None)
 st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK)
+# NOVO: uploads fixos por empresa (FULL+VENDAS). Ex.: {"ALIVVIA": {"full": {...}, "vendas": {...}}, "JCA": {...}}
+st.session_state.setdefault("fixed_uploads", {"ALIVVIA": {}, "JCA": {}})
 
 # ====== Requests / Google Sheets (XLSX inteiro) ======
 def _requests_session() -> requests.Session:
@@ -521,7 +526,7 @@ with st.sidebar:
     with colB:
         st.link_button("🔗 Abrir no Drive (editar)", DEFAULT_SHEET_LINK, use_container_width=True)
 
-    # NOVO: alternativa manual de link (opcional)
+    # Alternativa manual de link (opcional)
     st.text_input(
         "Link alternativo do Google Sheets (opcional)",
         key="alt_sheet_link",
@@ -564,6 +569,29 @@ with c3:
     st.markdown("**Shopee / Mercado Turbo (vendas por SKU)**")
     vendas_file = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key="vendas")
 
+# ===== [NOVO] Guardar uploads FULL/VENDAS por empresa (fixos do mês) =====
+def _save_uploaded_file_to_bytes(uploaded):
+    if uploaded is None:
+        return None
+    uploaded.seek(0)
+    return uploaded.read()
+
+fix_store = st.session_state["fixed_uploads"].setdefault(empresa, {})
+if full_file is not None:
+    fix_store["full"] = {"name": full_file.name, "bytes": _save_uploaded_file_to_bytes(full_file)}
+if vendas_file is not None:
+    fix_store["vendas"] = {"name": vendas_file.name, "bytes": _save_uploaded_file_to_bytes(vendas_file)}
+
+with st.expander(f"📦 Uploads salvos desta empresa ({empresa})", expanded=False):
+    tem_full   = "full" in fix_store and isinstance(fix_store["full"].get("bytes"), (bytes, bytearray))
+    tem_vendas = "vendas" in fix_store and isinstance(fix_store["vendas"].get("bytes"), (bytes, bytearray))
+    st.write(f"FULL salvo: **{'Sim' if tem_full else 'Não'}**", (fix_store.get('full') or {}).get('name', ''))
+    st.write(f"VENDAS salvo: **{'Sim' if tem_vendas else 'Não'}**", (fix_store.get('vendas') or {}).get('name', ''))
+    if st.button(f"Limpar uploads salvos — {empresa}"):
+        st.session_state["fixed_uploads"][empresa] = {}
+        st.success("Uploads salvos desta empresa foram limpos.")
+# ===== [FIM NOVO] =========================================================
+
 # Filtros (só se padrão estiver carregado)
 if st.session_state.catalogo_df is not None:
     st.markdown("---")
@@ -582,7 +610,7 @@ if st.session_state.catalogo_df is not None:
             catalogo_filtrado = catalogo_filtrado[catalogo_filtrado["sku"].astype(str).isin(sku_sel)]
         st.dataframe(catalogo_filtrado, use_container_width=True, height=260)
 
-# Botão de cálculo
+# Botão de cálculo (compra)
 st.markdown("---")
 if st.button(f"Gerar Compra — {empresa}", type="primary"):
     if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
@@ -624,7 +652,7 @@ if st.button(f"Gerar Compra — {empresa}", type="primary"):
         st.error(str(e))
         st.stop()
 
-# Pós-cálculo
+# Pós-cálculo (compra)
 if st.session_state.df_final is not None:
     df_final = st.session_state.df_final.copy()
     painel   = st.session_state.painel
@@ -684,5 +712,132 @@ if st.session_state.df_final is not None:
             st.info("Planilha gerada a partir do mesmo DataFrame exibido (paridade garantida).")
         except Exception as e:
             st.error(f"Exportação bloqueada pela Auditoria: {e}")
+
+# ===================== ALOCAÇÃO POR LOTE (OPCIONAL) =====================
+st.markdown("---")
+st.header("Alocação por Lote (proporcional a 60 dias) — opcional (não usa estoque)")
+
+# Auxiliar: ler DataFrame a partir dos bytes salvos
+def _read_df_from_bytes(name: str, raw: bytes) -> Optional[pd.DataFrame]:
+    if not raw:
+        return None
+    bio = io.BytesIO(raw)
+    lower = (name or "").lower()
+    try:
+        if lower.endswith(".csv"):
+            return pd.read_csv(bio, dtype=str, keep_default_na=False, sep=None, engine="python")
+        else:
+            return pd.read_excel(bio, dtype=str, keep_default_na=False)
+    except Exception:
+        return None
+
+# Constrói demanda 60d (explodida por componente) a partir de um arquivo FULL ou VENDAS
+def _demanda60_from_upload(name: str, raw: bytes) -> pd.Series:
+    df = _read_df_from_bytes(name, raw)
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    df.columns = [norm_header(c) for c in df.columns]
+    tipo = mapear_tipo(df)
+    if tipo == "DESCONHECIDO":
+        return pd.Series(dtype=float)
+
+    df_m = mapear_colunas(df, tipo)
+    kits = construir_kits_efetivo(
+        Catalogo(
+            catalogo_simples=st.session_state.catalogo_df.rename(columns={"sku":"component_sku"}),
+            kits_reais=st.session_state.kits_df
+        )
+    )
+    if tipo == "FULL":
+        tmp = df_m[["SKU","Vendas_Qtd_60d"]].rename(columns={"SKU":"kit_sku","Vendas_Qtd_60d":"Qtd"})
+    else:  # VENDAS
+        tmp = df_m[["SKU","Quantidade"]].rename(columns={"SKU":"kit_sku","Quantidade":"Qtd"})
+    comp = explodir_por_kits(tmp, kits, "kit_sku", "Qtd")  # -> SKU (comp), Quantidade
+    return comp.set_index("SKU")["Quantidade"].astype(float)
+
+if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
+    st.info("Carregue o **Padrão (KITS/CAT)** no sidebar para habilitar a alocação por lote.")
+else:
+    # Precisamos das vendas salvas (FULL ou VENDAS) de ALIVVIA e de JCA
+    fixed = st.session_state.get("fixed_uploads", {})
+    fix_a = fixed.get("ALIVVIA", {})
+    fix_j = fixed.get("JCA", {})
+
+    # Monta demanda 60d por empresa:
+    # - se houver FULL salvo, usa FULL
+    # - senão, se houver VENDAS salva, usa VENDAS
+    # - senão, usa uploads atuais na tela (sem exigir estoque)
+    def _series_empresa(fix_emp: dict, up_full, up_vendas) -> pd.Series:
+        if "full" in fix_emp and isinstance(fix_emp["full"].get("bytes"), (bytes, bytearray)):
+            return _demanda60_from_upload(fix_emp["full"]["name"], fix_emp["full"]["bytes"])
+        if "vendas" in fix_emp and isinstance(fix_emp["vendas"].get("bytes"), (bytes, bytearray)):
+            return _demanda60_from_upload(fix_emp["vendas"]["name"], fix_emp["vendas"]["bytes"])
+        if up_full is not None:
+            up_full.seek(0)
+            return _demanda60_from_upload(up_full.name, up_full.read())
+        if up_vendas is not None:
+            up_vendas.seek(0)
+            return _demanda60_from_upload(up_vendas.name, up_vendas.read())
+        return pd.Series(dtype=float)
+
+    # Usa os uploads correntes apenas para a empresa atualmente selecionada; a outra depende dos "fixos"
+    s_alivvia = _series_empresa(
+        fix_a,
+        full_file if empresa == "ALIVVIA" else None,
+        vendas_file if empresa == "ALIVVIA" else None
+    )
+    s_jca = _series_empresa(
+        fix_j,
+        full_file if empresa == "JCA" else None,
+        vendas_file if empresa == "JCA" else None
+    )
+
+    # UI — escolha do componente e quantidade do lote
+    CATALOGO = st.session_state.catalogo_df
+    sku_componentes = CATALOGO["sku"].dropna().astype(str).sort_values().unique().tolist()
+    sku_comp_sel = st.selectbox("SKU do componente a alocar", options=[""] + sku_componentes, index=0)
+    qtd_lote = st.number_input("Quantidade total do lote (ex.: 400)", min_value=0, value=0, step=10)
+
+    if st.button("Calcular alocação proporcional (60d)", type="primary"):
+        if not sku_comp_sel:
+            st.error("Escolha o SKU do componente.")
+            st.stop()
+        if qtd_lote <= 0:
+            st.error("Informe a quantidade total do lote (> 0).")
+            st.stop()
+
+        d_a = float(s_alivvia.get(sku_comp_sel, 0.0))
+        d_j = float(s_jca.get(sku_comp_sel, 0.0))
+        total_dem = d_a + d_j
+
+        if total_dem <= 0:
+            prop_a = 0.5; prop_j = 0.5
+            aloc_a = int(round(qtd_lote * prop_a))
+            aloc_j = int(qtd_lote - aloc_a)
+            aviso = "Sem vendas 60d detectadas; alocação 50/50."
+        else:
+            prop_a = d_a / total_dem if total_dem > 0 else 0.5
+            prop_j = d_j / total_dem if total_dem > 0 else 0.5
+            aloc_a = int(round(qtd_lote * prop_a))
+            aloc_j = int(qtd_lote - aloc_a)  # soma exata
+            aviso = "Alocação proporcional às vendas de 60 dias (explodidas por componente)."
+
+        res = pd.DataFrame([
+            {"Empresa": "ALIVVIA", "SKU": sku_comp_sel, "Demanda_60d": int(round(d_a)), "Proporção": round(prop_a, 4), "Alocação_Sugerida": aloc_a},
+            {"Empresa": "JCA",     "SKU": sku_comp_sel, "Demanda_60d": int(round(d_j)), "Proporção": round(prop_j, 4), "Alocação_Sugerida": aloc_j},
+        ])
+        st.success(aviso)
+        st.dataframe(res, use_container_width=True)
+
+        csv_bytes = res.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "Baixar alocação (.csv)",
+            data=csv_bytes,
+            file_name=f"Alocacao_{sku_comp_sel}_{qtd_lote}.csv",
+            mime="text/csv",
+            key="dl_alocacao_csv"
+        )
+
+# ================== FIM: ALOCAÇÃO POR LOTE (OPCIONAL) ===================
 
 st.caption("© Alivvia — simples, robusto e auditável.")

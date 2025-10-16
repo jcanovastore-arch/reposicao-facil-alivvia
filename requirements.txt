@@ -1,8 +1,8 @@
 streamlit
 pandas
 numpy
-unidecode
-xlsxwriter
 openpyxl
+xlsxwriter
 requests
+unidecode
 xlrd==2.0.1
