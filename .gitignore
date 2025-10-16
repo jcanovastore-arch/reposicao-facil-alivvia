@@ -1,0 +1,14 @@
+# venv e caches
+venv/
+.env/
+*.pyc
+__pycache__/
+
+# arquivos locais
+*.xlsx
+*.xls
+*.csv
+.DS_Store
+
+# streamlit
+.streamlit/secrets.toml
