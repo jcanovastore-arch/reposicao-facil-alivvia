@@ -18,6 +18,7 @@ from unidecode import unidecode
 import streamlit as st
 import requests
 from requests.adapters import HTTPAdapter, Retry
+VERSION = "v3.2.0 — 2025-10-17"
 
 # ===================== CONFIG BÁSICA =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -573,6 +574,10 @@ with st.sidebar:
 st.title("Reposição Logística — Alivvia")
 if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
     st.warning("► Carregue o **Padrão (KITS/CAT)** no sidebar antes de usar as abas.")
+# Versão do sistema (mostra no canto direito, pequenininho)
+vc1, vc2 = st.columns([4,1])
+with vc2:
+    st.markdown(f"<div style='text-align:right; font-size:12px; color:#888;'>Versão: <b>{VERSION}</b></div>", unsafe_allow_html=True)
 
 # ===================== ABAS =====================
 tab1, tab2, tab3 = st.tabs(["📂 Dados das Empresas", "🧮 Compra Automática", "📦 Alocação de Compra"])
