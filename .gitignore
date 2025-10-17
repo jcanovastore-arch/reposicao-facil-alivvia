@@ -1,11 +1,8 @@
-__pycache__/
+venv/
+.env/
 *.pyc
-*.pyo
-*.pyd
-*.DS_Store
-.vscode/
-.idea/
-.env
-.venv/
+__pycache__/
+*.xlsx
+*.xls
+*.csv
 .streamlit/secrets.toml
-.appdata_storage/
