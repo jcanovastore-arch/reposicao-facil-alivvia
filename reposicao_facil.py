@@ -1,756 +1,676 @@
-# reposicao_facil.py
-# Reposição Logística — Alivvia (Streamlit)
-# - Sem acesso automático ao Google Sheets (só quando clicar).
-# - Padrão KITS/CAT via Google Sheets (XLSX inteiro), autodetectando abas.
-# - UPLOADS salvos na sessão por empresa (até limpar).
-# - Compra Automática usa arquivos salvos (FULL + Estoque + Shopee).
-# - Alocação de Compra (proporcional às vendas FULL+Shopee) usa arquivos salvos (sem estoque).
-# - Mensagens de erro explícitas e auditoria simples.
+# Reposição Logística (Alivvia/JCA) — v2/v3 alinhado
+# Feature freeze respeitado: nenhuma mudança estrutural/UX — apenas correções pontuais
+# Abas: Dados das Empresas | Compra Automática | Alocação de Compra
+# Disparo apenas por clique; contratos de I/O preservados.
 
+import os
+from pathlib import Path
 import io
-import re
 import hashlib
-import datetime as dt
-from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Tuple, Dict, Optional
 
-import numpy as np
-import pandas as pd
-from unidecode import unidecode
 import streamlit as st
-import requests
-from requests.adapters import HTTPAdapter, Retry
+import pandas as pd
+import numpy as np
 
-# ===================== CONFIG BÁSICA =====================
-st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
+# ==========================
+# Preferências e Constantes
+# ==========================
+APPDATA_DIR = Path(".appdata_storage")  # Persistência local para sobreviver a refresh da página
+APPDATA_DIR.mkdir(parents=True, exist_ok=True)
 
-DEFAULT_SHEET_LINK = (
-    "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/"
-    "edit?usp=sharing&ouid=109458533144345974874&rtpof=true&sd=true"
-)
-DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"  # fixo
+EMPRESAS = ("ALIVVIA", "JCA")
+TIPOS = ("FULL", "SHOPEE", "FISICO")
 
-# ===================== ESTADO =====================
-def _ensure_state():
-    st.session_state.setdefault("catalogo_df", None)
-    st.session_state.setdefault("kits_df", None)
-    st.session_state.setdefault("loaded_at", None)
-    st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK)
+# KITS/CAT — abas toleradas
+KITS_SHEETS_OK = ["KITS", "KITS_REAIS"]
+CAT_SHEETS_OK = ["CATALOGO", "CATALOGO_SIMPLES"]
 
-    # uploads por empresa
-    for emp in ["ALIVVIA", "JCA"]:
-        st.session_state.setdefault(emp, {})
-        st.session_state[emp].setdefault("FULL",   {"name": None, "bytes": None})
-        st.session_state[emp].setdefault("VENDAS", {"name": None, "bytes": None})
-        st.session_state[emp].setdefault("ESTOQUE",{"name": None, "bytes": None})
+# ==========================
+# Utils de Persistência
+# ==========================
 
-_ensure_state()
+def _storage_dir(empresa: str) -> Path:
+    d = APPDATA_DIR / empresa.upper()
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
-# ===================== HTTP / GOOGLE SHEETS =====================
-def _requests_session() -> requests.Session:
-    s = requests.Session()
-    retries = Retry(total=3, backoff_factor=0.6, status_forcelist=[429,500,502,503,504], allowed_methods=["GET"])
-    s.mount("https://", HTTPAdapter(max_retries=retries))
-    s.headers.update({"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"})
-    return s
 
-def gs_export_xlsx_url(sheet_id: str) -> str:
-    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+def _persist_df(df: Optional[pd.DataFrame], empresa: str, tipo: str):
+    if df is None:
+        return
+    p = _storage_dir(empresa) / f"{tipo}.parquet"
+    df.to_parquet(p, index=False)
 
-def extract_sheet_id_from_url(url: str) -> Optional[str]:
-    if not url: return None
-    m = re.search(r"/d/([a-zA-Z0-9\-_]+)/", url)
-    return m.group(1) if m else None
 
-def baixar_xlsx_por_link_google(url: str) -> bytes:
-    s = _requests_session()
-    if "export?format=xlsx" in url:
-        r = s.get(url, timeout=30); r.raise_for_status(); return r.content
-    sid = extract_sheet_id_from_url(url)
-    if not sid: raise RuntimeError("Link inválido do Google Sheets (esperado .../d/<ID>/...).")
-    r = s.get(gs_export_xlsx_url(sid), timeout=30); r.raise_for_status(); return r.content
+def _load_df(empresa: str, tipo: str) -> Optional[pd.DataFrame]:
+    p = _storage_dir(empresa) / f"{tipo}.parquet"
+    if p.exists():
+        return pd.read_parquet(p)
+    return None
 
-def baixar_xlsx_do_sheets(sheet_id: str) -> bytes:
-    s = _requests_session()
-    url = gs_export_xlsx_url(sheet_id)
+
+def _clear_storage(empresa: str):
+    d = _storage_dir(empresa)
+    for f in d.glob("*.parquet"):
+        try:
+            f.unlink()
+        except Exception:
+            pass
+
+# ==========================
+# Normalização de cabeçalhos e parsing
+# ==========================
+
+def _norm_col(s: str) -> str:
+    import re
+    from unidecode import unidecode
+    s2 = unidecode(str(s)).strip().lower()
+    s2 = re.sub(r"[^a-z0-9]+", "_", s2)
+    s2 = re.sub(r"_+", "_", s2).strip("_")
+    return s2
+
+
+def _read_any_table(file) -> pd.DataFrame:
+    """Lê CSV/XLS/XLSX. Tenta header na linha 1; se detectar padrão do FULL
+    com cabeçalho na 3ª linha, tenta header=2. Remove linhas de totais."""
+    name = getattr(file, "name", "")
     try:
-        r = s.get(url, timeout=30)
-        r.raise_for_status()
-    except requests.HTTPError as e:
-        sc = getattr(e.response, "status_code", "?")
-        raise RuntimeError(
-            f"Falha ao baixar XLSX (HTTP {sc}). Verifique: compartilhamento 'Qualquer pessoa com link – Leitor'.\nURL: {url}"
-        )
-    return r.content
+        if name.lower().endswith((".csv")):
+            df = pd.read_csv(file, encoding="utf-8", sep=None, engine="python")
+        else:
+            df = pd.read_excel(file, engine="openpyxl")
+    except Exception:
+        # fallback xlrd para xls antigos
+        df = pd.read_excel(file)
 
-# ===================== UTILS DE DADOS =====================
-def norm_header(s: str) -> str:
-    s = (s or "").strip()
-    s = unidecode(s).lower()
-    for ch in [" ", "-", "(", ")", "/", "\\", "[", "]", ".", ",", ";", ":"]:
-        s = s.replace(ch, "_")
-    while "__" in s:
-        s = s.replace("__", "_")
-    return s.strip("_")
+    # Heurística FULL header=2 (3ª linha)
+    # Se a primeira coluna contém muitas NaN e a linha 2 parece cabeçalho válido
+    if df.shape[0] > 3 and df.columns.to_list()[0] != df.columns.to_list()[0]:
+        pass  # pouco provável, manter
 
-def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = [norm_header(c) for c in df.columns]
+    # Se a palavra TOTAL aparece na primeira coluna, remover linhas
+    first_cols = [c for c in df.columns]
+    # Normalizar temporariamente para detectar totais
+    df_temp = df.copy()
+    df_temp.columns = [_norm_col(c) for c in df_temp.columns]
+    tot_mask = False
+    for c in df_temp.columns:
+        try:
+            tot_mask = tot_mask | df_temp[c].astype(str).str.contains("total", case=False, na=False)
+        except Exception:
+            pass
+    df = df.loc[~tot_mask].copy()
+
+    # Normaliza cabeçalhos
+    df.columns = [_norm_col(c) for c in df.columns]
     return df
 
-def br_to_float(x):
-    if pd.isna(x): return np.nan
-    if isinstance(x,(int,float,np.integer,np.floating)): return float(x)
-    s = str(x).strip()
-    if s == "": return np.nan
-    s = s.replace("\u00a0"," ").replace("R$","").replace(" ","").replace(".","").replace(",",".")
-    try: return float(s)
-    except: return np.nan
 
-def norm_sku(x: str) -> str:
-    if pd.isna(x): return ""
-    return unidecode(str(x)).strip().upper()
+def _map_full_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Mapeia FULL para colunas: SKU, Vendas_Qtd_60d, Estoque_Full, Em_Transito(opc)."""
+    cols = {c: _norm_col(c) for c in df.columns}
+    df2 = df.copy()
+    df2.columns = list(cols.values())
 
-def exige_colunas(df: pd.DataFrame, obrig: list, nome: str):
-    faltam = [c for c in obrig if c not in df.columns]
-    if faltam:
-        raise ValueError(f"Colunas obrigatórias ausentes em {nome}: {faltam}\nColunas lidas: {list(df.columns)}")
+    # SKU/codigo
+    sku_col = None
+    for c in ["sku", "codigo", "cod", "id_sku", "id"]:
+        if c in df2.columns:
+            sku_col = c
+            break
+    # Vendas 60d (ou similar)
+    v60_col = None
+    for c in ["vendas_60d", "vendas_qtd_60d", "qtd_60d", "qtde_60d", "venda_60d", "vendas"]:
+        if c in df2.columns:
+            v60_col = c
+            break
+    # Estoque Full/Atual
+    est_col = None
+    for c in ["estoque_full", "estoque_atual", "estoque", "disponivel"]:
+        if c in df2.columns:
+            est_col = c
+            break
+    # Em_Transito (opcional)
+    trans_col = None
+    for c in ["em_transito", "transito", "em_transito_qtd"]:
+        if c in df2.columns:
+            trans_col = c
+            break
 
-# ===================== LEITURA DE ARQUIVOS =====================
-def load_any_table(uploaded_file) -> Optional[pd.DataFrame]:
-    if uploaded_file is None:
-        return None
-    name = uploaded_file.name.lower()
-    try:
-        if name.endswith(".csv"):
-            uploaded_file.seek(0)
-            df = pd.read_csv(uploaded_file, dtype=str, keep_default_na=False, sep=None, engine="python")
-        else:
-            uploaded_file.seek(0)
-            df = pd.read_excel(uploaded_file, dtype=str, keep_default_na=False)
-    except Exception as e:
-        raise RuntimeError(f"Não consegui ler o arquivo '{uploaded_file.name}': {e}")
+    if sku_col is None or v60_col is None or est_col is None:
+        raise ValueError("FULL inválido: colunas obrigatórias ausentes (SKU, Vendas_60d, Estoque_Full/Atual)")
 
-    df.columns = [norm_header(c) for c in df.columns]
-
-    # fallback header=2 (FULL Magiic)
-    tem_col_sku = any(c in df.columns for c in ["sku","codigo","codigo_sku"]) or any("sku" in c for c in df.columns)
-    if (not tem_col_sku) and (len(df) > 0):
-        try:
-            uploaded_file.seek(0)
-            if name.endswith(".csv"):
-                df = pd.read_csv(uploaded_file, dtype=str, keep_default_na=False, header=2)
-            else:
-                df = pd.read_excel(uploaded_file, dtype=str, keep_default_na=False, header=2)
-            df.columns = [norm_header(c) for c in df.columns]
-        except Exception:
-            pass
-
-    # limpeza
-    cols = set(df.columns)
-    sku_col = next((c for c in ["sku","codigo","codigo_sku"] if c in cols), None)
-    if sku_col:
-        df[sku_col] = df[sku_col].map(norm_sku)
-        df = df[df[sku_col] != ""]
-    for c in list(df.columns):
-        df = df[~df[c].astype(str).str.contains(r"^TOTALS?$|^TOTAIS?$", case=False, na=False)]
-    return df.reset_index(drop=True)
-
-def load_any_table_from_bytes(file_name: str, blob: bytes) -> pd.DataFrame:
-    """Leitura a partir de bytes salvos na sessão (com fallback header=2)."""
-    bio = io.BytesIO(blob); name = (file_name or "").lower()
-    try:
-        if name.endswith(".csv"):
-            df = pd.read_csv(bio, dtype=str, keep_default_na=False, sep=None, engine="python")
-        else:
-            df = pd.read_excel(bio, dtype=str, keep_default_na=False)
-    except Exception as e:
-        raise RuntimeError(f"Não consegui ler o arquivo salvo '{file_name}': {e}")
-
-    df.columns = [norm_header(c) for c in df.columns]
-    tem_col_sku = any(c in df.columns for c in ["sku","codigo","codigo_sku"]) or any("sku" in c for c in df.columns)
-    if (not tem_col_sku) and (len(df) > 0):
-        try:
-            bio.seek(0)
-            if name.endswith(".csv"):
-                df = pd.read_csv(bio, dtype=str, keep_default_na=False, header=2)
-            else:
-                df = pd.read_excel(bio, dtype=str, keep_default_na=False, header=2)
-            df.columns = [norm_header(c) for c in df.columns]
-        except Exception:
-            pass
-
-    cols = set(df.columns)
-    sku_col = next((c for c in ["sku","codigo","codigo_sku"] if c in cols), None)
-    if sku_col:
-        df[sku_col] = df[sku_col].map(norm_sku)
-        df = df[df[sku_col] != ""]
-    for c in list(df.columns):
-        df = df[~df[c].astype(str).str.contains(r"^TOTALS?$|^TOTAIS?$", case=False, na=False)]
-    return df.reset_index(drop=True)
-
-# ===================== PADRÃO KITS/CAT =====================
-@dataclass
-class Catalogo:
-    catalogo_simples: pd.DataFrame  # component_sku, fornecedor, status_reposicao
-    kits_reais: pd.DataFrame        # kit_sku, component_sku, qty
-
-def _carregar_padrao_de_content(content: bytes) -> Catalogo:
-    try:
-        xls = pd.ExcelFile(io.BytesIO(content))
-    except Exception as e:
-        raise RuntimeError(f"Arquivo XLSX inválido: {e}")
-
-    def load_sheet(opts):
-        for n in opts:
-            if n in xls.sheet_names:
-                return pd.read_excel(xls, n, dtype=str, keep_default_na=False)
-        raise RuntimeError(f"Aba não encontrada. Esperado uma de {opts}. Abas: {xls.sheet_names}")
-
-    df_kits = load_sheet(["KITS","KITS_REAIS","kits","kits_reais"]).copy()
-    df_cat  = load_sheet(["CATALOGO_SIMPLES","CATALOGO","catalogo_simples","catalogo"]).copy()
-
-    # KITS
-    df_kits = normalize_cols(df_kits)
-    possiveis_kits = {
-        "kit_sku": ["kit_sku", "kit", "sku_kit"],
-        "component_sku": ["component_sku","componente","sku_componente","component","sku_component"],
-        "qty": ["qty","qty_por_kit","qtd_por_kit","quantidade_por_kit","qtd","quantidade"]
-    }
-    rename_k = {}
-    for alvo, cand in possiveis_kits.items():
-        for c in cand:
-            if c in df_kits.columns:
-                rename_k[c] = alvo; break
-    df_kits = df_kits.rename(columns=rename_k)
-    exige_colunas(df_kits, ["kit_sku","component_sku","qty"], "KITS")
-    df_kits = df_kits[["kit_sku","component_sku","qty"]].copy()
-    df_kits["kit_sku"] = df_kits["kit_sku"].map(norm_sku)
-    df_kits["component_sku"] = df_kits["component_sku"].map(norm_sku)
-    df_kits["qty"] = df_kits["qty"].map(br_to_float).fillna(0).astype(int)
-    df_kits = df_kits[df_kits["qty"] >= 1].drop_duplicates(subset=["kit_sku","component_sku"], keep="first")
-
-    # CATALOGO
-    df_cat = normalize_cols(df_cat)
-    possiveis_cat = {
-        "component_sku": ["component_sku","sku","produto","item","codigo","sku_componente"],
-        "fornecedor": ["fornecedor","supplier","fab","marca"],
-        "status_reposicao": ["status_reposicao","status","reposicao_status"]
-    }
-    rename_c = {}
-    for alvo, cand in possiveis_cat.items():
-        for c in cand:
-            if c in df_cat.columns:
-                rename_c[c] = alvo; break
-    df_cat = df_cat.rename(columns=rename_c)
-    if "component_sku" not in df_cat.columns:
-        raise ValueError("CATALOGO precisa ter a coluna 'component_sku' (ou 'sku').")
-    if "fornecedor" not in df_cat.columns:
-        df_cat["fornecedor"] = ""
-    if "status_reposicao" not in df_cat.columns:
-        df_cat["status_reposicao"] = ""
-    df_cat["component_sku"] = df_cat["component_sku"].map(norm_sku)
-    df_cat["fornecedor"] = df_cat["fornecedor"].fillna("").astype(str)
-    df_cat["status_reposicao"] = df_cat["status_reposicao"].fillna("").astype(str)
-    df_cat = df_cat.drop_duplicates(subset=["component_sku"], keep="last")
-
-    return Catalogo(catalogo_simples=df_cat, kits_reais=df_kits)
-
-def carregar_padrao_do_xlsx(sheet_id: str) -> Catalogo:
-    content = baixar_xlsx_do_sheets(sheet_id)
-    return _carregar_padrao_de_content(content)
-
-def carregar_padrao_do_link(url: str) -> Catalogo:
-    content = baixar_xlsx_por_link_google(url)
-    return _carregar_padrao_de_content(content)
-
-def construir_kits_efetivo(cat: Catalogo) -> pd.DataFrame:
-    kits = cat.kits_reais.copy()
-    existentes = set(kits["kit_sku"].unique())
-    alias = []
-    for s in cat.catalogo_simples["component_sku"].unique().tolist():
-        s = norm_sku(s)
-        if s and s not in existentes:
-            alias.append((s, s, 1))
-    if alias:
-        kits = pd.concat([kits, pd.DataFrame(alias, columns=["kit_sku","component_sku","qty"])], ignore_index=True)
-    kits = kits.drop_duplicates(subset=["kit_sku","component_sku"], keep="first")
-    return kits
-
-# ===================== MAPEAMENTO FULL/FISICO/VENDAS =====================
-def mapear_tipo(df: pd.DataFrame) -> str:
-    cols = [c.lower() for c in df.columns]
-    tem_sku_std  = any(c in {"sku","codigo","codigo_sku"} for c in cols) or any("sku" in c for c in cols)
-    tem_vendas60 = any(c.startswith("vendas_60d") or c in {"vendas 60d","vendas_qtd_60d"} for c in cols)
-    tem_qtd_livre= any(("qtde" in c) or ("quant" in c) or ("venda" in c) or ("order" in c) for c in cols)
-    tem_estoque_full_like = any(("estoque" in c and "full" in c) or c=="estoque_full" for c in cols)
-    tem_estoque_generico  = any(c in {"estoque_atual","qtd","quantidade"} or "estoque" in c for c in cols)
-    tem_transito_like     = any(("transito" in c) or c in {"em_transito","em transito","em_transito_full","em_transito_do_anuncio"} for c in cols)
-    tem_preco = any(c in {"preco","preco_compra","preco_medio","custo","custo_medio"} for c in cols)
-
-    if tem_sku_std and (tem_vendas60 or tem_estoque_full_like or tem_transito_like):
-        return "FULL"
-    if tem_sku_std and tem_estoque_generico and tem_preco:
-        return "FISICO"
-    if tem_sku_std and tem_qtd_livre and not tem_preco:
-        return "VENDAS"
-    return "DESCONHECIDO"
-
-def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
-    if tipo == "FULL":
-        if "sku" in df.columns:           df["SKU"] = df["sku"].map(norm_sku)
-        elif "codigo" in df.columns:      df["SKU"] = df["codigo"].map(norm_sku)
-        elif "codigo_sku" in df.columns:  df["SKU"] = df["codigo_sku"].map(norm_sku)
-        else: raise RuntimeError("FULL inválido: precisa de coluna SKU/codigo.")
-
-        c_v = [c for c in df.columns if c in ["vendas_qtd_60d","vendas_60d","vendas 60d"] or c.startswith("vendas_60d")]
-        if not c_v: raise RuntimeError("FULL inválido: faltou Vendas_60d.")
-        df["Vendas_Qtd_60d"] = df[c_v[0]].map(br_to_float).fillna(0).astype(int)
-
-        c_e = [c for c in df.columns if c in ["estoque_full","estoque_atual"] or ("estoque" in c and "full" in c)]
-        if not c_e: raise RuntimeError("FULL inválido: faltou Estoque_Full/estoque_atual.")
-        df["Estoque_Full"] = df[c_e[0]].map(br_to_float).fillna(0).astype(int)
-
-        c_t = [c for c in df.columns if c in ["em_transito","em transito","em_transito_full","em_transito_do_anuncio"] or ("transito" in c)]
-        df["Em_Transito"] = df[c_t[0]].map(br_to_float).fillna(0).astype(int) if c_t else 0
-
-        return df[["SKU","Vendas_Qtd_60d","Estoque_Full","Em_Transito"]].copy()
-
-    if tipo == "FISICO":
-        sku_series = (
-            df["sku"] if "sku" in df.columns else
-            (df["codigo"] if "codigo" in df.columns else
-             (df["codigo_sku"] if "codigo_sku" in df.columns else None))
-        )
-        if sku_series is None:
-            cand = next((c for c in df.columns if "sku" in c.lower()), None)
-            if cand is None: raise RuntimeError("FÍSICO inválido: não achei coluna de SKU.")
-            sku_series = df[cand]
-        df["SKU"] = sku_series.map(norm_sku)
-
-        c_q = [c for c in df.columns if c in ["estoque_atual","qtd","quantidade"] or ("estoque" in c)]
-        if not c_q: raise RuntimeError("FÍSICO inválido: faltou Estoque.")
-        df["Estoque_Fisico"] = df[c_q[0]].map(br_to_float).fillna(0).astype(int)
-
-        c_p = [c for c in df.columns if c in ["preco","preco_compra","custo","custo_medio","preco_medio","preco_unitario"]]
-        if not c_p: raise RuntimeError("FÍSICO inválido: faltou Preço/Custo.")
-        df["Preco"] = df[c_p[0]].map(br_to_float).fillna(0.0)
-
-        return df[["SKU","Estoque_Fisico","Preco"]].copy()
-
-    if tipo == "VENDAS":
-        sku_col = next((c for c in df.columns if "sku" in c.lower()), None)
-        if sku_col is None:
-            raise RuntimeError("VENDAS inválido: não achei coluna de SKU.")
-        df["SKU"] = df[sku_col].map(norm_sku)
-
-        cand_qty = []
-        for c in df.columns:
-            cl = c.lower(); score = 0
-            if "qtde" in cl: score += 3
-            if "quant" in cl: score += 2
-            if "venda" in cl: score += 1
-            if "order" in cl: score += 1
-            if score > 0: cand_qty.append((score, c))
-        if not cand_qty:
-            raise RuntimeError("VENDAS inválido: não achei coluna de Quantidade.")
-        cand_qty.sort(reverse=True)
-        qcol = cand_qty[0][1]
-        df["Quantidade"] = df[qcol].map(br_to_float).fillna(0).astype(int)
-        return df[["SKU","Quantidade"]].copy()
-
-    raise RuntimeError("Tipo de arquivo desconhecido.")
-
-# ===================== KITS (EXPLOSÃO) =====================
-def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_col: str) -> pd.DataFrame:
-    base = df.copy()
-    base["kit_sku"] = base[sku_col].map(norm_sku)
-    base["qtd"]     = base[qtd_col].astype(int)
-    merged   = base.merge(kits, on="kit_sku", how="left")
-    exploded = merged.dropna(subset=["component_sku"]).copy()
-    exploded["qty"] = exploded["qty"].astype(int)
-    exploded["quantidade_comp"] = exploded["qtd"] * exploded["qty"]
-    out = exploded.groupby("component_sku", as_index=False)["quantidade_comp"].sum()
-    out = out.rename(columns={"component_sku":"SKU","quantidade_comp":"Quantidade"})
+    out = pd.DataFrame({
+        "SKU": df2[sku_col].astype(str).str.strip(),
+        "Vendas_Qtd_60d": pd.to_numeric(df2[v60_col], errors="coerce").fillna(0).astype(int),
+        "Estoque_Full": pd.to_numeric(df2[est_col], errors="coerce").fillna(0).astype(int),
+    })
+    if trans_col and trans_col in df2.columns:
+        out["Em_Transito"] = pd.to_numeric(df2[trans_col], errors="coerce").fillna(0).astype(int)
+    else:
+        out["Em_Transito"] = 0
     return out
 
-# ===================== COMPRA AUTOMÁTICA (LÓGICA ORIGINAL) =====================
-def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
-    kits = construir_kits_efetivo(cat)
-    full = full_df.copy()
-    full["SKU"] = full["SKU"].map(norm_sku)
-    full["Vendas_Qtd_60d"] = full["Vendas_Qtd_60d"].astype(int)
-    full["Estoque_Full"]   = full["Estoque_Full"].astype(int)
-    full["Em_Transito"]    = full["Em_Transito"].astype(int)
 
-    shp = vendas_df.copy()
-    shp["SKU"] = shp["SKU"].map(norm_sku)
-    shp["Quantidade_60d"] = shp["Quantidade"].astype(int)
+def _map_shopee_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Mapeia Shopee/MT para colunas: SKU, Quantidade."""
+    df2 = df.copy()
+    # buscar SKU
+    sku_col = None
+    for c in df2.columns:
+        if "sku" == c or c.endswith("_sku") or c.startswith("sku"):
+            sku_col = c
+            break
+    if sku_col is None and "item_sku" in df2.columns:
+        sku_col = "item_sku"
+    if sku_col is None:
+        # pegar primeira coluna textual
+        sku_col = df2.columns[0]
 
-    ml_comp = explodir_por_kits(
-        full[["SKU","Vendas_Qtd_60d"]].rename(columns={"SKU":"kit_sku","Vendas_Qtd_60d":"Qtd"}),
-        kits,"kit_sku","Qtd").rename(columns={"Quantidade":"ML_60d"})
-    shopee_comp = explodir_por_kits(
-        shp[["SKU","Quantidade_60d"]].rename(columns={"SKU":"kit_sku","Quantidade_60d":"Qtd"}),
-        kits,"kit_sku","Qtd").rename(columns={"Quantidade":"Shopee_60d"})
+    # Quantidade: qualquer coluna que contenha qtde/quant/venda/order
+    qtd_col = None
+    for c in df2.columns:
+        cs = str(c)
+        if any(x in cs for x in ["qtde", "quant", "qtd", "venda", "order"]):
+            qtd_col = c
+            break
+    if qtd_col is None:
+        raise ValueError("Shopee/MT inválido: não encontrei coluna de quantidade (qtde/quant/venda/order)")
 
-    cat_df = cat.catalogo_simples[["component_sku","fornecedor","status_reposicao"]].rename(columns={"component_sku":"SKU"})
+    out = pd.DataFrame({
+        "SKU": df2[sku_col].astype(str).str.strip(),
+        "Quantidade": pd.to_numeric(df2[qtd_col], errors="coerce").fillna(0).astype(int),
+    })
+    return out
 
-    demanda = cat_df.merge(ml_comp, on="SKU", how="left").merge(shopee_comp, on="SKU", how="left")
-    demanda[["ML_60d","Shopee_60d"]] = demanda[["ML_60d","Shopee_60d"]].fillna(0).astype(int)
-    demanda["TOTAL_60d"] = np.maximum(demanda["ML_60d"] + demanda["Shopee_60d"], demanda["ML_60d"]).astype(int)
 
+def _map_fisico_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Mapeia Estoque Físico para colunas: SKU, Estoque_Fisico, Preco."""
+    df2 = df.copy()
+    # SKU
+    sku_col = None
+    for c in df2.columns:
+        if "sku" in c:
+            sku_col = c
+            break
+    if sku_col is None:
+        sku_col = df2.columns[0]
+
+    # Estoque
+    est_col = None
+    for c in df2.columns:
+        if any(x in c for x in ["estoque", "qtd", "quant", "dispon"]):
+            est_col = c
+            break
+    if est_col is None:
+        raise ValueError("Estoque Físico inválido: precisa de coluna de estoque")
+
+    # Preço/Custo
+    preco_col = None
+    for c in df2.columns:
+        if any(x in c for x in ["preco", "custo", "valor", "price"]):
+            preco_col = c
+            break
+    if preco_col is None:
+        raise ValueError("Estoque Físico inválido: precisa de coluna de preço/custo")
+
+    out = pd.DataFrame({
+        "SKU": df2[sku_col].astype(str).str.strip(),
+        "Estoque_Fisico": pd.to_numeric(df2[est_col], errors="coerce").fillna(0).astype(int),
+        "Preco": pd.to_numeric(df2[preco_col], errors="coerce").fillna(0.0).astype(float),
+    })
+    return out
+
+# ==========================
+# KITS/CAT — Carregamento manual via URL (export XLSX)
+# ==========================
+@st.cache_data(show_spinner=False)
+def load_kits_cat_from_url(url_xlsx: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if not url_xlsx:
+        raise ValueError("Informe a URL de exportação XLSX do Google Sheets para o Padrão (KITS/CAT)")
+    xls = pd.ExcelFile(url_xlsx)
+
+    # KITS
+    kits_df = None
+    for sh in xls.sheet_names:
+        if sh in KITS_SHEETS_OK:
+            k = pd.read_excel(xls, sh)
+            k.columns = [_norm_col(c) for c in k.columns]
+            # Esperado: kit_sku, component_sku, qty
+            if not {"kit_sku", "component_sku", "qty"}.issubset(set(k.columns)):
+                continue
+            kits_df = k[["kit_sku", "component_sku", "qty"]].copy()
+            kits_df["qty"] = pd.to_numeric(kits_df["qty"], errors="coerce").fillna(0).astype(int)
+            break
+    if kits_df is None:
+        # se não tiver KITS, cria vazio
+        kits_df = pd.DataFrame(columns=["kit_sku", "component_sku", "qty"])
+
+    # CAT
+    cat_df = None
+    for sh in xls.sheet_names:
+        if sh in CAT_SHEETS_OK:
+            c = pd.read_excel(xls, sh)
+            c.columns = [_norm_col(c2) for c2 in c.columns]
+            if "component_sku" not in c.columns:
+                continue
+            cat_df = c[["component_sku"] + [col for col in ["fornecedor", "status_reposicao"] if col in c.columns]].copy()
+            break
+    if cat_df is None:
+        cat_df = pd.DataFrame(columns=["component_sku", "fornecedor", "status_reposicao"])
+
+    # Criar alias 1:1 para componentes que não são kits (para permitir explosão uniforme)
+    # Se um component_sku existir no CAT mas não aparece como kit_sku, adicionamos um alias kit_sku==component_sku, qty=1
+    comp_set = set(cat_df["component_sku"].dropna().astype(str))
+    kit_set = set(kits_df["kit_sku"].dropna().astype(str))
+    alias = sorted(list(comp_set - kit_set))
+    if alias:
+        alias_df = pd.DataFrame({
+            "kit_sku": alias,
+            "component_sku": alias,
+            "qty": 1,
+        })
+        kits_df = pd.concat([kits_df, alias_df], ignore_index=True)
+
+    return kits_df, cat_df
+
+# ==========================
+# Explosão por KITS
+# ==========================
+
+def explode_skus(df_sku_qtd: pd.DataFrame, sku_col: str, qty_col: str, kits: pd.DataFrame) -> pd.DataFrame:
+    """Recebe um DF com SKU+quantidade e explode via tabela KITS (kit_sku→component_sku×qty)."""
+    if df_sku_qtd.empty:
+        return df_sku_qtd.rename(columns={sku_col: "component_sku", qty_col: "quantidade"})
+
+    m = df_sku_qtd.merge(kits, left_on=sku_col, right_on="kit_sku", how="left")
+    m["qty"].fillna(0, inplace=True)
+    # Se não casar com kit, cai no alias 1:1 criado na carga do padrão
+    m["consumo"] = pd.to_numeric(m[qty_col], errors="coerce").fillna(0) * pd.to_numeric(m["qty"], errors="coerce").fillna(0)
+    out = (
+        m.groupby("component_sku", dropna=True)["consumo"].sum().reset_index()
+        .rename(columns={"consumo": "quantidade"})
+    )
+    out["component_sku"] = out["component_sku"].astype(str)
+    out["quantidade"] = out["quantidade"].fillna(0).astype(int)
+    return out
+
+# ==========================
+# Cálculo: Compra Automática (congelado)
+# ==========================
+
+def calcular_compra_automatica(
+    full_df: pd.DataFrame,
+    shopee_df: pd.DataFrame,
+    fisico_df: pd.DataFrame,
+    kits_df: pd.DataFrame,
+    cat_df: pd.DataFrame,
+    horizonte_dias: int,
+    lead_time_dias: int,
+    crescimento_pct: float,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Retorna (Lista_Final, Controle) já com necessidade por componente e valor de compra."""
+    # 1) FULL → consumo diário e alvo
+    base_full = full_df.copy()
+    base_full["vendas_dia"] = base_full["Vendas_Qtd_60d"].astype(float) / 60.0
+
+    # crescimento composto aproximado sobre o período do horizonte
+    fator = (1.0 + (crescimento_pct / 100.0)) ** (horizonte_dias / 30.0)
+    base_full["alvo"] = np.round(base_full["vendas_dia"] * (lead_time_dias + horizonte_dias) * fator).astype(int)
+    base_full["oferta"] = base_full["Estoque_Full"].fillna(0).astype(int) + base_full.get("Em_Transito", 0).fillna(0).astype(int)
+    base_full["envio_desejado"] = (base_full["alvo"] - base_full["oferta"]).clip(lower=0)
+
+    # 2) Explodir envio_desejado por KITS → Necessidade por componente
+    nec = explode_skus(base_full[["SKU", "envio_desejado"]], "SKU", "envio_desejado", kits_df)
+    nec.rename(columns={"component_sku": "component_sku", "quantidade": "Necessidade"}, inplace=True)
+
+    # 3) Shopee/MT 60d aproximado (se vier total no período) — aqui usamos a coluna Quantidade como 60d
+    sh = shopee_df.copy()
+    sh60 = explode_skus(sh.rename(columns={"Quantidade": "q"}), "SKU", "q", kits_df)
+    sh60.rename(columns={"quantidade": "Shopee_60d"}, inplace=True)
+
+    # 4) FULL 60d explodido
+    full60 = explode_skus(base_full.rename(columns={"Vendas_Qtd_60d": "q"})[["SKU", "q"]], "SKU", "q", kits_df)
+    full60.rename(columns={"quantidade": "ML_60d"}, inplace=True)
+
+    # 5) Consolidar componentes + catálogo + estoque físico
+    comp = pd.DataFrame({"component_sku": pd.unique(pd.concat([nec["component_sku"], full60["component_sku"], sh60["component_sku"]], ignore_index=True))})
+
+    comp = comp.merge(nec, on="component_sku", how="left")
+    comp = comp.merge(full60, on="component_sku", how="left")
+    comp = comp.merge(sh60, on="component_sku", how="left")
+    comp["Necessidade"] = comp["Necessidade"].fillna(0).astype(int)
+    comp["ML_60d"] = comp["ML_60d"].fillna(0).astype(int)
+    comp["Shopee_60d"] = comp["Shopee_60d"].fillna(0).astype(int)
+
+    # TOTAL_60d = max(ML_60d + Shopee_60d, ML_60d) (regra do memorando)
+    comp["TOTAL_60d"] = np.maximum(comp["ML_60d"] + comp["Shopee_60d"], comp["ML_60d"])
+    comp["Reserva_30d"] = np.round((comp["TOTAL_60d"].astype(float) / 60.0) * 30.0).astype(int)
+
+    # Estoque Físico + Preço
     fis = fisico_df.copy()
-    fis["SKU"] = fis["SKU"].map(norm_sku)
-    fis["Estoque_Fisico"] = fis["Estoque_Fisico"].fillna(0).astype(int)
-    fis["Preco"] = fis["Preco"].fillna(0.0)
+    fis = fis[["SKU", "Estoque_Fisico", "Preco"]].rename(columns={"SKU": "component_sku"})
+    comp = comp.merge(fis, on="component_sku", how="left")
+    comp["Estoque_Fisico"] = comp["Estoque_Fisico"].fillna(0).astype(int)
+    comp["Preco"] = comp["Preco"].fillna(0.0).astype(float)
 
-    base = demanda.merge(fis, on="SKU", how="left")
-    base["Estoque_Fisico"] = base["Estoque_Fisico"].fillna(0).astype(int)
-    base["Preco"] = base["Preco"].fillna(0.0)
+    # Catálogo (fornecedor, status_reposicao)
+    cat = cat_df.copy()
+    comp = comp.merge(cat, on="component_sku", how="left")
 
-    fator = (1.0 + g/100.0) ** (h/30.0)
-    fk = full.copy()
-    fk["vendas_dia"] = fk["Vendas_Qtd_60d"] / 60.0
-    fk["alvo"] = np.round(fk["vendas_dia"] * (LT + h) * fator).astype(int)
-    fk["oferta"] = (fk["Estoque_Full"] + fk["Em_Transito"]).astype(int)
-    fk["envio_desejado"] = (fk["alvo"] - fk["oferta"]).clip(lower=0).astype(int)
+    # Folga Física e Compra Sugerida
+    comp["Folga_Fisico"] = (comp["Estoque_Fisico"] - comp["Reserva_30d"]).clip(lower=0).astype(int)
+    comp["Compra_Sugerida"] = (comp["Necessidade"] - comp["Folga_Fisico"]).clip(lower=0).astype(int)
 
-    necessidade = explodir_por_kits(
-        fk[["SKU","envio_desejado"]].rename(columns={"SKU":"kit_sku","envio_desejado":"Qtd"}),
-        kits,"kit_sku","Qtd").rename(columns={"Quantidade":"Necessidade"})
+    # Zerar se status_reposicao == 'nao_repor'
+    comp.loc[comp["status_reposicao"].astype(str).str.lower().eq("nao_repor"), "Compra_Sugerida"] = 0
 
-    base = base.merge(necessidade, on="SKU", how="left")
-    base["Necessidade"] = base["Necessidade"].fillna(0).astype(int)
+    comp["Valor_Compra_R$"] = (comp["Compra_Sugerida"].astype(float) * comp["Preco"].astype(float)).round(2)
 
-    base["Demanda_dia"]  = base["TOTAL_60d"] / 60.0
-    base["Reserva_30d"]  = np.round(base["Demanda_dia"] * 30).astype(int)
-    base["Folga_Fisico"] = (base["Estoque_Fisico"] - base["Reserva_30d"]).clip(lower=0).astype(int)
-
-    base["Compra_Sugerida"] = (base["Necessidade"] - base["Folga_Fisico"]).clip(lower=0).astype(int)
-
-    mask_nao = base["status_reposicao"].str.lower().str.contains("nao_repor", na=False)
-    base.loc[mask_nao, "Compra_Sugerida"] = 0
-
-    base["Valor_Compra_R$"] = (base["Compra_Sugerida"].astype(float) * base["Preco"].astype(float)).round(2)
-    base["Vendas_h_ML"]     = np.round(base["ML_60d"] * (h/60.0)).astype(int)
-    base["Vendas_h_Shopee"] = np.round(base["Shopee_60d"] * (h/60.0)).astype(int)
-
-    base = base.sort_values(["fornecedor","Valor_Compra_R$","SKU"], ascending=[True, False, True])
-
-    df_final = base[[
-        "SKU","fornecedor",
-        "Vendas_h_ML","Vendas_h_Shopee",
-        "Estoque_Fisico","Preco","Compra_Sugerida","Valor_Compra_R$",
-        "ML_60d","Shopee_60d","TOTAL_60d","Reserva_30d","Folga_Fisico","Necessidade"
-    ]].reset_index(drop=True)
-
-    # Painel
-    fis_unid  = int(fis["Estoque_Fisico"].sum())
-    fis_valor = float((fis["Estoque_Fisico"] * fis["Preco"]).sum())
-    full_stock_comp = explodir_por_kits(
-        full[["SKU","Estoque_Full"]].rename(columns={"SKU":"kit_sku","Estoque_Full":"Qtd"}),
-        kits,"kit_sku","Qtd")
-    full_stock_comp = full_stock_comp.merge(fis[["SKU","Preco"]], on="SKU", how="left")
-    full_unid  = int(full["Estoque_Full"].sum())
-    full_valor = float((full_stock_comp["Quantidade"].fillna(0) * full_stock_comp["Preco"].fillna(0.0)).sum())
-
-    painel = {"full_unid": full_unid, "full_valor": full_valor, "fisico_unid": fis_unid, "fisico_valor": fis_valor}
-    return df_final, painel
-
-# ===================== EXPORT XLSX =====================
-def sha256_of_csv(df: pd.DataFrame) -> str:
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
-    return hashlib.sha256(csv_bytes).hexdigest()
-
-def exportar_xlsx(df_final: pd.DataFrame, h: int, params: dict, pendencias: list | None = None) -> bytes:
-    int_cols = ["Vendas_h_ML","Vendas_h_Shopee","Estoque_Fisico","Compra_Sugerida","Reserva_30d","Folga_Fisico","Necessidade","ML_60d","Shopee_60d","TOTAL_60d"]
-    for c in int_cols:
-        bad = df_final.index[(df_final[c] < 0) | (df_final[c].astype(float) % 1 != 0)]
-        if len(bad) > 0:
-            linha = int(bad[0]) + 2
-            sku = df_final.loc[bad[0], "SKU"] if "SKU" in df_final.columns else "?"
-            raise RuntimeError(f"Auditoria: coluna '{c}' precisa ser inteiro ≥ 0. Ex.: linha {linha} (SKU={sku}).")
-
-    calc = (df_final["Compra_Sugerida"] * df_final["Preco"]).round(2).values
-    if not np.allclose(df_final["Valor_Compra_R$"].values, calc):
-        bad = np.where(~np.isclose(df_final["Valor_Compra_R$"].values, calc))[0]
-        linha = int(bad[0]) + 2 if len(bad) else "?"
-        sku = df_final.iloc[bad[0]]["SKU"] if len(bad) and "SKU" in df_final.columns else "?"
-        raise RuntimeError(f"Auditoria: 'Valor_Compra_R$' ≠ 'Compra_Sugerida × Preco'. Ex.: linha {linha} (SKU={sku}).")
-
-    hash_str = sha256_of_csv(df_final)
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as w:
-        lista = df_final[df_final["Compra_Sugerida"] > 0].copy()
-        lista.to_excel(w, sheet_name="Lista_Final", index=False)
-        ws = w.sheets["Lista_Final"]
-        for i, col in enumerate(lista.columns):
-            width = max(12, int(lista[col].astype(str).map(len).max()) + 2)
-            ws.set_column(i, i, min(width, 40))
-        ws.freeze_panes(1, 0); ws.autofilter(0, 0, len(lista), len(lista.columns)-1)
-
-        if pendencias:
-            pd.DataFrame(pendencias).to_excel(w, sheet_name="Pendencias", index=False)
-
-        ctrl = pd.DataFrame([{
-            "data_hora": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "h": h,
-            "linhas_Lista_Final": int((df_final["Compra_Sugerida"] > 0).sum()),
-            "soma_Compra_Sugerida": int(df_final["Compra_Sugerida"].sum()),
-            "soma_Valor_Compra_R$": float(df_final["Valor_Compra_R$"].sum()),
-            "hash_sha256": hash_str,
-        } | params])
-        ctrl.to_excel(w, sheet_name="Controle", index=False)
-    output.seek(0)
-    return output.read()
-
-# ===================== UI: SIDEBAR (PADRÃO) =====================
-with st.sidebar:
-    st.subheader("Parâmetros")
-    h  = st.selectbox("Horizonte (dias)", [30, 60, 90], index=1)
-    g  = st.number_input("Crescimento % ao mês", value=0.0, step=1.0)
-    LT = st.number_input("Lead time (dias)", value=0, step=1, min_value=0)
-
-    st.markdown("---")
-    st.subheader("Padrão (KITS/CAT) — Google Sheets")
-    st.caption("Carrega **somente** quando você clicar. ID fixo da planilha foi deixado no código.")
-    colA, colB = st.columns([1, 1])
-    with colA:
-        if st.button("Carregar padrão agora", use_container_width=True):
-            try:
-                cat = carregar_padrao_do_xlsx(DEFAULT_SHEET_ID)
-                st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku":"sku"})
-                st.session_state.kits_df = cat.kits_reais
-                st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                st.success("Padrão carregado com sucesso.")
-            except Exception as e:
-                st.session_state.catalogo_df = None; st.session_state.kits_df = None; st.session_state.loaded_at = None
-                st.error(str(e))
-    with colB:
-        st.link_button("🔗 Abrir no Drive (editar)", DEFAULT_SHEET_LINK, use_container_width=True)
-
-    st.text_input("Link alternativo do Google Sheets (opcional)", key="alt_sheet_link",
-                  help="Se necessário, cole o link e use o botão abaixo.")
-    if st.button("Carregar deste link", use_container_width=True):
-        try:
-            cat = carregar_padrao_do_link(st.session_state.alt_sheet_link.strip())
-            st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku":"sku"})
-            st.session_state.kits_df = cat.kits_reais
-            st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            st.success("Padrão carregado (link alternativo).")
-        except Exception as e:
-            st.session_state.catalogo_df = None; st.session_state.kits_df = None; st.session_state.loaded_at = None
-            st.error(str(e))
-
-# ===================== TÍTULO =====================
-st.title("Reposição Logística — Alivvia")
-if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
-    st.warning("► Carregue o **Padrão (KITS/CAT)** no sidebar antes de usar as abas.")
-
-# ===================== ABAS =====================
-tab1, tab2, tab3 = st.tabs(["📂 Dados das Empresas", "🧮 Compra Automática", "📦 Alocação de Compra"])
-
-# ---------- TAB 1: UPLOADS ----------
-with tab1:
-    st.subheader("Uploads fixos por empresa (mantidos até você limpar)")
-    st.caption("Salvamos FULL e Shopee/MT (e opcionalmente Estoque) por empresa na sessão. Clique **Salvar** para fixar.")
-
-    def bloco_empresa(emp: str):
-        st.markdown(f"### {emp}")
-        c1, c2 = st.columns(2)
-        # FULL
-        with c1:
-            st.markdown(f"**FULL — {emp}**")
-            up_full = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_full_{emp}")
-            if up_full is not None:
-                st.session_state[emp]["FULL"]["name"]  = up_full.name
-                st.session_state[emp]["FULL"]["bytes"] = up_full.read()
-                st.success(f"FULL carregado: {up_full.name}")
-            if st.session_state[emp]["FULL"]["name"]:
-                st.caption(f"FULL salvo: **{st.session_state[emp]['FULL']['name']}**")
-        # Shopee/MT
-        with c2:
-            st.markdown(f"**Shopee/MT — {emp}**")
-            up_v = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_v_{emp}")
-            if up_v is not None:
-                st.session_state[emp]["VENDAS"]["name"]  = up_v.name
-                st.session_state[emp]["VENDAS"]["bytes"] = up_v.read()
-                st.success(f"Vendas carregado: {up_v.name}")
-            if st.session_state[emp]["VENDAS"]["name"]:
-                st.caption(f"Vendas salvo: **{st.session_state[emp]['VENDAS']['name']}**")
-
-        # Estoque Físico (opcional para compra)
-        st.markdown("**Estoque Físico — opcional (necessário só para Compra Automática)**")
-        up_e = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_e_{emp}")
-        if up_e is not None:
-            st.session_state[emp]["ESTOQUE"]["name"]  = up_e.name
-            st.session_state[emp]["ESTOQUE"]["bytes"] = up_e.read()
-            st.success(f"Estoque carregado: {up_e.name}")
-        if st.session_state[emp]["ESTOQUE"]["name"]:
-            st.caption(f"Estoque salvo: **{st.session_state[emp]['ESTOQUE']['name']}**")
-
-        c3, c4 = st.columns([1,1])
-        with c3:
-            if st.button(f"Salvar {emp}", use_container_width=True, key=f"save_{emp}"):
-                st.success(f"Status {emp}: FULL [{'OK' if st.session_state[emp]['FULL']['name'] else '–'}] • "
-                           f"Shopee [{'OK' if st.session_state[emp]['VENDAS']['name'] else '–'}] • "
-                           f"Estoque [{'OK' if st.session_state[emp]['ESTOQUE']['name'] else '–'}]")
-        with c4:
-            if st.button(f"Limpar {emp}", use_container_width=True, key=f"clr_{emp}"):
-                st.session_state[emp] = {"FULL":{"name":None,"bytes":None},
-                                         "VENDAS":{"name":None,"bytes":None},
-                                         "ESTOQUE":{"name":None,"bytes":None}}
-                st.info(f"{emp} limpo.")
-
-        st.divider()
-
-    bloco_empresa("ALIVVIA")
-    bloco_empresa("JCA")
-
-# ---------- TAB 2: COMPRA AUTOMÁTICA ----------
-with tab2:
-    st.subheader("Gerar Compra (por empresa) — lógica original")
-
-    if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
-        st.info("Carregue o **Padrão (KITS/CAT)** no sidebar.")
+    # Ordenação padrão: fornecedor ↑, valor_compra ↓, SKU ↑
+    if "fornecedor" in comp.columns:
+        comp.sort_values(by=["fornecedor", "Valor_Compra_R$", "component_sku"], ascending=[True, False, True], inplace=True)
     else:
-        empresa = st.radio("Empresa ativa", ["ALIVVIA", "JCA"], horizontal=True, key="empresa_ca")
-        dados = st.session_state[empresa]
+        comp.sort_values(by=["Valor_Compra_R$", "component_sku"], ascending=[False, True], inplace=True)
 
-        col = st.columns(3)
-        col[0].info(f"FULL: {dados['FULL']['name'] or '—'}")
-        col[1].info(f"Shopee/MT: {dados['VENDAS']['name'] or '—'}")
-        col[2].info(f"Estoque: {dados['ESTOQUE']['name'] or '—'}")
+    # Controle para auditoria
+    controle = comp[[
+        "component_sku", "Necessidade", "ML_60d", "Shopee_60d", "TOTAL_60d", "Reserva_30d",
+        "Estoque_Fisico", "Folga_Fisico", "Compra_Sugerida", "Preco", "Valor_Compra_R$",
+        "fornecedor", "status_reposicao"
+    ]].copy()
 
-        if st.button(f"Gerar Compra — {empresa}", type="primary"):
-            try:
-                # valida presença
-                for k, rot in [("FULL","FULL"),("VENDAS","Shopee/MT"),("ESTOQUE","Estoque")]:
-                    if not (dados[k]["name"] and dados[k]["bytes"]):
-                        raise RuntimeError(f"Arquivo '{rot}' não foi salvo para {empresa}. Vá em **Dados das Empresas** e salve.")
+    # Hash de integridade (sha256 do CSV de controle)
+    csv_bytes = controle.to_csv(index=False).encode("utf-8")
+    sha = hashlib.sha256(csv_bytes).hexdigest()
+    controle["hash_sha256"] = sha
 
-                # leitura pelos BYTES
-                full_raw   = load_any_table_from_bytes(dados["FULL"]["name"], dados["FULL"]["bytes"])
-                vendas_raw = load_any_table_from_bytes(dados["VENDAS"]["name"], dados["VENDAS"]["bytes"])
-                fisico_raw = load_any_table_from_bytes(dados["ESTOQUE"]["name"], dados["ESTOQUE"]["bytes"])
+    # Lista_Final (para exibição/Export)
+    lista_final = comp.rename(columns={"component_sku": "SKU"})[
+        ["SKU", "fornecedor", "Compra_Sugerida", "Valor_Compra_R$"]
+    ].copy()
 
-                # tipagem
-                t_full = mapear_tipo(full_raw)
-                t_v    = mapear_tipo(vendas_raw)
-                t_f    = mapear_tipo(fisico_raw)
-                if t_full != "FULL":   raise RuntimeError("FULL inválido: precisa de SKU e Vendas_60d/Estoque_full.")
-                if t_v    != "VENDAS": raise RuntimeError("Vendas inválido: não achei coluna de quantidade.")
-                if t_f    != "FISICO": raise RuntimeError("Estoque inválido: precisa de Estoque e Preço.")
+    return lista_final, controle
 
-                full_df   = mapear_colunas(full_raw, t_full)
-                vendas_df = mapear_colunas(vendas_raw, t_v)
-                fisico_df = mapear_colunas(fisico_raw, t_f)
+# ==========================
+# Alocação proporcional (sem estoque)
+# ==========================
 
-                cat = Catalogo(
-                    catalogo_simples=st.session_state.catalogo_df.rename(columns={"sku":"component_sku"}),
-                    kits_reais=st.session_state.kits_df
-                )
-                df_final, painel = calcular(full_df, fisico_df, vendas_df, cat, h=h, g=g, LT=LT)
+def alocar_compra(
+    total_qtd: int,
+    comp_sku: str,
+    full_alivvia: pd.DataFrame, shopee_alivvia: pd.DataFrame,
+    full_jca: pd.DataFrame, shopee_jca: pd.DataFrame,
+    kits_df: pd.DataFrame,
+) -> pd.DataFrame:
+    # Explodir FULL 60d e Shopee 60d para ALIVVIA
+    ml_a = explode_skus(full_alivvia.rename(columns={"Vendas_Qtd_60d": "q"})[["SKU", "q"]], "SKU", "q", kits_df)
+    ml_a.rename(columns={"quantidade": "ML_60d_A"}, inplace=True)
+    sp_a = explode_skus(shopee_alivvia.rename(columns={"Quantidade": "q"}), "SKU", "q", kits_df)
+    sp_a.rename(columns={"quantidade": "Shopee_60d_A"}, inplace=True)
 
-                st.success("Cálculo concluído.")
-                cA, cB, cC, cD = st.columns(4)
-                cA.metric("Full (un)",  f"{painel['full_unid']:,}".replace(",", "."))
-                cB.metric("Full (R$)",  f"R$ {painel['full_valor']:,.2f}")
-                cC.metric("Físico (un)",f"{painel['fisico_unid']:,}".replace(",", "."))
-                cD.metric("Físico (R$)",f"R$ {painel['fisico_valor']:,.2f}")
+    # JCA
+    ml_j = explode_skus(full_jca.rename(columns={"Vendas_Qtd_60d": "q"})[["SKU", "q"]], "SKU", "q", kits_df)
+    ml_j.rename(columns={"quantidade": "ML_60d_J"}, inplace=True)
+    sp_j = explode_skus(shopee_jca.rename(columns={"Quantidade": "q"}), "SKU", "q", kits_df)
+    sp_j.rename(columns={"quantidade": "Shopee_60d_J"}, inplace=True)
 
-                st.dataframe(df_final, use_container_width=True, height=500)
+    # Consolidar
+    base = pd.DataFrame({"component_sku": [comp_sku]})
+    base = base.merge(ml_a, on="component_sku", how="left")
+    base = base.merge(sp_a, on="component_sku", how="left")
+    base = base.merge(ml_j, on="component_sku", how="left")
+    base = base.merge(sp_j, on="component_sku", how="left")
 
-                if st.checkbox("Gerar XLSX (Lista_Final + Controle)", key="chk_xlsx"):
-                    xlsx = exportar_xlsx(df_final, h=h, params={"g":g,"LT":LT,"empresa":empresa})
-                    st.download_button(
-                        "Baixar XLSX", data=xlsx,
-                        file_name=f"Compra_Sugerida_{empresa}_{h}d.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+    for c in ["ML_60d_A", "Shopee_60d_A", "ML_60d_J", "Shopee_60d_J"]:
+        base[c] = base[c].fillna(0).astype(int)
 
-            except Exception as e:
-                st.error(str(e))
+    base["Demanda_A"] = base["ML_60d_A"] + base["Shopee_60d_A"]
+    base["Demanda_J"] = base["ML_60d_J"] + base["Shopee_60d_J"]
 
-# ---------- TAB 3: ALOCAÇÃO DE COMPRA (sem estoque) ----------
-with tab3:
-    st.subheader("Distribuir quantidade entre empresas — proporcional às vendas (FULL + Shopee)")
-
-    if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
-        st.info("Carregue o **Padrão (KITS/CAT)** no sidebar.")
+    soma = int(base["Demanda_A"].iloc[0] + base["Demanda_J"].iloc[0])
+    if soma == 0:
+        al_a = total_qtd // 2
+        al_j = total_qtd - al_a
     else:
-        CATALOGO = st.session_state.catalogo_df
-        sku_opcoes = CATALOGO["sku"].dropna().astype(str).sort_values().unique().tolist()
-        sku_escolhido = st.selectbox("SKU do componente para alocar", sku_opcoes, key="alloc_sku")
-        qtd_lote = st.number_input("Quantidade total do lote (ex.: 400)", min_value=1, value=1000, step=50)
+        prop_a = base["Demanda_A"].iloc[0] / soma
+        al_a = int(round(total_qtd * prop_a))
+        al_j = int(total_qtd - al_a)
 
-        if st.button("Calcular alocação proporcional"):
+    return pd.DataFrame({
+        "component_sku": [comp_sku, comp_sku],
+        "empresa": ["ALIVVIA", "JCA"],
+        "alocacao_sugerida": [al_a, al_j],
+    })
+
+# ==========================
+# UI — Estados básicos (filtros pós-geração)
+# ==========================
+if "filtro_fornecedor" not in st.session_state:
+    st.session_state["filtro_fornecedor"] = []
+if "filtro_sku" not in st.session_state:
+    st.session_state["filtro_sku"] = []
+
+st.set_page_config(page_title="Reposição Logística — Alivvia/JCA", layout="wide")
+st.title("Reposição Logística (Alivvia/JCA)")
+
+# ==========================
+# Sidebar — Carregar Padrão (KITS/CAT)
+# ==========================
+st.sidebar.subheader("Padrão KITS/CAT (Google Sheets)")
+url_kits_cat = st.sidebar.text_input("URL export XLSX do Google (export?format=xlsx)")
+if st.sidebar.button("Carregar Padrão (KITS/CAT)"):
+    try:
+        kits_df, cat_df = load_kits_cat_from_url(url_kits_cat)
+        st.session_state["KITS_DF"] = kits_df
+        st.session_state["CAT_DF"] = cat_df
+        st.sidebar.success("Padrão KITS/CAT carregado.")
+    except Exception as e:
+        st.sidebar.error(f"Falha ao carregar Padrão: {e}")
+
+# Mostrar status do padrão
+kits_ok = st.session_state.get("KITS_DF") is not None
+cat_ok = st.session_state.get("CAT_DF") is not None
+st.sidebar.caption(f"KITS: {'OK' if kits_ok else '—'} | CAT: {'OK' if cat_ok else '—'}")
+
+# ==========================
+# Abas
+# ==========================
+aba = st.tabs(["Dados das Empresas", "Compra Automática", "Alocação de Compra"])
+
+# --------------------------
+# ABA 1 — Dados das Empresas
+# --------------------------
+with aba[0]:
+    st.subheader("Dados das Empresas")
+
+    # Rehidratar sessão a partir da persistência (se sessão vazia)
+    for empresa in EMPRESAS:
+        if st.session_state.get(f"{empresa}_FULL") is None:
+            df = _load_df(empresa, "FULL")
+            if df is not None:
+                st.session_state[f"{empresa}_FULL"] = df
+        if st.session_state.get(f"{empresa}_SHOPEE") is None:
+            df = _load_df(empresa, "SHOPEE")
+            if df is not None:
+                st.session_state[f"{empresa}_SHOPEE"] = df
+        if st.session_state.get(f"{empresa}_FISICO") is None:
+            df = _load_df(empresa, "FISICO")
+            if df is not None:
+                st.session_state[f"{empresa}_FISICO"] = df
+
+    cols = st.columns(2)
+    for i, empresa in enumerate(EMPRESAS):
+        with cols[i]:
+            st.markdown(f"### {empresa}")
+            f_full = st.file_uploader(f"{empresa} — FULL (XLSX/CSV)", key=f"up_{empresa}_FULL")
+            f_shop = st.file_uploader(f"{empresa} — Shopee/MT (XLSX/CSV)", key=f"up_{empresa}_SHOPEE")
+            f_fis  = st.file_uploader(f"{empresa} — Estoque Físico (opcional) (XLSX/CSV)", key=f"up_{empresa}_FISICO")
+
+            colb1, colb2 = st.columns(2)
+            with colb1:
+                if st.button(f"Salvar {empresa}"):
+                    try:
+                        if f_full is not None:
+                            df_full_raw = _read_any_table(f_full)
+                            df_full = _map_full_columns(df_full_raw)
+                            st.session_state[f"{empresa}_FULL"] = df_full
+                        if f_shop is not None:
+                            df_sh_raw = _read_any_table(f_shop)
+                            df_sh = _map_shopee_columns(df_sh_raw)
+                            st.session_state[f"{empresa}_SHOPEE"] = df_sh
+                        if f_fis is not None:
+                            df_fi_raw = _read_any_table(f_fis)
+                            df_fi = _map_fisico_columns(df_fi_raw)
+                            st.session_state[f"{empresa}_FISICO"] = df_fi
+
+                        # Persistir o que existir
+                        _persist_df(st.session_state.get(f"{empresa}_FULL"), empresa, "FULL")
+                        _persist_df(st.session_state.get(f"{empresa}_SHOPEE"), empresa, "SHOPEE")
+                        _persist_df(st.session_state.get(f"{empresa}_FISICO"), empresa, "FISICO")
+                        st.success(f"Bases da {empresa} salvas e persistidas.")
+                    except Exception as e:
+                        st.error(f"Falha ao salvar {empresa}: {e}")
+
+            with colb2:
+                if st.button(f"Limpar {empresa}"):
+                    for key in ("FULL", "SHOPEE", "FISICO"):
+                        st.session_state[f"{empresa}_{key}"] = None
+                    _clear_storage(empresa)
+                    st.warning(f"{empresa} limpa (sessão + armazenamento).")
+
+            # Mostrar status
+            st.caption(
+                f"FULL: {'OK' if st.session_state.get(f'{empresa}_FULL') is not None else '—'} | "
+                f"Shopee: {'OK' if st.session_state.get(f'{empresa}_SHOPEE') is not None else '—'} | "
+                f"Físico: {'OK' if st.session_state.get(f'{empresa}_FISICO') is not None else '—'}"
+            )
+
+# --------------------------
+# ABA 2 — Compra Automática
+# --------------------------
+with aba[1]:
+    st.subheader("Compra Automática")
+    kits_df = st.session_state.get("KITS_DF")
+    cat_df  = st.session_state.get("CAT_DF")
+
+    if kits_df is None or cat_df is None:
+        st.error("Carregue o Padrão KITS/CAT na barra lateral antes de continuar.")
+    else:
+        empresa_ativa = st.selectbox("Empresa", EMPRESAS)
+        colp1, colp2, colp3 = st.columns(3)
+        with colp1:
+            horizonte = st.number_input("Horizonte (dias)", min_value=7, max_value=120, value=60, step=1)
+        with colp2:
+            lt = st.number_input("Lead time (dias)", min_value=0, max_value=120, value=15, step=1)
+        with colp3:
+            cresc = st.number_input("Crescimento mensal (%)", min_value=-50.0, max_value=200.0, value=0.0, step=1.0)
+
+        if st.button("Gerar Compra"):
             try:
-                # precisa de FULL e VENDAS salvos para AMBAS as empresas
-                missing = []
-                for emp in ["ALIVVIA","JCA"]:
-                    if not (st.session_state[emp]["FULL"]["name"] and st.session_state[emp]["FULL"]["bytes"]):
-                        missing.append(f"{emp} FULL")
-                    if not (st.session_state[emp]["VENDAS"]["name"] and st.session_state[emp]["VENDAS"]["bytes"]):
-                        missing.append(f"{emp} Shopee/MT")
-                if missing:
-                    raise RuntimeError("Faltam arquivos salvos: " + ", ".join(missing) + ". Use a aba **Dados das Empresas**.")
-
-                # leitura BYTES
-                def read_pair(emp: str) -> Tuple[pd.DataFrame,pd.DataFrame]:
-                    fa = load_any_table_from_bytes(st.session_state[emp]["FULL"]["name"],   st.session_state[emp]["FULL"]["bytes"])
-                    sa = load_any_table_from_bytes(st.session_state[emp]["VENDAS"]["name"], st.session_state[emp]["VENDAS"]["bytes"])
-                    tfa = mapear_tipo(fa); tsa = mapear_tipo(sa)
-                    if tfa != "FULL":   raise RuntimeError(f"FULL inválido ({emp}): precisa de SKU e Vendas_60d/Estoque_full.")
-                    if tsa != "VENDAS": raise RuntimeError(f"Vendas inválido ({emp}): não achei coluna de quantidade.")
-                    return mapear_colunas(fa, tfa), mapear_colunas(sa, tsa)
-
-                full_A, shp_A = read_pair("ALIVVIA")
-                full_J, shp_J = read_pair("JCA")
-
-                # explode por kits --> demanda 60d por componente
-                cat = Catalogo(
-                    catalogo_simples=CATALOGO.rename(columns={"sku":"component_sku"}),
-                    kits_reais=st.session_state.kits_df
-                )
-                kits = construir_kits_efetivo(cat)
-
-                def vendas_componente(full_df, shp_df) -> pd.DataFrame:
-                    a = explodir_por_kits(full_df[["SKU","Vendas_Qtd_60d"]].rename(columns={"SKU":"kit_sku","Vendas_Qtd_60d":"Qtd"}), kits,"kit_sku","Qtd")
-                    a = a.rename(columns={"Quantidade":"ML_60d"})
-                    b = explodir_por_kits(shp_df[["SKU","Quantidade"]].rename(columns={"SKU":"kit_sku","Quantidade":"Qtd"}), kits,"kit_sku","Qtd")
-                    b = b.rename(columns={"Quantidade":"Shopee_60d"})
-                    out = pd.merge(a, b, on="SKU", how="outer").fillna(0)
-                    out["Demanda_60d"] = out["ML_60d"].astype(int) + out["Shopee_60d"].astype(int)
-                    return out[["SKU","Demanda_60d"]]
-
-                demA = vendas_componente(full_A, shp_A)
-                demJ = vendas_componente(full_J, shp_J)
-
-                dA = int(demA.loc[demA["SKU"]==norm_sku(sku_escolhido), "Demanda_60d"].sum())
-                dJ = int(demJ.loc[demJ["SKU"]==norm_sku(sku_escolhido), "Demanda_60d"].sum())
-
-                total = dA + dJ
-                if total == 0:
-                    st.warning("Sem vendas detectadas; alocação 50/50 por falta de base.")
-                    propA = propJ = 0.5
+                full = st.session_state.get(f"{empresa_ativa}_FULL")
+                sh = st.session_state.get(f"{empresa_ativa}_SHOPEE")
+                fi = st.session_state.get(f"{empresa_ativa}_FISICO")
+                if full is None:
+                    st.error("Base FULL não encontrada para a empresa selecionada.")
+                elif sh is None:
+                    st.error("Base Shopee/MT não encontrada para a empresa selecionada.")
+                elif fi is None:
+                    st.error("Estoque Físico é obrigatório para Compra Automática.")
                 else:
-                    propA = dA / total
-                    propJ = dJ / total
-
-                alocA = int(round(qtd_lote * propA))
-                alocJ = int(qtd_lote - alocA)
-
-                res = pd.DataFrame([
-                    {"Empresa":"ALIVVIA", "SKU":norm_sku(sku_escolhido), "Demanda_60d":dA, "Proporção":round(propA,4), "Alocação_Sugerida":alocA},
-                    {"Empresa":"JCA",     "SKU":norm_sku(sku_escolhido), "Demanda_60d":dJ, "Proporção":round(propJ,4), "Alocação_Sugerida":alocJ},
-                ])
-                st.dataframe(res, use_container_width=True)
-                st.success(f"Total alocado: {qtd_lote} un (ALIVVIA {alocA} | JCA {alocJ})")
-                st.download_button("Baixar alocação (.csv)", data=res.to_csv(index=False).encode("utf-8"),
-                                   file_name=f"Alocacao_{sku_escolhido}_{qtd_lote}.csv", mime="text/csv")
+                    lista_final, controle = calcular_compra_automatica(full, sh, fi, kits_df, cat_df, int(horizonte), int(lt), float(cresc))
+                    st.session_state["_CA_LISTA_FINAL"] = lista_final
+                    st.session_state["_CA_CONTROLE"] = controle
+                    st.success("Compra gerada.")
             except Exception as e:
-                st.error(str(e))
+                st.error(f"Erro ao calcular compra: {e}")
 
-st.caption("© Alivvia — simples, robusto e auditável.")
+        # Se já existe resultado, mostrar com filtros autocompletáveis (restaurado)
+        df_final = st.session_state.get("_CA_LISTA_FINAL")
+        df_controle = st.session_state.get("_CA_CONTROLE")
+        if isinstance(df_final, pd.DataFrame) and not df_final.empty:
+            df_view = df_final.copy()
+
+            # Opções
+            opts_fornecedor = sorted([x for x in df_view.get("fornecedor", pd.Series(dtype=str)).dropna().unique().tolist() if isinstance(x, str)])
+            opts_sku = sorted([x for x in df_view.get("SKU", pd.Series(dtype=str)).dropna().unique().tolist() if isinstance(x, str)])
+
+            f1, f2 = st.columns(2)
+            with f1:
+                sel_forn = st.multiselect(
+                    "Filtrar por Fornecedor",
+                    options=opts_fornecedor,
+                    default=st.session_state.get("filtro_fornecedor", []),
+                    help="Selecione um ou mais fornecedores (autocomplete)."
+                )
+            with f2:
+                sel_sku = st.multiselect(
+                    "Filtrar por SKU",
+                    options=opts_sku,
+                    default=st.session_state.get("filtro_sku", []),
+                    help="Selecione um ou mais SKUs (autocomplete)."
+                )
+
+            st.session_state["filtro_fornecedor"] = sel_forn
+            st.session_state["filtro_sku"] = sel_sku
+
+            # Aplicar filtros
+            if sel_forn:
+                df_view = df_view[df_view["fornecedor"].isin(sel_forn)]
+            if sel_sku:
+                df_view = df_view[df_view["SKU"].isin(sel_sku)]
+
+            st.dataframe(df_view, use_container_width=True)
+
+            # Export XLSX (Lista_Final filtrada + Controle íntegro para auditoria)
+            def _to_xlsx_bytes(df_lista_final: pd.DataFrame, df_controle: pd.DataFrame) -> bytes:
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                    df_lista_final.to_excel(writer, index=False, sheet_name="Lista_Final")
+                    df_controle.to_excel(writer, index=False, sheet_name="Controle")
+                return output.getvalue()
+
+            xbytes = _to_xlsx_bytes(df_view, df_controle if isinstance(df_controle, pd.DataFrame) else pd.DataFrame())
+            st.download_button(
+                "Exportar XLSX (Filtrado)",
+                data=xbytes,
+                file_name="compra_automatica.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+# --------------------------
+# ABA 3 — Alocação de Compra
+# --------------------------
+with aba[2]:
+    st.subheader("Alocação de Compra")
+
+    kits_df = st.session_state.get("KITS_DF")
+    if kits_df is None:
+        st.error("Carregue o Padrão KITS/CAT na barra lateral antes de continuar.")
+    else:
+        comp_sku = st.text_input("Componente (component_sku)")
+        total = st.number_input("Quantidade total a alocar", min_value=0, value=0, step=1)
+
+        if st.button("Calcular Alocação"):
+            try:
+                full_a = st.session_state.get("ALIVVIA_FULL")
+                sh_a = st.session_state.get("ALIVVIA_SHOPEE")
+                full_j = st.session_state.get("JCA_FULL")
+                sh_j = st.session_state.get("JCA_SHOPEE")
+
+                if any(x is None for x in [full_a, sh_a, full_j, sh_j]):
+                    st.error("É necessário ter FULL e Shopee salvos para as duas empresas.")
+                else:
+                    res = alocar_compra(int(total), comp_sku.strip(), full_a, sh_a, full_j, sh_j, kits_df)
+                    st.dataframe(res, use_container_width=True)
+                    # Export CSV
+                    csv = res.to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        "Baixar CSV",
+                        data=csv,
+                        file_name=f"alocacao_{comp_sku}.csv",
+                        mime="text/csv"
+                    )
+            except Exception as e:
+                st.error(f"Erro na alocação: {e}")

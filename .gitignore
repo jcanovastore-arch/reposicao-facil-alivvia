@@ -1,14 +1,11 @@
-# venv e caches
-venv/
-.env/
-*.pyc
 __pycache__/
-
-# arquivos locais
-*.xlsx
-*.xls
-*.csv
-.DS_Store
-
-# streamlit
+*.pyc
+*.pyo
+*.pyd
+*.DS_Store
+.vscode/
+.idea/
+.env
+.venv/
 .streamlit/secrets.toml
+.appdata_storage/
