@@ -24,6 +24,12 @@ DEFAULT_SHEET_LINK = (
 )
 DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"
 
+def badge_ok(label: str, filename: str) -> str:
+    # “pílula” verde, fácil de ver
+    return (
+        f"<span style='background:#198754; color:#fff; padding:6px 10px; "
+        f"border-radius:10px; font-size:12px;'>✅ {label}: <b>{filename}</b></span>"
+
 # -------------------------- PERSISTÊNCIA EM DISCO --------------------------
 BASE_UPLOAD_DIR = ".uploads"
 
@@ -560,7 +566,7 @@ with tab1:
                 _store_put(emp, "FULL", up.name, blob)
                 st.success(f"FULL salvo: {up.name}")
             it = st.session_state[emp]["FULL"]
-            if it["name"]: st.caption(f"FULL salvo: **{it['name']}**")
+            if it["name"]: st.markdown(badge_ok("FULL salvo", it["name"]), unsafe_allow_html=True)
         # VENDAS
         with c2:
             st.markdown(f"**Shopee/MT — {emp}**")
@@ -571,7 +577,7 @@ with tab1:
                 _store_put(emp, "VENDAS", up.name, blob)
                 st.success(f"Vendas salvo: {up.name}")
             it = st.session_state[emp]["VENDAS"]
-            if it["name"]: st.caption(f"Vendas salvo: **{it['name']}**")
+            if it["name"]: st.markdown(badge_ok("Vendas salvo", it["name"]), unsafe_allow_html=True)
 
         # ESTOQUE
         st.markdown("**Estoque Físico — opcional**")
@@ -582,7 +588,7 @@ with tab1:
             _store_put(emp, "ESTOQUE", up.name, blob)
             st.success(f"Estoque salvo: {up.name}")
         it = st.session_state[emp]["ESTOQUE"]
-        if it["name"]: st.caption(f"Estoque salvo: **{it['name']}**")
+        if it["name"]: st.markdown(badge_ok("Estoque salvo", it["name"]), unsafe_allow_html=True)
 
         colx, coly = st.columns(2)
         with colx:
@@ -708,7 +714,81 @@ with tab2:
 
 # ------------------------------ TAB 3 --------------------------------------
 with tab3:
-    st.subheader("Distribuir quantidade entre empresas — proporcional")
-    st.caption("Funciona como antes. (Sem alterações nesta versão.)")
+    st.subheader("Distribuir quantidade entre empresas — proporcional às vendas (FULL + Shopee)")
 
-st.caption(f"© Alivvia — {VERSION}")
+    if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
+        st.info("Carregue o **Padrão (KITS/CAT)** no sidebar.")
+    else:
+        CATALOGO = st.session_state.catalogo_df
+        sku_opcoes = CATALOGO["sku"].dropna().astype(str).sort_values().unique().tolist()
+        sku_escolhido = st.selectbox("SKU do componente para alocar", sku_opcoes, key="alloc_sku")
+        qtd_lote = st.number_input("Quantidade total do lote", min_value=1, value=1000, step=50)
+
+        st.caption("Necessita FULL e Shopee/MT salvos para **ALIVVIA** e **JCA** na aba Dados.")
+
+        if st.button("Calcular alocação proporcional", type="primary"):
+            try:
+                # Checagem de arquivos salvos
+                missing = []
+                for emp in ["ALIVVIA","JCA"]:
+                    if not (st.session_state[emp]["FULL"]["name"] and st.session_state[emp]["FULL"]["bytes"]):
+                        missing.append(f"{emp} FULL")
+                    if not (st.session_state[emp]["VENDAS"]["name"] and st.session_state[emp]["VENDAS"]["bytes"]):
+                        missing.append(f"{emp} Shopee/MT")
+                if missing:
+                    raise RuntimeError("Faltam arquivos salvos: " + ", ".join(missing))
+
+                # Helpers locais
+                def read_pair(emp: str):
+                    fa = load_any_table_from_bytes(st.session_state[emp]["FULL"]["name"],   st.session_state[emp]["FULL"]["bytes"])
+                    sa = load_any_table_from_bytes(st.session_state[emp]["VENDAS"]["name"], st.session_state[emp]["VENDAS"]["bytes"])
+                    tfa = mapear_tipo(fa); tsa = mapear_tipo(sa)
+                    if tfa != "FULL":   raise RuntimeError(f"FULL inválido ({emp}).")
+                    if tsa != "VENDAS": raise RuntimeError(f"Vendas inválido ({emp}).")
+                    return mapear_colunas(fa, tfa), mapear_colunas(sa, tsa)
+
+                full_A, shp_A = read_pair("ALIVVIA")
+                full_J, shp_J = read_pair("JCA")
+
+                # Explode por kits → demanda 60d por componente
+                cat = Catalogo(
+                    catalogo_simples=CATALOGO.rename(columns={"sku":"component_sku"}),
+                    kits_reais=st.session_state.kits_df
+                )
+                kits = construir_kits_efetivo(cat)
+
+                def vendas_componente(full_df, shp_df):
+                    a = explodir_por_kits(full_df[["SKU","Vendas_Qtd_60d"]].rename(columns={"SKU":"kit_sku","Vendas_Qtd_60d":"Qtd"}), kits,"kit_sku","Qtd").rename(columns={"Quantidade":"ML_60d"})
+                    b = explodir_por_kits(shp_df[["SKU","Quantidade"]].rename(columns={"SKU":"kit_sku","Quantidade":"Qtd"}), kits,"kit_sku","Qtd").rename(columns={"Quantidade":"Shopee_60d"})
+                    out = pd.merge(a, b, on="SKU", how="outer").fillna(0)
+                    out["Demanda_60d"] = out["ML_60d"].astype(int) + out["Shopee_60d"].astype(int)
+                    return out[["SKU","Demanda_60d"]]
+
+                demA = vendas_componente(full_A, shp_A)
+                demJ = vendas_componente(full_J, shp_J)
+
+                sku_norm = norm_sku(sku_escolhido)
+                dA = int(demA.loc[demA["SKU"]==sku_norm, "Demanda_60d"].sum())
+                dJ = int(demJ.loc[demJ["SKU"]==sku_norm, "Demanda_60d"].sum())
+                total = dA + dJ
+
+                if total == 0:
+                    st.warning("Sem vendas detectadas; alocação 50/50 por falta de base.")
+                    propA = propJ = 0.5
+                else:
+                    propA = dA / total
+                    propJ = dJ / total
+
+                alocA = int(round(qtd_lote * propA))
+                alocJ = int(qtd_lote - alocA)
+
+                res = pd.DataFrame([
+                    {"Empresa":"ALIVVIA", "SKU":sku_norm, "Demanda_60d":dA, "Proporção":round(propA,4), "Alocação_Sugerida":alocA},
+                    {"Empresa":"JCA",     "SKU":sku_norm, "Demanda_60d":dJ, "Proporção":round(propJ,4), "Alocação_Sugerida":alocJ},
+                ])
+                st.dataframe(res, use_container_width=True)
+                st.success(f"Total alocado: {qtd_lote} un (ALIVVIA {alocA} | JCA {alocJ})")
+                st.download_button("Baixar alocação (.csv)", data=res.to_csv(index=False).encode("utf-8"),
+                                   file_name=f"Alocacao_{sku_norm}_{qtd_lote}.csv", mime="text/csv")
+            except Exception as e:
+                st.error(str(e))
