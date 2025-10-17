@@ -1,11 +1,9 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# - Sem acesso automático ao Google Sheets (só quando clicar).
-# - Padrão KITS/CAT via Google Sheets (XLSX inteiro), autodetectando abas.
-# - UPLOADS salvos na sessão por empresa (até limpar).
-# - Compra Automática usa arquivos salvos (FULL + Estoque + Shopee).
-# - Alocação de Compra (proporcional às vendas FULL+Shopee) usa arquivos salvos (sem estoque).
-# - Mensagens de erro explícitas e auditoria simples.
+# Ajustes (v3.2):
+# - Oculta itens 'nao_repor' (não aparecem na grade final)
+# - Filtros pós-cálculo (Fornecedor e SKU com autocomplete) sem recálculo + export filtrado
+# - Persistência de uploads entre recarregamentos (cofre com st.cache_resource)
 
 import io
 import re
@@ -30,6 +28,27 @@ DEFAULT_SHEET_LINK = (
 )
 DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"  # fixo
 
+# ===================== COFRE (persistência entre recarregamentos) =====================
+@st.cache_resource(show_spinner=False)
+def _file_store():
+    # Mantém nome e bytes por empresa e tipo; persiste entre reruns no mesmo servidor
+    return {
+        "ALIVVIA": {"FULL": None, "VENDAS": None, "ESTOQUE": None},
+        "JCA":     {"FULL": None, "VENDAS": None, "ESTOQUE": None},
+    }
+
+def _store_put(emp: str, kind: str, name: str, blob: bytes):
+    store = _file_store()
+    store[emp][kind] = {"name": name, "bytes": blob}
+
+def _store_get(emp: str, kind: str):
+    store = _file_store()
+    return store[emp][kind]
+
+def _store_clear(emp: str):
+    store = _file_store()
+    store[emp] = {"FULL": None, "VENDAS": None, "ESTOQUE": None}
+
 # ===================== ESTADO =====================
 def _ensure_state():
     st.session_state.setdefault("catalogo_df", None)
@@ -37,12 +56,16 @@ def _ensure_state():
     st.session_state.setdefault("loaded_at", None)
     st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK)
 
-    # uploads por empresa
+    # uploads por empresa (na sessão) — sincronizados com o cofre
     for emp in ["ALIVVIA", "JCA"]:
         st.session_state.setdefault(emp, {})
-        st.session_state[emp].setdefault("FULL",   {"name": None, "bytes": None})
-        st.session_state[emp].setdefault("VENDAS", {"name": None, "bytes": None})
-        st.session_state[emp].setdefault("ESTOQUE",{"name": None, "bytes": None})
+        for kind in ["FULL", "VENDAS", "ESTOQUE"]:
+            st.session_state[emp].setdefault(kind, {"name": None, "bytes": None})
+            # Se a sessão está vazia e há arquivo no cofre, recupere para a sessão (mostra na tela mesmo após refresh)
+            if st.session_state[emp][kind]["name"] is None:
+                item = _store_get(emp, kind)
+                if item:
+                    st.session_state[emp][kind] = {"name": item["name"], "bytes": item["bytes"]}
 
 _ensure_state()
 
@@ -146,7 +169,6 @@ def load_any_table(uploaded_file) -> Optional[pd.DataFrame]:
         except Exception:
             pass
 
-    # limpeza
     cols = set(df.columns)
     sku_col = next((c for c in ["sku","codigo","codigo_sku"] if c in cols), None)
     if sku_col:
@@ -157,7 +179,7 @@ def load_any_table(uploaded_file) -> Optional[pd.DataFrame]:
     return df.reset_index(drop=True)
 
 def load_any_table_from_bytes(file_name: str, blob: bytes) -> pd.DataFrame:
-    """Leitura a partir de bytes salvos na sessão (com fallback header=2)."""
+    """Leitura a partir de bytes salvos na sessão/cofre (com fallback header=2)."""
     bio = io.BytesIO(blob); name = (file_name or "").lower()
     try:
         if name.endswith(".csv"):
@@ -374,7 +396,7 @@ def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_co
     out = out.rename(columns={"component_sku":"SKU","quantidade_comp":"Quantidade"})
     return out
 
-# ===================== COMPRA AUTOMÁTICA (LÓGICA ORIGINAL) =====================
+# ===================== COMPRA AUTOMÁTICA =====================
 def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     kits = construir_kits_efetivo(cat)
     full = full_df.copy()
@@ -429,6 +451,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
 
     base["Compra_Sugerida"] = (base["Necessidade"] - base["Folga_Fisico"]).clip(lower=0).astype(int)
 
+    # Se não repor → compra = 0 (regra original)
     mask_nao = base["status_reposicao"].str.lower().str.contains("nao_repor", na=False)
     base.loc[mask_nao, "Compra_Sugerida"] = 0
 
@@ -437,6 +460,9 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     base["Vendas_h_Shopee"] = np.round(base["Shopee_60d"] * (h/60.0)).astype(int)
 
     base = base.sort_values(["fornecedor","Valor_Compra_R$","SKU"], ascending=[True, False, True])
+
+    # >>> NOVO: além de zerar compra, ocultar da grade final tudo que for 'nao_repor'
+    base = base[~base["status_reposicao"].str.lower().str.contains("nao_repor", na=False)]
 
     df_final = base[[
         "SKU","fornecedor",
@@ -554,7 +580,7 @@ tab1, tab2, tab3 = st.tabs(["📂 Dados das Empresas", "🧮 Compra Automática"
 # ---------- TAB 1: UPLOADS ----------
 with tab1:
     st.subheader("Uploads fixos por empresa (mantidos até você limpar)")
-    st.caption("Salvamos FULL e Shopee/MT (e opcionalmente Estoque) por empresa na sessão. Clique **Salvar** para fixar.")
+    st.caption("Salvamos FULL e Shopee/MT (e opcionalmente Estoque) por empresa no **cofre**. Mesmo após recarregar a página, continuam salvos até você limpar.")
 
     def bloco_empresa(emp: str):
         st.markdown(f"### {emp}")
@@ -564,9 +590,11 @@ with tab1:
             st.markdown(f"**FULL — {emp}**")
             up_full = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_full_{emp}")
             if up_full is not None:
+                blob = up_full.read()
                 st.session_state[emp]["FULL"]["name"]  = up_full.name
-                st.session_state[emp]["FULL"]["bytes"] = up_full.read()
-                st.success(f"FULL carregado: {up_full.name}")
+                st.session_state[emp]["FULL"]["bytes"] = blob
+                _store_put(emp, "FULL", up_full.name, blob)
+                st.success(f"FULL carregado e salvo: {up_full.name}")
             if st.session_state[emp]["FULL"]["name"]:
                 st.caption(f"FULL salvo: **{st.session_state[emp]['FULL']['name']}**")
         # Shopee/MT
@@ -574,9 +602,11 @@ with tab1:
             st.markdown(f"**Shopee/MT — {emp}**")
             up_v = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_v_{emp}")
             if up_v is not None:
+                blob = up_v.read()
                 st.session_state[emp]["VENDAS"]["name"]  = up_v.name
-                st.session_state[emp]["VENDAS"]["bytes"] = up_v.read()
-                st.success(f"Vendas carregado: {up_v.name}")
+                st.session_state[emp]["VENDAS"]["bytes"] = blob
+                _store_put(emp, "VENDAS", up_v.name, blob)
+                st.success(f"Vendas carregado e salvo: {up_v.name}")
             if st.session_state[emp]["VENDAS"]["name"]:
                 st.caption(f"Vendas salvo: **{st.session_state[emp]['VENDAS']['name']}**")
 
@@ -584,15 +614,18 @@ with tab1:
         st.markdown("**Estoque Físico — opcional (necessário só para Compra Automática)**")
         up_e = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_e_{emp}")
         if up_e is not None:
+            blob = up_e.read()
             st.session_state[emp]["ESTOQUE"]["name"]  = up_e.name
-            st.session_state[emp]["ESTOQUE"]["bytes"] = up_e.read()
-            st.success(f"Estoque carregado: {up_e.name}")
+            st.session_state[emp]["ESTOQUE"]["bytes"] = blob
+            _store_put(emp, "ESTOQUE", up_e.name, blob)
+            st.success(f"Estoque carregado e salvo: {up_e.name}")
         if st.session_state[emp]["ESTOQUE"]["name"]:
             st.caption(f"Estoque salvo: **{st.session_state[emp]['ESTOQUE']['name']}**")
 
         c3, c4 = st.columns([1,1])
         with c3:
             if st.button(f"Salvar {emp}", use_container_width=True, key=f"save_{emp}"):
+                # Já salvamos no cofre quando faz upload; aqui apenas confirma status
                 st.success(f"Status {emp}: FULL [{'OK' if st.session_state[emp]['FULL']['name'] else '–'}] • "
                            f"Shopee [{'OK' if st.session_state[emp]['VENDAS']['name'] else '–'}] • "
                            f"Estoque [{'OK' if st.session_state[emp]['ESTOQUE']['name'] else '–'}]")
@@ -601,7 +634,8 @@ with tab1:
                 st.session_state[emp] = {"FULL":{"name":None,"bytes":None},
                                          "VENDAS":{"name":None,"bytes":None},
                                          "ESTOQUE":{"name":None,"bytes":None}}
-                st.info(f"{emp} limpo.")
+                _store_clear(emp)
+                st.info(f"{emp} limpo (sessão + cofre).")
 
         st.divider()
 
@@ -630,10 +664,10 @@ with tab2:
                     if not (dados[k]["name"] and dados[k]["bytes"]):
                         raise RuntimeError(f"Arquivo '{rot}' não foi salvo para {empresa}. Vá em **Dados das Empresas** e salve.")
 
-                # leitura pelos BYTES
-                full_raw   = load_any_table_from_bytes(dados["FULL"]["name"], dados["FULL"]["bytes"])
+                # leitura pelos BYTES (sessão/cofre)
+                full_raw   = load_any_table_from_bytes(dados["FULL"]["name"],   dados["FULL"]["bytes"])
                 vendas_raw = load_any_table_from_bytes(dados["VENDAS"]["name"], dados["VENDAS"]["bytes"])
-                fisico_raw = load_any_table_from_bytes(dados["ESTOQUE"]["name"], dados["ESTOQUE"]["bytes"])
+                fisico_raw = load_any_table_from_bytes(dados["ESTOQUE"]["name"],dados["ESTOQUE"]["bytes"])
 
                 # tipagem
                 t_full = mapear_tipo(full_raw)
@@ -660,15 +694,47 @@ with tab2:
                 cC.metric("Físico (un)",f"{painel['fisico_unid']:,}".replace(",", "."))
                 cD.metric("Físico (R$)",f"R$ {painel['fisico_valor']:,.2f}")
 
+                # Tabela bruta
                 st.dataframe(df_final, use_container_width=True, height=500)
 
-                if st.checkbox("Gerar XLSX (Lista_Final + Controle)", key="chk_xlsx"):
-                    xlsx = exportar_xlsx(df_final, h=h, params={"g":g,"LT":LT,"empresa":empresa})
-                    st.download_button(
-                        "Baixar XLSX", data=xlsx,
-                        file_name=f"Compra_Sugerida_{empresa}_{h}d.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+                # ========= Filtros pós-cálculo (sem recálculo) =========
+                st.session_state.setdefault("resultado_compra", {})
+                st.session_state["resultado_compra"][empresa] = df_final.copy()
+
+                with st.expander("Filtros (após geração) — sem recálculo", expanded=False):
+                    fornecedores = sorted([f for f in df_final["fornecedor"].dropna().astype(str).unique().tolist() if f != ""])
+                    sel_fornec = st.multiselect("Fornecedor", options=fornecedores, default=[], key=f"filtro_fornec_{empresa}")
+
+                    sku_opts = sorted(df_final["SKU"].dropna().astype(str).unique().tolist())
+                    sel_skus = st.multiselect("SKU (buscar e selecionar)", options=sku_opts, default=[], key=f"filtro_sku_{empresa}")
+
+                df_view = df_final.copy()
+                if sel_fornec:
+                    df_view = df_view[df_view["fornecedor"].isin(sel_fornec)]
+                if sel_skus:
+                    df_view = df_view[df_view["SKU"].isin(sel_skus)]
+
+                st.caption(f"Linhas após filtros: {len(df_view)}")
+                st.dataframe(df_view, use_container_width=True, height=420)
+
+                colx1, colx2 = st.columns([1,1])
+                with colx1:
+                    if st.checkbox("Gerar XLSX (Lista_Final + Controle) — tabela completa", key="chk_xlsx_all"):
+                        xlsx = exportar_xlsx(df_final, h=h, params={"g":g,"LT":LT,"empresa":empresa})
+                        st.download_button(
+                            "Baixar XLSX (completo)", data=xlsx,
+                            file_name=f"Compra_Sugerida_{empresa}_{h}d.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                with colx2:
+                    if st.checkbox("Gerar XLSX (Lista_Final + Controle) — somente filtrados", key=f"chk_xlsx_filtrado_{empresa}"):
+                        xlsx_filtrado = exportar_xlsx(df_view, h=h, params={"g":g,"LT":LT,"empresa":empresa,"filtro":"on"})
+                        st.download_button(
+                            "Baixar XLSX (filtrado)", data=xlsx_filtrado,
+                            file_name=f"Compra_Sugerida_{empresa}_{h}d_filtrado.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                # ========================================================
 
             except Exception as e:
                 st.error(str(e))
