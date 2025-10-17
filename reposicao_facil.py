@@ -254,16 +254,38 @@ def load_any_table(uploaded_file) -> Optional[pd.DataFrame]:
 # ======= Detecção & mapeamento =======
 def mapear_tipo(df: pd.DataFrame) -> str:
     cols = [c.lower() for c in df.columns]
-    tem_sku_std  = any(c in {"sku","codigo","codigo_sku"} for c in cols) or any("sku" in c for c in cols)
-    tem_vendas60 = any(c.startswith("vendas_60d") or c in {"vendas 60d","vendas_qtd_60d"} for c in cols)
-    tem_qtd_livre= any(("qtde" in c) or ("quant" in c) or ("venda" in c) or ("order" in c) for c in cols)
-    tem_estoque_full= any(("estoque" in c and "full" in c) or c=="estoque_full" for c in cols)
-    tem_estoque_generico= any(c in {"estoque_atual","qtd","quantidade"} or "estoque" in c for c in cols)
-    tem_transito= any(("transito" in c) or c in {"em_transito","em transito","em_transito_full","em_transito_do_anuncio"} for c in cols)
-    tem_preco = any(c in {"preco","preco_compra","preco_medio","custo","custo_medio"} for c in cols)
-    if tem_sku_std and (tem_vendas60 or tem_estoque_full or tem_transito): return "FULL"
-    if tem_sku_std and tem_estoque_generico and tem_preco: return "FISICO"
-    if tem_sku_std and tem_qtd_livre and not tem_preco: return "VENDAS"
+
+    # SKU presente (qualquer coluna contendo "sku")
+    tem_sku = any("sku" in c for c in cols) or any(c in {"sku","codigo","codigo_sku"} for c in cols)
+
+    # FULL: aceita variações de "vendas 60d"
+    def eh_vendas_60(c: str) -> bool:
+        cl = c.lower().replace(" ", "").replace("__","_")
+        return (
+            ("venda" in cl and "60" in cl) or
+            cl.startswith("vendas_60") or
+            cl in {"vendas60","vendas_qtd_60","vendas_qtd_60d","vendas60d"}
+        )
+
+    tem_vendas60 = any(eh_vendas_60(c) for c in cols)
+    tem_estoque_full_like = any(("estoque" in c and "full" in c) or c == "estoque_full" for c in cols)
+    tem_transito_like = any(("transito" in c) or c in {
+        "em_transito","em transito","em_transito_full","em_transito_do_anuncio"
+    } for c in cols)
+
+    # FÍSICO: agora basta ter estoque; preço é opcional (vamos assumir 0 se faltar)
+    tem_estoque_generico = any(("estoque" in c) or c in {"estoque_atual","qtd","quantidade"} for c in cols)
+
+    # VENDAS genéricas (Shopee/MT): quantidade/ordens/etc., sem preço
+    tem_preco = any(c in {"preco","preço","preco_compra","preco_medio","preco_unitario","custo","custo_medio"} for c in cols)
+    tem_qtd_livre = any(any(k in c for k in ["qtde","quant","venda","orders","pedido","sold","ordens","unid"]) for c in cols)
+
+    if tem_sku and (tem_vendas60 or tem_estoque_full_like or tem_transito_like):
+        return "FULL"
+    if tem_sku and tem_estoque_generico:
+        return "FISICO"
+    if tem_sku and tem_qtd_livre and not tem_preco:
+        return "VENDAS"
     return "DESCONHECIDO"
 
 def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
@@ -285,41 +307,54 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
         df["Em_Transito"]=df[c_t[0]].map(br_to_float).fillna(0).astype(int) if c_t else 0
         return df[["SKU","Vendas_Qtd_60d","Estoque_Full","Em_Transito"]].copy()
 
-    if tipo == "FISICO":
-        sku_series = df.get("sku") or df.get("codigo") or df.get("codigo_sku")
+        if tipo == "FISICO":
+        sku_series = (
+            df.get("sku") or df.get("codigo") or df.get("codigo_sku") or
+            df[df.columns[[i for i,c in enumerate(df.columns) if "sku" in c.lower()][0]]]  # primeira que contém 'sku'
+            if any("sku" in c.lower() for c in df.columns) else None
+        )
         if sku_series is None:
-            cand = next((c for c in df.columns if "sku" in c.lower()), None)
-            if cand is None: raise RuntimeError("FÍSICO inválido: não achei coluna de SKU.")
-            sku_series = df[cand]
-        df["SKU"]=sku_series.map(norm_sku)
+            raise RuntimeError("FÍSICO inválido: não achei coluna de SKU.")
+        df["SKU"] = sku_series.map(norm_sku)
 
-        c_q=[c for c in df.columns if c in ["estoque_atual","qtd","quantidade"] or ("estoque" in c)]
-        if not c_q: raise RuntimeError("FÍSICO inválido: faltou Estoque.")
-        df["Estoque_Fisico"]=df[c_q[0]].map(br_to_float).fillna(0).astype(int)
+        # estoque (aceita várias)
+        cand_estoque = [c for c in df.columns if c in ["estoque_atual","qtd","quantidade","estoque","saldo","qtde"] or "estoque" in c.lower()]
+        if not cand_estoque:
+            raise RuntimeError("FÍSICO inválido: faltou coluna de Estoque.")
+        df["Estoque_Fisico"] = df[cand_estoque[0]].map(br_to_float).fillna(0).astype(int)
 
-        c_p=[c for c in df.columns if c in ["preco","preco_compra","custo","custo_medio","preco_medio","preco_unitario"]]
-        if not c_p: raise RuntimeError("FÍSICO inválido: faltou Preço/Custo.")
-        df["Preco"]=df[c_p[0]].map(br_to_float).fillna(0.0)
+        # preço opcional — se não tiver, vira 0
+        cand_preco = [c for c in df.columns if c.lower() in {"preco","preço","preco_compra","preco_medio","preco_unitario","custo","custo_medio"}]
+        if cand_preco:
+            df["Preco"] = df[cand_preco[0]].map(br_to_float).fillna(0.0)
+        else:
+            df["Preco"] = 0.0
+
         return df[["SKU","Estoque_Fisico","Preco"]].copy()
 
-    if tipo == "VENDAS":
+        if tipo == "VENDAS":
         sku_col = next((c for c in df.columns if "sku" in c.lower()), None)
-        if sku_col is None: raise RuntimeError("VENDAS inválido: não achei coluna de SKU.")
-        df["SKU"]=df[sku_col].map(norm_sku)
-        cand=[]; 
+        if sku_col is None:
+            raise RuntimeError("VENDAS inválido: não achei coluna de SKU.")
+        df["SKU"] = df[sku_col].map(norm_sku)
+
+        sinais = [
+            ("qtde", 4), ("quantidade", 4), ("quantity", 4), ("qtd", 4),
+            ("vendas", 3), ("vendidos", 3), ("sold", 3),
+            ("orders", 2), ("pedidos", 2), ("ordens", 2), ("unid", 2)
+        ]
+        melhor, melhor_score = None, -1
         for c in df.columns:
-            cl=c.lower(); sc=0
-            if "qtde" in cl: sc+=3
-            if "quant" in cl: sc+=2
-            if "venda" in cl: sc+=1
-            if "order" in cl: sc+=1
-            if sc>0: cand.append((sc,c))
-        if not cand: raise RuntimeError("VENDAS inválido: não achei Quantidade.")
-        cand.sort(reverse=True); qcol=cand[0][1]
-        df["Quantidade"]=df[qcol].map(br_to_float).fillna(0).astype(int)
+            cl = c.lower()
+            score = sum(w for k, w in sinais if k in cl)
+            if score > melhor_score:
+                melhor, melhor_score = c, score
+
+        if melhor is None or melhor_score <= 0:
+            raise RuntimeError("VENDAS inválido: não achei coluna de Quantidade.")
+        df["Quantidade"] = df[melhor].map(br_to_float).fillna(0).astype(int)
         return df[["SKU","Quantidade"]].copy()
 
-    raise RuntimeError("Tipo de arquivo desconhecido.")
 
 # ======= Explosão & cálculo =======
 def construir_kits_efetivo(cat: Catalogo) -> pd.DataFrame:
@@ -549,28 +584,23 @@ with tab_compra:
     st.caption("Para atualizar, vá em **Dados das Empresas**.")
 
     st.markdown("---")
-    if st.button(f"Gerar Compra — {empresa}", type="primary"):
-        miss=[]
-        if not f_ent: miss.append("FULL")
-        if not v_ent: miss.append("Shopee/MT")
-        if not e_ent: miss.append("Estoque")
-        if miss:
-            st.error(f"Faltando: {', '.join(miss)} (aba **Dados das Empresas**).")
+       # Substitui o bloco de detecção/mapeamento por mensagens mais claras
+    dfs = []
+    for nome, df_up in [("FULL", full_raw), ("FÍSICO", fisico_raw), ("VENDAS (Shopee/MT)", vendas_raw)]:
+        t = mapear_tipo(df_up)
+        if t == "DESCONHECIDO":
+            # Mostra quais cabeçalhos chegaram para facilitar o ajuste
+            st.error(
+                f"{empresa}: arquivo **{nome}** não foi reconhecido.\n\n"
+                f"**Cabeçalhos lidos**: {list(df_up.columns)[:12]}"
+            )
             st.stop()
-        if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
-            st.error("Carregue o **Padrão (KITS/CAT)** no sidebar primeiro."); st.stop()
-
         try:
-            full_raw = read_df_from_entry(f_ent)
-            vendas_raw = read_df_from_entry(v_ent)
-            fisico_raw = read_df_from_entry(e_ent)
-
-            dfs=[]
-            for df_up in [full_raw, fisico_raw, vendas_raw]:
-                t=mapear_tipo(df_up)
-                if t=="DESCONHECIDO":
-                    st.error("Um dos arquivos salvos não foi reconhecido (FULL/FISICO/VENDAS)."); st.stop()
-                dfs.append((t, mapear_colunas(df_up, t)))
+            df_mapeado = mapear_colunas(df_up, t)
+        except Exception as e:
+            st.error(f"{empresa}: falha ao interpretar **{nome}** ({t}). Detalhe: {e}")
+            st.stop()
+        dfs.append((t, df_mapeado))
 
             full_df   = [df for t,df in dfs if t=="FULL"][0]
             fisico_df = [df for t,df in dfs if t=="FISICO"][0]
