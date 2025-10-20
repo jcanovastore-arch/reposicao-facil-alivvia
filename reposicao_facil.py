@@ -1,10 +1,15 @@
 # Reposição Logística — Alivvia (Streamlit)
-# v3.2.2 - ajustes estáveis:
+# v3.2.3 - ajustes de UI:
+# - Grade enxuta na aba "Compra Automática" (colunas essenciais)
+# - Remoção de tabela duplicada
+# - Bloco "Consolidado por SKU (ALIVVIA + JCA)"
+# v3.2.2 - anterior:
 # - Destaque VERDE para arquivos salvos (badge_ok)
 # - Persistência de uploads em memória + disco (.uploads/)
 # - Filtros pós-cálculo sem sumir o resultado
 # - Aba "Alocação de Compra" restaurada
-# - Exibição de versão na UI (sem caracteres especiais)
+# - Exibição de versão na UI
+# - Saneamento defensivo de valores negativos (vendas/estoque) para não travar exportação
 
 import io
 import os
@@ -22,7 +27,7 @@ import streamlit as st
 import requests
 from requests.adapters import HTTPAdapter, Retry
 
-VERSION = "v3.2.2 - 2025-10-17"
+VERSION = "v3.2.3 - 2025-10-17"
 
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
@@ -79,7 +84,7 @@ def _disk_clear(emp: str):
     except:
         pass
 
-# ============ Cofre em memória (persiste no servidor) ============
+# ============ Cofre em memória ============
 @st.cache_resource(show_spinner=False)
 def _file_store():
     return {
@@ -90,14 +95,14 @@ def _file_store():
 def _store_put(emp: str, kind: str, name: str, blob: bytes):
     store = _file_store()
     store[emp][kind] = {"name": name, "bytes": blob}
-    _disk_put(emp, kind, name, blob)  # grava no disco também
+    _disk_put(emp, kind, name, blob)
 
 def _store_get(emp: str, kind: str):
     store = _file_store()
     it = store[emp][kind]
     if it:
         return it
-    it = _disk_get(emp, kind)  # tenta disco
+    it = _disk_get(emp, kind)
     if it:
         store[emp][kind] = it
         return it
@@ -114,7 +119,7 @@ def _ensure_state():
     st.session_state.setdefault("kits_df", None)
     st.session_state.setdefault("loaded_at", None)
     st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK)
-    st.session_state.setdefault("resultado_compra", {})  # guarda df_final por empresa
+    st.session_state.setdefault("resultado_compra", {})
 
     for emp in ["ALIVVIA", "JCA"]:
         st.session_state.setdefault(emp, {})
@@ -164,7 +169,7 @@ def baixar_xlsx_do_sheets(sheet_id: str) -> bytes:
     r.raise_for_status()
     return r.content
 
-# ============ Utils de dados ============
+# ============ Utils ============
 def norm_header(s: str) -> str:
     s = (s or "").strip()
     s = unidecode(s).lower()
@@ -343,7 +348,7 @@ def construir_kits_efetivo(cat: Catalogo) -> pd.DataFrame:
     kits = kits.drop_duplicates(subset=["kit_sku", "component_sku"])
     return kits
 
-# ============ Mapear tipos FULL/FISICO/VENDAS ============
+# ============ Mapear tipos ============
 def mapear_tipo(df: pd.DataFrame) -> str:
     cols = [c.lower() for c in df.columns]
     tem_sku = any("sku" in c for c in cols)
@@ -472,13 +477,30 @@ def calcular(full_df, fisico_df, vendas_df, cat: "Catalogo", h=60, g=0.0, LT=0):
     cat_df = cat.catalogo_simples[["component_sku", "fornecedor", "status_reposicao"]].rename(columns={"component_sku": "SKU"})
 
     demanda = cat_df.merge(ml_comp, on="SKU", how="left").merge(shopee_comp, on="SKU", how="left")
-    demanda[["ML_60d", "Shopee_60d"]] = demanda[["ML_60d", "Shopee_60d"]].fillna(0).astype(int)
-    demanda["TOTAL_60d"] = np.maximum(demanda["ML_60d"] + demanda["Shopee_60d"], demanda["ML_60d"]).astype(int)
+
+    # saneamento defensivo
+    demanda[["ML_60d", "Shopee_60d"]] = (
+        demanda[["ML_60d", "Shopee_60d"]]
+        .apply(pd.to_numeric, errors="coerce")
+        .fillna(0)
+        .clip(lower=0)
+        .astype(int)
+    )
+    demanda["TOTAL_60d"] = np.maximum(
+        demanda["ML_60d"] + demanda["Shopee_60d"],
+        demanda["ML_60d"]
+    ).astype(int)
+    demanda["TOTAL_60d"] = demanda["TOTAL_60d"].clip(lower=0)
 
     fis = fisico_df.copy()
     fis["SKU"] = fis["SKU"].map(norm_sku)
-    fis["Estoque_Fisico"] = fis["Estoque_Fisico"].fillna(0).astype(int)
-    fis["Preco"] = fis["Preco"].fillna(0.0)
+    fis["Estoque_Fisico"] = (
+        pd.to_numeric(fis["Estoque_Fisico"], errors="coerce")
+        .fillna(0)
+        .clip(lower=0)
+        .astype(int)
+    )
+    fis["Preco"] = pd.to_numeric(fis["Preco"], errors="coerce").fillna(0.0)
 
     base = demanda.merge(fis, on="SKU", how="left")
     base["Estoque_Fisico"] = base["Estoque_Fisico"].fillna(0).astype(int)
@@ -505,14 +527,15 @@ def calcular(full_df, fisico_df, vendas_df, cat: "Catalogo", h=60, g=0.0, LT=0):
 
     base["Compra_Sugerida"] = (base["Necessidade"] - base["Folga_Fisico"]).clip(lower=0).astype(int)
 
-    # regra: nao_repor -> zerar compra e ocultar da grade
+    # nao_repor some
     mask_nao = base["status_reposicao"].str.lower().str.contains("nao_repor", na=False)
     base.loc[mask_nao, "Compra_Sugerida"] = 0
     base = base[~mask_nao]
 
     base["Valor_Compra_R$"] = (base["Compra_Sugerida"].astype(float) * base["Preco"].astype(float)).round(2)
-    base["Vendas_h_ML"] = np.round(base["ML_60d"] * (h / 60.0)).astype(int)
-    base["Vendas_h_Shopee"] = np.round(base["Shopee_60d"] * (h / 60.0)).astype(int)
+
+    base["Vendas_h_ML"] = np.maximum(0, np.round(base["ML_60d"] * (h / 60.0))).astype(int)
+    base["Vendas_h_Shopee"] = np.maximum(0, np.round(base["Shopee_60d"] * (h / 60.0))).astype(int)
 
     base = base.sort_values(["fornecedor", "Valor_Compra_R$", "SKU"], ascending=[True, False, True])
 
@@ -523,7 +546,6 @@ def calcular(full_df, fisico_df, vendas_df, cat: "Catalogo", h=60, g=0.0, LT=0):
         "ML_60d", "Shopee_60d", "TOTAL_60d", "Reserva_30d", "Folga_Fisico", "Necessidade"
     ]].reset_index(drop=True)
 
-    # Painel
     fis_unid = int(fis["Estoque_Fisico"].sum())
     fis_valor = float((fis["Estoque_Fisico"] * fis["Preco"]).sum())
     full_unid = int(full["Estoque_Full"].sum())
@@ -547,8 +569,21 @@ def exportar_xlsx(df_final: pd.DataFrame, h: int, params: dict) -> bytes:
         "Reserva_30d", "Folga_Fisico", "Necessidade", "ML_60d", "Shopee_60d", "TOTAL_60d"
     ]
     for c in int_cols:
+        if c in df_final.columns:
+            df_final[c] = (
+                pd.to_numeric(df_final[c], errors="coerce")
+                .fillna(0)
+                .clip(lower=0)
+                .astype(int)
+            )
+    df_final["Valor_Compra_R$"] = (
+        df_final["Compra_Sugerida"].astype(float) * df_final["Preco"].astype(float)
+    ).round(2)
+
+    for c in int_cols:
         if not np.all(df_final[c].fillna(0).astype(float) >= 0):
             raise RuntimeError(f"Auditoria: coluna '{c}' precisa ser >= 0.")
+
     calc = (df_final["Compra_Sugerida"] * df_final["Preco"]).round(2).values
     if not np.allclose(df_final["Valor_Compra_R$"].values, calc):
         raise RuntimeError("Auditoria: 'Valor_Compra_R$' != 'Compra_Sugerida x Preco'.")
@@ -661,7 +696,6 @@ with tab1:
         colx, coly = st.columns(2)
         with colx:
             if st.button(f"Salvar {emp}", use_container_width=True, key=f"save_{emp}"):
-                # Já salvamos ao fazer upload; aqui reforçamos a persistência em disco
                 for kind in ["FULL", "VENDAS", "ESTOQUE"]:
                     it = st.session_state[emp][kind]
                     if it["name"] and it["bytes"]:
@@ -695,7 +729,6 @@ with tab2:
         col[1].info(f"Shopee/MT: {dados['VENDAS']['name'] or '—'}")
         col[2].info(f"Estoque: {dados['ESTOQUE']['name'] or '—'}")
 
-        # Botão para calcular e salvar o resultado na sessão
         if st.button(f"Gerar Compra — {empresa}", type="primary", key=f"btn_calc_{empresa}"):
             try:
                 for k, rot in [("FULL", "FULL"), ("VENDAS", "Shopee/MT"), ("ESTOQUE", "Estoque")]:
@@ -743,9 +776,7 @@ with tab2:
             cC.metric("Físico (un)", f"{painel['fisico_unid']:,}".replace(",", "."))
             cD.metric("Físico (R$)", f"R$ {painel['fisico_valor']:,.2f}")
 
-            st.dataframe(df_final, use_container_width=True, height=420)
-
-            with st.expander("Filtros (após geração) — sem recálculo", expanded=False):
+            with st.expander("Filtros (após geração) — sem recálculo", expanded=True):
                 fornecedores = sorted([f for f in df_final["fornecedor"].dropna().astype(str).unique().tolist() if f != ""])
                 sel_fornec = st.multiselect("Fornecedor", options=fornecedores, default=[], key=f"filtro_fornec_{empresa}")
 
@@ -758,8 +789,32 @@ with tab2:
             if sel_skus:
                 df_view = df_view[df_view["SKU"].isin(sel_skus)]
 
-            st.caption(f"Linhas após filtros: {len(df_view)}")
-            st.dataframe(df_view, use_container_width=True, height=420)
+            # Apenas colunas essenciais
+            cols_show = [
+                "fornecedor", "SKU",
+                "Vendas_h_Shopee", "Vendas_h_ML",
+                "Estoque_Fisico", "Preco",
+                "Compra_Sugerida", "Valor_Compra_R$",
+            ]
+            df_view_sub = df_view[[c for c in cols_show if c in df_view.columns]].copy()
+
+            st.caption(f"Linhas após filtros: {len(df_view_sub)}")
+            st.dataframe(
+                df_view_sub,
+                use_container_width=True,
+                height=500,
+                hide_index=True,
+                column_config={
+                    "fornecedor": st.column_config.TextColumn("Fornecedor"),
+                    "SKU": st.column_config.TextColumn("SKU"),
+                    "Vendas_h_Shopee": st.column_config.NumberColumn("Vendas (Shopee)", format="%d"),
+                    "Vendas_h_ML": st.column_config.NumberColumn("Vendas (FULL)", format="%d"),
+                    "Estoque_Fisico": st.column_config.NumberColumn("Estoque Físico", format="%d"),
+                    "Preco": st.column_config.NumberColumn("Preço", format="R$ %.2f"),
+                    "Compra_Sugerida": st.column_config.NumberColumn("Compra Sugerida", format="%d"),
+                    "Valor_Compra_R$": st.column_config.NumberColumn("Total (R$)", format="R$ %.2f"),
+                },
+            )
 
             colx1, colx2 = st.columns([1, 1])
             with colx1:
@@ -778,6 +833,57 @@ with tab2:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key=f"d_fil_{empresa}"
                 )
+
+            # ================= CONSOLIDADO POR SKU (ALIVVIA + JCA) =================
+            st.markdown("---")
+            with st.expander("🔎 Consolidado por SKU — ver ALIVVIA e JCA juntos", expanded=False):
+                tem_A = "ALIVVIA" in st.session_state["resultado_compra"]
+                tem_J = "JCA"     in st.session_state["resultado_compra"]
+                if not (tem_A and tem_J):
+                    st.info("Gere a compra para ALIVVIA e JCA para habilitar o consolidado.")
+                else:
+                    dfA = st.session_state["resultado_compra"]["ALIVVIA"]["df"]
+                    dfJ = st.session_state["resultado_compra"]["JCA"]["df"]
+
+                    sku_all = sorted(set(dfA["SKU"].tolist()) | set(dfJ["SKU"].tolist()))
+                    if not sku_all:
+                        st.info("Nenhum SKU disponível para consolidado.")
+                    else:
+                        sku_sel = st.selectbox("Digite/Selecione o SKU", options=sku_all, index=0, key="consol_sku")
+
+                        def pick(df, sku):
+                            row = df.loc[df["SKU"] == sku, ["SKU", "Compra_Sugerida", "Valor_Compra_R$"]]
+                            if row.empty:
+                                return {"SKU": sku, "Compra_Sugerida": 0, "Valor_Compra_R$": 0.0}
+                            r = row.iloc[0].to_dict()
+                            r["Compra_Sugerida"] = int(r.get("Compra_Sugerida", 0))
+                            r["Valor_Compra_R$"] = float(r.get("Valor_Compra_R$", 0))
+                            return r
+
+                        rA = pick(dfA, sku_sel)
+                        rJ = pick(dfJ, sku_sel)
+
+                        res = pd.DataFrame([
+                            {"Empresa": "ALIVVIA", "SKU": rA["SKU"], "Compra_Sugerida": rA["Compra_Sugerida"], "Valor_Compra_R$": rA["Valor_Compra_R$"]},
+                            {"Empresa": "JCA",     "SKU": rJ["SKU"], "Compra_Sugerida": rJ["Compra_Sugerida"], "Valor_Compra_R$": rJ["Valor_Compra_R$"]},
+                        ])
+                        res["Total_R$"] = res["Valor_Compra_R$"].round(2)
+
+                        st.dataframe(
+                            res,
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "Empresa": st.column_config.TextColumn("Empresa"),
+                                "SKU": st.column_config.TextColumn("SKU"),
+                                "Compra_Sugerida": st.column_config.NumberColumn("Compra Sugerida", format="%d"),
+                                "Valor_Compra_R$": st.column_config.NumberColumn("Total (R$)", format="R$ %.2f"),
+                                "Total_R$": st.column_config.NumberColumn("Total (R$)", format="R$ %.2f"),
+                            },
+                        )
+                        st.success(
+                            f"Consolidado para **{sku_sel}** → ALIVVIA: {rA['Compra_Sugerida']} un | JCA: {rJ['Compra_Sugerida']} un"
+                        )
         else:
             st.info("Clique Gerar Compra para calcular e então aplicar filtros.")
 
@@ -797,7 +903,6 @@ with tab3:
 
         if st.button("Calcular alocação proporcional", type="primary"):
             try:
-                # checar uploads
                 missing = []
                 for emp in ["ALIVVIA", "JCA"]:
                     if not (st.session_state[emp]["FULL"]["name"] and st.session_state[emp]["FULL"]["bytes"]):
