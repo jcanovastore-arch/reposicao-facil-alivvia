@@ -1004,18 +1004,34 @@ with tab2:
 
                     # Download XLSX combinado
                     def _xlsx_combinado(df):
-                        import io as _io, pandas as _pd
-                        bio = _io.BytesIO()
-                        with _pd.ExcelWriter(bio, engine="xlsxwriter") as w:
-                            df.to_excel(w, sheet_name="Compra_2Contas", index=False)
-                            ws = w.sheets["Compra_2Contas"]
-                            for i, col in enumerate(df.columns):
-                                width = max(12, int(df[col].astype(str).map(len).max()) + 2)
-                                ws.set_column(i, i, min(width, 40))
-                            ws.freeze_panes(1, 0)
-                            ws.autofilter(0, 0, len(df), len(df.columns)-1)
-                        bio.seek(0)
-                        return bio.read()
+    import io as _io, pandas as _pd, numpy as _np
+    bio = _io.BytesIO()
+    with _pd.ExcelWriter(bio, engine="xlsxwriter") as w:
+        df.to_excel(w, sheet_name="Compra_2Contas", index=False)
+        ws = w.sheets["Compra_2Contas"]
+
+        # Se a tabela estiver vazia, define largura padrão e evita erro
+        if df.shape[0] == 0:
+            for i in range(len(df.columns)):
+                ws.set_column(i, i, 14)
+            ws.freeze_panes(1, 0)
+            ws.autofilter(0, 0, 0, max(0, len(df.columns) - 1))
+        else:
+            for i, col in enumerate(df.columns):
+                s = df[col].astype(str).fillna("")
+                s = s.replace({"None": "", "nan": "", "NaN": ""})
+                max_len = s.map(len).max()
+                if _pd.isna(max_len):
+                    max_len = 0
+                width = max(12, min(40, int(max_len) + 2))
+                ws.set_column(i, i, width)
+
+            ws.freeze_panes(1, 0)
+            ws.autofilter(0, 0, len(df), len(df.columns) - 1)
+
+    bio.seek(0)
+    return bio.read()
+
 
                     xlsx2 = _xlsx_combinado(dfV)
                     st.download_button(
