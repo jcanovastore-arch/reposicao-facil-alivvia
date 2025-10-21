@@ -1,15 +1,19 @@
 # Reposição Logística — Alivvia (Streamlit)
-# v3.2.3 - ajustes de UI:
+# v3.3.0 - UI:
+# - Limpar arquivos individualmente (FULL/VENDAS/ESTOQUE) na aba Dados
+# - Busca de SKU por texto + multiselect (filtros pós-cálculo)
+# - Lista combinada (ALIVVIA + JCA) com filtros e download XLSX
+# v3.2.3 - UI:
 # - Grade enxuta na aba "Compra Automática" (colunas essenciais)
 # - Remoção de tabela duplicada
 # - Bloco "Consolidado por SKU (ALIVVIA + JCA)"
-# v3.2.2 - anterior:
+# v3.2.2 - base:
 # - Destaque VERDE para arquivos salvos (badge_ok)
 # - Persistência de uploads em memória + disco (.uploads/)
 # - Filtros pós-cálculo sem sumir o resultado
 # - Aba "Alocação de Compra" restaurada
 # - Exibição de versão na UI
-# - Saneamento defensivo de valores negativos (vendas/estoque) para não travar exportação
+# - Saneamento defensivo de valores negativos
 
 import io
 import os
@@ -27,7 +31,7 @@ import streamlit as st
 import requests
 from requests.adapters import HTTPAdapter, Retry
 
-VERSION = "v3.2.3 - 2025-10-17"
+VERSION = "v3.3.0 - 2025-10-21"
 
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
@@ -84,6 +88,19 @@ def _disk_clear(emp: str):
     except:
         pass
 
+# >>> NOVO: deletar um arquivo específico no disco
+def _disk_delete(emp: str, kind: str):
+    p = _disk_dir(emp, kind)
+    meta = os.path.join(p, "meta.json")
+    data = os.path.join(p, "file.bin")
+    try:
+        if os.path.exists(meta):
+            os.remove(meta)
+        if os.path.exists(data):
+            os.remove(data)
+    except:
+        pass
+
 # ============ Cofre em memória ============
 @st.cache_resource(show_spinner=False)
 def _file_store():
@@ -112,6 +129,12 @@ def _store_clear(emp: str):
     store = _file_store()
     store[emp] = {"FULL": None, "VENDAS": None, "ESTOQUE": None}
     _disk_clear(emp)
+
+# >>> NOVO: deletar um arquivo específico na memória + disco
+def _store_delete(emp: str, kind: str):
+    store = _file_store()
+    store[emp][kind] = {"name": None, "bytes": None}
+    _disk_delete(emp, kind)
 
 # =================== Estado ===================
 def _ensure_state():
@@ -668,6 +691,10 @@ with tab1:
             it = st.session_state[emp]["FULL"]
             if it["name"]:
                 st.markdown(badge_ok("FULL salvo", it["name"]), unsafe_allow_html=True)
+                # >>> NOVO: limpar individual FULL
+                if st.button("Limpar FULL (somente este)", key=f"clr_{emp}_FULL", use_container_width=True):
+                    _store_delete(emp, "FULL")
+                    st.info("FULL removido.")
         # VENDAS
         with c2:
             st.markdown(f"**Shopee/MT — {emp}**")
@@ -680,6 +707,10 @@ with tab1:
             it = st.session_state[emp]["VENDAS"]
             if it["name"]:
                 st.markdown(badge_ok("Vendas salvo", it["name"]), unsafe_allow_html=True)
+                # >>> NOVO: limpar individual VENDAS
+                if st.button("Limpar Vendas (somente este)", key=f"clr_{emp}_VENDAS", use_container_width=True):
+                    _store_delete(emp, "VENDAS")
+                    st.info("Vendas removido.")
 
         # ESTOQUE
         st.markdown("**Estoque Físico — opcional**")
@@ -692,6 +723,10 @@ with tab1:
         it = st.session_state[emp]["ESTOQUE"]
         if it["name"]:
             st.markdown(badge_ok("Estoque salvo", it["name"]), unsafe_allow_html=True)
+            # >>> NOVO: limpar individual ESTOQUE
+            if st.button("Limpar Estoque (somente este)", key=f"clr_{emp}_ESTOQUE", use_container_width=True):
+                _store_delete(emp, "ESTOQUE")
+                st.info("Estoque removido.")
 
         colx, coly = st.columns(2)
         with colx:
@@ -702,7 +737,7 @@ with tab1:
                         _disk_put(emp, kind, it["name"], it["bytes"])
                 st.success(f"{emp}: arquivos confirmados (disco).")
         with coly:
-            if st.button(f"Limpar {emp}", use_container_width=True, key=f"clr_{emp}"):
+            if st.button(f"Limpar {emp}", use_container_width=True, key=f"clr_all_{emp}"):
                 st.session_state[emp] = {"FULL": {"name": None, "bytes": None},
                                          "VENDAS": {"name": None, "bytes": None},
                                          "ESTOQUE": {"name": None, "bytes": None}}
@@ -776,12 +811,19 @@ with tab2:
             cC.metric("Físico (un)", f"{painel['fisico_unid']:,}".replace(",", "."))
             cD.metric("Físico (R$)", f"R$ {painel['fisico_valor']:,.2f}")
 
+            # >>> NOVO: filtros com busca de SKU por substring
             with st.expander("Filtros (após geração) — sem recálculo", expanded=True):
                 fornecedores = sorted([f for f in df_final["fornecedor"].dropna().astype(str).unique().tolist() if f != ""])
                 sel_fornec = st.multiselect("Fornecedor", options=fornecedores, default=[], key=f"filtro_fornec_{empresa}")
 
-                sku_opts = sorted(df_final["SKU"].dropna().astype(str).unique().tolist())
-                sel_skus = st.multiselect("SKU (buscar e selecionar)", options=sku_opts, default=[], key=f"filtro_sku_{empresa}")
+                sku_all = sorted(df_final["SKU"].dropna().astype(str).unique().tolist())
+                txt = st.text_input("Pesquisar SKU (digite parte do código)", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO…")
+                if txt:
+                    sku_filtrado = [s for s in sku_all if txt.upper() in s.upper()]
+                else:
+                    sku_filtrado = sku_all
+
+                sel_skus = st.multiselect("Selecione SKUs", options=sku_filtrado, default=[], key=f"filtro_sku_{empresa}")
 
             df_view = df_final.copy()
             if sel_fornec:
@@ -834,7 +876,7 @@ with tab2:
                     key=f"d_fil_{empresa}"
                 )
 
-            # ================= CONSOLIDADO POR SKU (ALIVVIA + JCA) =================
+            # =============== CONSOLIDADO POR SKU (ALIVVIA + JCA) ===============
             st.markdown("---")
             with st.expander("🔎 Consolidado por SKU — ver ALIVVIA e JCA juntos", expanded=False):
                 tem_A = "ALIVVIA" in st.session_state["resultado_compra"]
@@ -845,11 +887,11 @@ with tab2:
                     dfA = st.session_state["resultado_compra"]["ALIVVIA"]["df"]
                     dfJ = st.session_state["resultado_compra"]["JCA"]["df"]
 
-                    sku_all = sorted(set(dfA["SKU"].tolist()) | set(dfJ["SKU"].tolist()))
-                    if not sku_all:
+                    sku_all2 = sorted(set(dfA["SKU"].tolist()) | set(dfJ["SKU"].tolist()))
+                    if not sku_all2:
                         st.info("Nenhum SKU disponível para consolidado.")
                     else:
-                        sku_sel = st.selectbox("Digite/Selecione o SKU", options=sku_all, index=0, key="consol_sku")
+                        sku_sel = st.selectbox("Digite/Selecione o SKU", options=sku_all2, index=0, key="consol_sku")
 
                         def pick(df, sku):
                             row = df.loc[df["SKU"] == sku, ["SKU", "Compra_Sugerida", "Valor_Compra_R$"]]
@@ -884,6 +926,105 @@ with tab2:
                         st.success(
                             f"Consolidado para **{sku_sel}** → ALIVVIA: {rA['Compra_Sugerida']} un | JCA: {rJ['Compra_Sugerida']} un"
                         )
+
+            # =============== LISTA COMBINADA (ALIVVIA + JCA) ===============
+            st.markdown("---")
+            with st.expander("📋 Lista combinada — ver compras das 2 contas lado a lado", expanded=False):
+                tem_A = "ALIVVIA" in st.session_state["resultado_compra"]
+                tem_J = "JCA"     in st.session_state["resultado_compra"]
+
+                if not (tem_A and tem_J):
+                    st.info("Gere a compra para ALIVVIA e JCA para habilitar a lista combinada.")
+                else:
+                    dfA = st.session_state["resultado_compra"]["ALIVVIA"]["df"][["SKU","fornecedor","Compra_Sugerida","Valor_Compra_R$"]].rename(
+                        columns={"Compra_Sugerida":"Compra_ALIVVIA","Valor_Compra_R$":"Valor_ALIVVIA"}
+                    )
+                    dfJ = st.session_state["resultado_compra"]["JCA"]["df"][["SKU","fornecedor","Compra_Sugerida","Valor_Compra_R$"]].rename(
+                        columns={"Compra_Sugerida":"Compra_JCA","Valor_Compra_R$":"Valor_JCA"}
+                    )
+
+                    # Unir por SKU (preferir fornecedor de A)
+                    dfC = pd.merge(dfA, dfJ, on="SKU", how="outer", suffixes=("_A","_J"))
+                    dfC["fornecedor"] = dfC["fornecedor_A"].fillna(dfC["fornecedor_J"])
+                    dfC = dfC.drop(columns=["fornecedor_A","fornecedor_J"], errors="ignore")
+
+                    for c in ["Compra_ALIVVIA","Compra_JCA"]:
+                        if c in dfC.columns:
+                            dfC[c] = pd.to_numeric(dfC[c], errors="coerce").fillna(0).astype(int)
+                    for c in ["Valor_ALIVVIA","Valor_JCA"]:
+                        if c in dfC.columns:
+                            dfC[c] = pd.to_numeric(dfC[c], errors="coerce").fillna(0.0).astype(float)
+
+                    dfC["Compra_Total"] = dfC["Compra_ALIVVIA"] + dfC["Compra_JCA"]
+                    dfC["Valor_Total"]  = (dfC["Valor_ALIVVIA"] + dfC["Valor_JCA"]).round(2)
+
+                    colf1, colf2, colf3 = st.columns([1,1,2])
+                    with colf1:
+                        fornecedores_c = sorted([f for f in dfC["fornecedor"].dropna().astype(str).unique().tolist() if f != ""])
+                        f_sel = st.multiselect("Fornecedor", fornecedores_c, default=[])
+                    with colf2:
+                        only_pos = st.checkbox("Somente compra > 0", value=True)
+                    with colf3:
+                        busca_sku2 = st.text_input("Pesquisar SKU (comb.)", placeholder="parte do SKU…")
+
+                    dfV = dfC.copy()
+                    if f_sel:
+                        dfV = dfV[dfV["fornecedor"].isin(f_sel)]
+                    if only_pos:
+                        dfV = dfV[(dfV["Compra_ALIVVIA"] > 0) | (dfV["Compra_JCA"] > 0)]
+                    if busca_sku2:
+                        bs = busca_sku2.upper()
+                        dfV = dfV[dfV["SKU"].astype(str).str.upper().str.contains(bs)]
+
+                    skus_opts = sorted(dfV["SKU"].astype(str).unique().tolist())
+                    skus_sel = st.multiselect("Selecionar SKUs específicos (opcional)", options=skus_opts, default=[])
+                    if skus_sel:
+                        dfV = dfV[dfV["SKU"].isin(skus_sel)]
+
+                    cols_show2 = ["fornecedor","SKU","Compra_ALIVVIA","Valor_ALIVVIA","Compra_JCA","Valor_JCA","Compra_Total","Valor_Total"]
+                    dfV = dfV[[c for c in cols_show2 if c in dfV.columns]]
+
+                    st.caption(f"Linhas após filtros: {len(dfV)}")
+                    st.dataframe(
+                        dfV,
+                        use_container_width=True,
+                        hide_index=True,
+                        height=500,
+                        column_config={
+                            "fornecedor": st.column_config.TextColumn("Fornecedor"),
+                            "SKU": st.column_config.TextColumn("SKU"),
+                            "Compra_ALIVVIA": st.column_config.NumberColumn("Compra ALIVVIA", format="%d"),
+                            "Valor_ALIVVIA": st.column_config.NumberColumn("Valor ALIVVIA (R$)", format="R$ %.2f"),
+                            "Compra_JCA": st.column_config.NumberColumn("Compra JCA", format="%d"),
+                            "Valor_JCA": st.column_config.NumberColumn("Valor JCA (R$)", format="R$ %.2f"),
+                            "Compra_Total": st.column_config.NumberColumn("Compra Total", format="%d"),
+                            "Valor_Total": st.column_config.NumberColumn("Valor Total (R$)", format="R$ %.2f"),
+                        },
+                    )
+
+                    # Download XLSX combinado
+                    def _xlsx_combinado(df):
+                        import io as _io, pandas as _pd
+                        bio = _io.BytesIO()
+                        with _pd.ExcelWriter(bio, engine="xlsxwriter") as w:
+                            df.to_excel(w, sheet_name="Compra_2Contas", index=False)
+                            ws = w.sheets["Compra_2Contas"]
+                            for i, col in enumerate(df.columns):
+                                width = max(12, int(df[col].astype(str).map(len).max()) + 2)
+                                ws.set_column(i, i, min(width, 40))
+                            ws.freeze_panes(1, 0)
+                            ws.autofilter(0, 0, len(df), len(df.columns)-1)
+                        bio.seek(0)
+                        return bio.read()
+
+                    xlsx2 = _xlsx_combinado(dfV)
+                    st.download_button(
+                        "Baixar XLSX (lista combinada)",
+                        data=xlsx2,
+                        file_name="Compra_Duas_Contas.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
         else:
             st.info("Clique Gerar Compra para calcular e então aplicar filtros.")
 
