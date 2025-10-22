@@ -381,9 +381,9 @@ def mapear_tipo(df: pd.DataFrame) -> str:
     tem_estoque_generico = any(c in {"estoque_atual", "qtd", "quantidade"} or "estoque" in c for c in cols)
     tem_preco = any(c in {"preco", "preco_compra", "custo", "custo_medio", "preco_medio"} for c in cols)
 
-    if tem_sku and (tem_v60 or tem_estoque_full or tem_transito):
+    if tem_sku e (tem_v60 or tem_estoque_full or tem_transito):
         return "FULL"
-    if tem_sku and tem_estoque_generico and tem_preco:
+    if tem_sku e tem_estoque_generico e tem_preco:
         return "FISICO"
     if tem_sku and not tem_preco:
         return "VENDAS"
@@ -691,7 +691,6 @@ with tab1:
             it = st.session_state[emp]["FULL"]
             if it["name"]:
                 st.markdown(badge_ok("FULL salvo", it["name"]), unsafe_allow_html=True)
-                # >>> NOVO: limpar individual FULL
                 if st.button("Limpar FULL (somente este)", key=f"clr_{emp}_FULL", use_container_width=True):
                     _store_delete(emp, "FULL")
                     st.info("FULL removido.")
@@ -707,7 +706,6 @@ with tab1:
             it = st.session_state[emp]["VENDAS"]
             if it["name"]:
                 st.markdown(badge_ok("Vendas salvo", it["name"]), unsafe_allow_html=True)
-                # >>> NOVO: limpar individual VENDAS
                 if st.button("Limpar Vendas (somente este)", key=f"clr_{emp}_VENDAS", use_container_width=True):
                     _store_delete(emp, "VENDAS")
                     st.info("Vendas removido.")
@@ -723,7 +721,6 @@ with tab1:
         it = st.session_state[emp]["ESTOQUE"]
         if it["name"]:
             st.markdown(badge_ok("Estoque salvo", it["name"]), unsafe_allow_html=True)
-            # >>> NOVO: limpar individual ESTOQUE
             if st.button("Limpar Estoque (somente este)", key=f"clr_{emp}_ESTOQUE", use_container_width=True):
                 _store_delete(emp, "ESTOQUE")
                 st.info("Estoque removido.")
@@ -936,11 +933,11 @@ with tab2:
                 if not (tem_A and tem_J):
                     st.info("Gere a compra para ALIVVIA e JCA para habilitar a lista combinada.")
                 else:
-                    dfA = st.session_state["resultado_compra"]["ALIVVIA"]["df"][["SKU","fornecedor","Compra_Sugerida","Valor_Compra_R$"]].rename(
-                        columns={"Compra_Sugerida":"Compra_ALIVVIA","Valor_Compra_R$":"Valor_ALIVVIA"}
+                    dfA = st.session_state["resultado_compra"]["ALIVVIA"]["df"][["SKU","fornecedor","Compra_Sugerida","Valor_Compra_R$","Estoque_Fisico","Preco"]].rename(
+                        columns={"Compra_Sugerida":"Compra_ALIVVIA","Valor_Compra_R$":"Valor_ALIVVIA","Estoque_Fisico":"Estoque_ALIVVIA","Preco":"Preco_ALIVVIA"}
                     )
-                    dfJ = st.session_state["resultado_compra"]["JCA"]["df"][["SKU","fornecedor","Compra_Sugerida","Valor_Compra_R$"]].rename(
-                        columns={"Compra_Sugerida":"Compra_JCA","Valor_Compra_R$":"Valor_JCA"}
+                    dfJ = st.session_state["resultado_compra"]["JCA"]["df"][["SKU","fornecedor","Compra_Sugerida","Valor_Compra_R$","Estoque_Fisico","Preco"]].rename(
+                        columns={"Compra_Sugerida":"Compra_JCA","Valor_Compra_R$":"Valor_JCA","Estoque_Fisico":"Estoque_JCA","Preco":"Preco_JCA"}
                     )
 
                     # Unir por SKU (preferir fornecedor de A)
@@ -948,15 +945,16 @@ with tab2:
                     dfC["fornecedor"] = dfC["fornecedor_A"].fillna(dfC["fornecedor_J"])
                     dfC = dfC.drop(columns=["fornecedor_A","fornecedor_J"], errors="ignore")
 
-                    for c in ["Compra_ALIVVIA","Compra_JCA"]:
+                    for c in ["Compra_ALIVVIA","Compra_JCA", "Estoque_ALIVVIA","Estoque_JCA"]:
                         if c in dfC.columns:
                             dfC[c] = pd.to_numeric(dfC[c], errors="coerce").fillna(0).astype(int)
-                    for c in ["Valor_ALIVVIA","Valor_JCA"]:
+                    for c in ["Valor_ALIVVIA","Valor_JCA","Preco_ALIVVIA","Preco_JCA"]:
                         if c in dfC.columns:
                             dfC[c] = pd.to_numeric(dfC[c], errors="coerce").fillna(0.0).astype(float)
 
                     dfC["Compra_Total"] = dfC["Compra_ALIVVIA"] + dfC["Compra_JCA"]
                     dfC["Valor_Total"]  = (dfC["Valor_ALIVVIA"] + dfC["Valor_JCA"]).round(2)
+                    dfC["Estoque_Fisico_Total"] = dfC["Estoque_ALIVVIA"] + dfC["Estoque_JCA"]
 
                     colf1, colf2, colf3 = st.columns([1,1,2])
                     with colf1:
@@ -981,7 +979,12 @@ with tab2:
                     if skus_sel:
                         dfV = dfV[dfV["SKU"].isin(skus_sel)]
 
-                    cols_show2 = ["fornecedor","SKU","Compra_ALIVVIA","Valor_ALIVVIA","Compra_JCA","Valor_JCA","Compra_Total","Valor_Total"]
+                    cols_show2 = [
+                        "fornecedor","SKU",
+                        "Estoque_ALIVVIA","Estoque_JCA","Estoque_Fisico_Total",
+                        "Compra_ALIVVIA","Valor_ALIVVIA","Compra_JCA","Valor_JCA",
+                        "Compra_Total","Valor_Total"
+                    ]
                     dfV = dfV[[c for c in cols_show2 if c in dfV.columns]]
 
                     st.caption(f"Linhas após filtros: {len(dfV)}")
@@ -993,6 +996,9 @@ with tab2:
                         column_config={
                             "fornecedor": st.column_config.TextColumn("Fornecedor"),
                             "SKU": st.column_config.TextColumn("SKU"),
+                            "Estoque_ALIVVIA": st.column_config.NumberColumn("Estoque ALIVVIA", format="%d"),
+                            "Estoque_JCA": st.column_config.NumberColumn("Estoque JCA", format="%d"),
+                            "Estoque_Fisico_Total": st.column_config.NumberColumn("Estoque Total", format="%d"),
                             "Compra_ALIVVIA": st.column_config.NumberColumn("Compra ALIVVIA", format="%d"),
                             "Valor_ALIVVIA": st.column_config.NumberColumn("Valor ALIVVIA (R$)", format="R$ %.2f"),
                             "Compra_JCA": st.column_config.NumberColumn("Compra JCA", format="%d"),
@@ -1002,36 +1008,34 @@ with tab2:
                         },
                     )
 
-                    # Download XLSX combinado
+                    # Download XLSX combinado (com tratamento para DF vazio)
                     def _xlsx_combinado(df):
-    import io as _io, pandas as _pd, numpy as _np
-    bio = _io.BytesIO()
-    with _pd.ExcelWriter(bio, engine="xlsxwriter") as w:
-        df.to_excel(w, sheet_name="Compra_2Contas", index=False)
-        ws = w.sheets["Compra_2Contas"]
+                        import io as _io, pandas as _pd, numpy as _np
+                        bio = _io.BytesIO()
+                        with _pd.ExcelWriter(bio, engine="xlsxwriter") as w:
+                            df.to_excel(w, sheet_name="Compra_2Contas", index=False)
+                            ws = w.sheets["Compra_2Contas"]
 
-        # Se a tabela estiver vazia, define largura padrão e evita erro
-        if df.shape[0] == 0:
-            for i in range(len(df.columns)):
-                ws.set_column(i, i, 14)
-            ws.freeze_panes(1, 0)
-            ws.autofilter(0, 0, 0, max(0, len(df.columns) - 1))
-        else:
-            for i, col in enumerate(df.columns):
-                s = df[col].astype(str).fillna("")
-                s = s.replace({"None": "", "nan": "", "NaN": ""})
-                max_len = s.map(len).max()
-                if _pd.isna(max_len):
-                    max_len = 0
-                width = max(12, min(40, int(max_len) + 2))
-                ws.set_column(i, i, width)
+                            if df.shape[0] == 0:
+                                for i in range(len(df.columns)):
+                                    ws.set_column(i, i, 14)
+                                ws.freeze_panes(1, 0)
+                                ws.autofilter(0, 0, 0, max(0, len(df.columns) - 1))
+                            else:
+                                for i, col in enumerate(df.columns):
+                                    s = df[col].astype(str).fillna("")
+                                    s = s.replace({"None": "", "nan": "", "NaN": ""})
+                                    max_len = s.map(len).max()
+                                    if _pd.isna(max_len):
+                                        max_len = 0
+                                    width = max(12, min(40, int(max_len) + 2))
+                                    ws.set_column(i, i, width)
 
-            ws.freeze_panes(1, 0)
-            ws.autofilter(0, 0, len(df), len(df.columns) - 1)
+                                ws.freeze_panes(1, 0)
+                                ws.autofilter(0, 0, len(df), len(df.columns) - 1)
 
-    bio.seek(0)
-    return bio.read()
-
+                        bio.seek(0)
+                        return bio.read()
 
                     xlsx2 = _xlsx_combinado(dfV)
                     st.download_button(
