@@ -374,6 +374,7 @@ def construir_kits_efetivo(cat: Catalogo) -> pd.DataFrame:
 # ============ Mapear tipos ============
 def mapear_tipo(df: pd.DataFrame) -> str:
     cols = [c.lower() for c in df.columns]
+
     tem_sku = any("sku" in c for c in cols)
     tem_v60 = any(c.startswith("vendas_60d") or c in {"vendas 60d", "vendas_qtd_60d"} for c in cols)
     tem_estoque_full = any(("estoque" in c and "full" in c) or c == "estoque_full" for c in cols)
@@ -381,9 +382,9 @@ def mapear_tipo(df: pd.DataFrame) -> str:
     tem_estoque_generico = any(c in {"estoque_atual", "qtd", "quantidade"} or "estoque" in c for c in cols)
     tem_preco = any(c in {"preco", "preco_compra", "custo", "custo_medio", "preco_medio"} for c in cols)
 
-    if tem_sku e (tem_v60 or tem_estoque_full or tem_transito):
+    if tem_sku and (tem_v60 or tem_estoque_full or tem_transito):
         return "FULL"
-    if tem_sku e tem_estoque_generico e tem_preco:
+    if tem_sku and tem_estoque_generico and tem_preco:
         return "FISICO"
     if tem_sku and not tem_preco:
         return "VENDAS"
