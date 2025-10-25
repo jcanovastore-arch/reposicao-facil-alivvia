@@ -1,25 +1,20 @@
 # Reposição Logística — Alivvia (Streamlit)
+# v3.3.1 - Integração Tiny embutida:
+# - Estoque via API Tiny (depósito "Geral", multiempresas tratado)
+# - Filtro por catálogo do app (Google Sheets) — somente SKUs do CAT
+# - Auto-sync ao abrir + botão "Forçar sincronização com o Tiny"
 # v3.3.0 - UI:
 # - Limpar arquivos individualmente (FULL/VENDAS/ESTOQUE) na aba Dados
 # - Busca de SKU por texto + multiselect (filtros pós-cálculo)
 # - Lista combinada (ALIVVIA + JCA) com filtros e download XLSX
-# v3.2.3 - UI:
-# - Grade enxuta na aba "Compra Automática" (colunas essenciais)
-# - Remoção de tabela duplicada
-# - Bloco "Consolidado por SKU (ALIVVIA + JCA)"
-# v3.2.2 - base:
-# - Destaque VERDE para arquivos salvos (badge_ok)
-# - Persistência de uploads em memória + disco (.uploads/)
-# - Filtros pós-cálculo sem sumir o resultado
-# - Aba "Alocação de Compra" restaurada
-# - Exibição de versão na UI
-# - Saneamento defensivo de valores negativos
+# v3.2.3 / v3.2.2 — ver changelog anterior
 
 import io
 import os
 import json
 import re
 import hashlib
+import unicodedata
 import datetime as dt
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -31,7 +26,7 @@ import streamlit as st
 import requests
 from requests.adapters import HTTPAdapter, Retry
 
-VERSION = "v3.3.0 - 2025-10-21"
+VERSION = "v3.3.1 - 2025-10-24"
 
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
@@ -475,6 +470,220 @@ def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_co
     out = out.rename(columns={"component_sku": "SKU", "quantidade_comp": "Quantidade"})
     return out
 
+# ============ Integração Tiny (embutida) ============
+_TINY_LIST_URL  = "https://api.tiny.com.br/api2/produtos.pesquisa.php"
+_TINY_STOCK_URL = "https://api.tiny.com.br/api2/produto.obter.estoque.php"
+
+# Tokens das contas (se preferir, mover para secrets.toml)
+_TINY_TOKENS = {
+    "ALIVVIA": "b3ca9c3319ac75276c03e097296e15619259cab9029a1e45b781a07553bdb25b",
+    "JCA":     "352880e9498ec1a29b81a9f0ea1a946a46415f93b2aa2706634f39064b750dcd",
+}
+
+# Depósito alvo e dicas de empresa (multiempresas)
+_TINY_DEP_ALVO = "geral"  # contém 'geral' (sem acento/caixa)
+_TINY_HINTS = {
+    "ALIVVIA": ["piva", "alivvia", "pivastore"],
+    "JCA":     ["jca", "jcanova", "jcanovastore"],
+}
+_TINY_GERAL_IDX = {"ALIVVIA": 0, "JCA": 0}  # fallback por ordem
+
+def _norm_str2(s: str) -> str:
+    s = str(s or "")
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return s
+
+def _tiny_norm(s: str) -> str:
+    return _norm_str2(s).lower().strip()
+
+def _tiny_to_float(x) -> float:
+    if x in (None, ""): return 0.0
+    if isinstance(x, (int, float)): return float(x)
+    s = _norm_str2(x).strip().replace(".", "").replace(",", ".")
+    try: return float(s)
+    except: return 0.0
+
+def _tiny_norm_code(s: str) -> str:
+    return _norm_str2(s).strip().upper()
+
+def _load_skus_padrao(conta: str) -> set:
+    """
+    1) Usa o catálogo já carregado no app (st.session_state.catalogo_df, coluna 'sku');
+    2) Se não existir, procura .uploads/<CONTA>/produto_padrao.(xlsx|csv);
+    3) Se nada existir, retorna set() -> sem filtro (com aviso).
+    """
+    try:
+        if "catalogo_df" in st.session_state and st.session_state.catalogo_df is not None:
+            cat = st.session_state.catalogo_df
+            # coluna 'sku' (qualquer caixa)
+            sku_col = next((c for c in cat.columns if c.lower() == "sku"), None)
+            if sku_col:
+                return { _tiny_norm_code(x) for x in cat[sku_col].dropna().astype(str).tolist() }
+    except Exception:
+        pass
+
+    base_dir = os.path.join(os.getcwd(), ".uploads", conta)
+    candidatos = [
+        os.path.join(base_dir, "produto_padrao.xlsx"),
+        os.path.join(base_dir, "produto_padrao.csv"),
+        os.path.join(base_dir, "produtos_padrao.xlsx"),
+        os.path.join(base_dir, "produtos_padrao.csv"),
+    ]
+    for path in candidatos:
+        if os.path.exists(path):
+            try:
+                if path.lower().endswith(".csv"):
+                    df = pd.read_csv(path, dtype=str)
+                else:
+                    df = pd.read_excel(path, dtype=str)
+                sku_col = next((c for c in df.columns if c.strip().lower() == "sku"), None)
+                if sku_col:
+                    return { _tiny_norm_code(x) for x in df[sku_col].dropna().tolist() }
+            except Exception:
+                pass
+    return set()
+
+def _tiny_listar_basicos(token: str):
+    """Lista: id, codigo, situacao, tipoVariacao, preco_custo_medio."""
+    itens, pagina = [], 1
+    sess = requests.Session()
+    sess.headers.update({"User-Agent": "ReposicaoApp/Tiny"})
+    while True:
+        r = sess.post(_TINY_LIST_URL, data={"token": token, "formato": "json", "pagina": pagina}, timeout=40)
+        if r.status_code != 200: break
+        data = r.json() if r.text else {}
+        bloco = (data.get("retorno", {}) or {}).get("produtos") or []
+        if not bloco: break
+        for it in bloco:
+            itens.append(it.get("produto", {}) or {})
+        pagina += 1
+    return itens
+
+def _tiny_obter_estoque(token: str, prod_id):
+    """Endpoint oficial de estoque — retorna depósitos + (às vezes) preço."""
+    payload = {
+        "token": token, "formato": "json", "id": prod_id,
+        "incluirDepositos":"S", "retornarDepositos":"S", "detalharDepositos":"S",
+    }
+    r = requests.post(_TINY_STOCK_URL, data=payload, timeout=40)
+    if r.status_code != 200: return {}
+    ret = (r.json() if r.text else {}).get("retorno", {}) or {}
+    return ret.get("produto") or ret.get("estoque") or {}
+
+def _tiny_estoque_geral(conta: str, det: dict) -> float:
+    """Escolhe o depósito 'Geral' da CONTA (por empresa; senão, por índice)."""
+    depositos = det.get("depositos") or det.get("estoques") or []
+    if not depositos: return 0.0
+    gerais = []
+    for dep in depositos:
+        d = dep.get("deposito", dep) or {}
+        if str(d.get("desconsiderar","")).upper() == "S":
+            continue
+        nome_dep = _tiny_norm(d.get("nome") or d.get("descricao"))
+        if _TINY_DEP_ALVO in nome_dep:
+            gerais.append(d)
+    if not gerais: return 0.0
+    # 1) preferir por empresa/filial quando disponível
+    hints = _TINY_HINTS.get(conta, [])
+    for d in gerais:
+        texto_emp = " ".join(_tiny_norm(d.get(k)) for k in (
+            "empresa","filial","empresa_nome","nomeEmpresa","empresaDescricao","empresaDescricaoCurta","cnpjEmpresa"
+        ) if d.get(k) is not None)
+        if any(h in texto_emp for h in hints):
+            return _tiny_to_float(d.get("saldo"))
+    # 2) fallback por ordem
+    idx = max(0, int(_TINY_GERAL_IDX.get(conta, 0)))
+    if idx < len(gerais):
+        return _tiny_to_float(gerais[idx].get("saldo"))
+    return 0.0
+
+def _tiny_df_estoque(conta: str) -> pd.DataFrame:
+    """
+    Gera DF com colunas: SKU, Estoque_Fisico, Preco (somente depósito 'Geral').
+    Concilia com o catálogo (CAT) carregado no app (coluna 'sku'); se não existir, tenta produto_padrao local; se nada, sem filtro.
+    """
+    token = _TINY_TOKENS[conta]
+    base = _tiny_listar_basicos(token)
+
+    skus_padrao = _load_skus_padrao(conta)
+
+    linhas = []
+    for pb in base:
+        # filtra pais/kit e inativos
+        if pb.get("situacao") != "A":
+            continue
+        if pb.get("tipoVariacao") not in {"N", "V"}:
+            continue
+
+        det = _tiny_obter_estoque(token, pb.get("id")) or {}
+        sku_raw = (pb.get("codigo") or det.get("codigo") or "").strip()
+        if not sku_raw:
+            continue
+
+        # aplica filtro (CAT do app ou produto_padrao.*)
+        if skus_padrao and _tiny_norm_code(sku_raw) not in skus_padrao:
+            continue
+
+        estoque = _tiny_estoque_geral(conta, det)
+        preco   = _tiny_to_float(det.get("preco_custo_medio")) or _tiny_to_float(pb.get("preco_custo_medio"))
+        linhas.append({"SKU": sku_raw, "Estoque_Fisico": estoque, "Preco": preco})
+
+    df = pd.DataFrame(linhas, columns=["SKU","Estoque_Fisico","Preco"]).sort_values("SKU").reset_index(drop=True)
+
+    if not skus_padrao:
+        st.warning(
+            "Não encontrei o **catálogo carregado no app** (st.session_state.catalogo_df) "
+            f"nem a planilha local de produtos padrão para {conta} "
+            f"(.uploads/{conta}/produto_padrao.xlsx ou .csv). "
+            "O estoque Tiny foi carregado **sem filtro**.",
+            icon="⚠️"
+        )
+
+    return df
+
+def _tiny_fetch_and_store(conta: str):
+    """
+    Baixa do Tiny, concilia com o catálogo/planilha padrão, grava em memória+cofre
+    exatamente como o upload fazia (mesmo fluxo do app).
+    """
+    df = _tiny_df_estoque(conta)
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False)
+    blob = buf.getvalue()
+    name = f"estoque_api_{conta}_{int(dt.datetime.now().timestamp())}.xlsx"
+    # salva na sessão (para o app ler) e no cofre do app (disco)
+    st.session_state[conta]["ESTOQUE"] = {"name": name, "bytes": blob}
+    _store_put(conta, "ESTOQUE", name, blob)
+    return df, name
+
+def render_estoque_section(emp: str):
+    """
+    Substitui o bloco do upload de 'Estoque Físico — opcional' no app.
+    - Auto-sincroniza com Tiny (depósito 'Geral', multiempresas tratado, filtro por CAT/planilha padrão).
+    - Botão grande para forçar sincronização.
+    - Salva em sessão + cofre usando as mesmas funções do app (store_put/store_delete).
+    """
+    # Auto-sync na primeira carga (se ainda não houver estoque em sessão)
+    if not st.session_state[emp]["ESTOQUE"]["name"]:
+        with st.spinner(f"Sincronizando {emp} com o Tiny…"):
+            _tiny_fetch_and_store(emp)
+        st.success(f"Estoque atualizado via API para {emp}")
+
+    # Botão para forçar sincronização
+    if st.button("🔄 Forçar sincronização com o Tiny", key=f"force_sync_{emp}", use_container_width=True):
+        with st.spinner(f"Atualizando {emp} (Tiny)…"):
+            _tiny_fetch_and_store(emp)
+        st.success(f"Estoque atualizado via API para {emp}")
+
+    # Badge e opção de limpar — mantém o fluxo do app
+    it = st.session_state[emp]["ESTOQUE"]
+    if it["name"]:
+        st.markdown(badge_ok("Estoque salvo", it["name"]), unsafe_allow_html=True)
+        if st.button("Limpar Estoque (somente este)", key=f"clr_{emp}_ESTOQUE", use_container_width=True):
+            _store_delete(emp, "ESTOQUE")
+            st.info("Estoque removido.")
+
 # ============ Compra Automática ============
 def calcular(full_df, fisico_df, vendas_df, cat: "Catalogo", h=60, g=0.0, LT=0):
     kits = construir_kits_efetivo(cat)
@@ -502,7 +711,6 @@ def calcular(full_df, fisico_df, vendas_df, cat: "Catalogo", h=60, g=0.0, LT=0):
 
     demanda = cat_df.merge(ml_comp, on="SKU", how="left").merge(shopee_comp, on="SKU", how="left")
 
-    # saneamento defensivo
     demanda[["ML_60d", "Shopee_60d"]] = (
         demanda[["ML_60d", "Shopee_60d"]]
         .apply(pd.to_numeric, errors="coerce")
@@ -551,7 +759,6 @@ def calcular(full_df, fisico_df, vendas_df, cat: "Catalogo", h=60, g=0.0, LT=0):
 
     base["Compra_Sugerida"] = (base["Necessidade"] - base["Folga_Fisico"]).clip(lower=0).astype(int)
 
-    # nao_repor some
     mask_nao = base["status_reposicao"].str.lower().str.contains("nao_repor", na=False)
     base.loc[mask_nao, "Compra_Sugerida"] = 0
     base = base[~mask_nao]
@@ -711,41 +918,16 @@ with tab1:
                     _store_delete(emp, "VENDAS")
                     st.info("Vendas removido.")
 
-        # ESTOQUE
-        st.markdown("**Estoque Físico — opcional**")
-        up = st.file_uploader("CSV/XLSX/XLS", type=["csv", "xlsx", "xls"], key=f"up_est_{emp}")
-        if up is not None:
-            blob = up.read()
-            st.session_state[emp]["ESTOQUE"] = {"name": up.name, "bytes": blob}
-            _store_put(emp, "ESTOQUE", up.name, blob)
-            st.success(f"Estoque salvo: {up.name}")
-        it = st.session_state[emp]["ESTOQUE"]
-        if it["name"]:
-            st.markdown(badge_ok("Estoque salvo", it["name"]), unsafe_allow_html=True)
-            if st.button("Limpar Estoque (somente este)", key=f"clr_{emp}_ESTOQUE", use_container_width=True):
-                _store_delete(emp, "ESTOQUE")
-                st.info("Estoque removido.")
+        # === ESTOQUE — AGORA ONLINE (Tiny) ===
+        st.markdown("**Estoque Físico — origem: Tiny (depósito ‘Geral’ + catálogo do app)**")
+        render_estoque_section(emp)
 
-        colx, coly = st.columns(2)
-        with colx:
-            if st.button(f"Salvar {emp}", use_container_width=True, key=f"save_{emp}"):
-                for kind in ["FULL", "VENDAS", "ESTOQUE"]:
-                    it = st.session_state[emp][kind]
-                    if it["name"] and it["bytes"]:
-                        _disk_put(emp, kind, it["name"], it["bytes"])
-                st.success(f"{emp}: arquivos confirmados (disco).")
-        with coly:
-            if st.button(f"Limpar {emp}", use_container_width=True, key=f"clr_all_{emp}"):
-                st.session_state[emp] = {"FULL": {"name": None, "bytes": None},
-                                         "VENDAS": {"name": None, "bytes": None},
-                                         "ESTOQUE": {"name": None, "bytes": None}}
-                _store_clear(emp)
-                st.info(f"{emp} limpo.")
-
-        st.divider()
-
-    bloco_empresa("ALIVVIA")
-    bloco_empresa("JCA")
+    # Render das duas empresas lado a lado
+    col_esq, col_dir = st.columns(2)
+    with col_esq:
+        bloco_empresa("ALIVVIA")
+    with col_dir:
+        bloco_empresa("JCA")
 
 # ================== TAB 2: Compra Automática ==================
 with tab2:
@@ -1009,14 +1191,13 @@ with tab2:
                         },
                     )
 
-                    # Download XLSX combinado (com tratamento para DF vazio)
+                    # Download XLSX combinado
                     def _xlsx_combinado(df):
-                        import io as _io, pandas as _pd, numpy as _np
+                        import io as _io, pandas as _pd
                         bio = _io.BytesIO()
                         with _pd.ExcelWriter(bio, engine="xlsxwriter") as w:
                             df.to_excel(w, sheet_name="Compra_2Contas", index=False)
                             ws = w.sheets["Compra_2Contas"]
-
                             if df.shape[0] == 0:
                                 for i in range(len(df.columns)):
                                     ws.set_column(i, i, 14)
@@ -1027,14 +1208,12 @@ with tab2:
                                     s = df[col].astype(str).fillna("")
                                     s = s.replace({"None": "", "nan": "", "NaN": ""})
                                     max_len = s.map(len).max()
-                                    if _pd.isna(max_len):
+                                    if pd.isna(max_len):
                                         max_len = 0
                                     width = max(12, min(40, int(max_len) + 2))
                                     ws.set_column(i, i, width)
-
                                 ws.freeze_panes(1, 0)
                                 ws.autofilter(0, 0, len(df), len(df.columns) - 1)
-
                         bio.seek(0)
                         return bio.read()
 
