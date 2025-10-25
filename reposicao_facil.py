@@ -203,16 +203,47 @@ def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def br_to_float(x):
+    """Converte string numérica com vírgula ou ponto como separador decimal.
+    Regras:
+    - Tem vírgula e não tem ponto: vírgula é decimal -> troca ',' por '.'
+    - Tem ponto e não tem vírgula: ponto é decimal -> mantém
+    - Tem vírgula e ponto: assume '.' como milhar e ',' como decimal -> remove '.' e troca ',' por '.'
+    - Só dígitos: interpreta como inteiro
+    """
     if pd.isna(x):
         return np.nan
     if isinstance(x, (int, float, np.integer, np.floating)):
         return float(x)
+
     s = str(x).strip()
-    s = s.replace("\u00a0", " ").replace("R$", "").replace(" ", "").replace(".", "").replace(",", ".")
+    # remove símbolos e espaços comuns
+    s = (
+        s.replace("\u00a0", " ")
+         .replace("R$", "")
+         .replace(" ", "")
+    )
+
+    has_comma = "," in s
+    has_dot   = "." in s
+
+    if has_comma and not has_dot:
+        # ex.: 46,36 -> 46.36
+        s = s.replace(",", ".")
+    elif has_dot and not has_comma:
+        # ex.: 46.36 -> 46.36 (mantém)
+        pass
+    elif has_comma and has_dot:
+        # ex.: 1.234,56 -> 1234.56 (ponto milhar, vírgula decimal)
+        s = s.replace(".", "").replace(",", ".")
+    else:
+        # só dígitos: "4636" -> 4636.0
+        pass
+
     try:
         return float(s)
     except:
         return np.nan
+
 
 def norm_sku(x: str) -> str:
     if pd.isna(x):
