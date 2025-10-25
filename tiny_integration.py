@@ -1,6 +1,10 @@
 # tiny_integration.py
-# Integração Tiny ERP — Estoque confiável (dupla leitura, reconsulta de outliers, gatekeeper)
-# Copie este arquivo inteiro no seu projeto.
+# Integração Tiny ERP — estoque confiável e auditável
+# - 3 leituras por SKU (mediana) + fallback anti-zero
+# - Se por SKU vier vazio, tenta por ID
+# - Duas passadas (A e B) + reconsulta de outliers
+# - Gatekeeper (delta total, % SKUs alterados, revalidação por amostra)
+# - Salva XLSX e exibe auditoria
 
 import time
 import io
@@ -52,7 +56,6 @@ class TinyClient:
         for k in range(self.max_retries):
             try:
                 r = self.s.post(url, data=data, timeout=self.timeout)
-                # Se limite/erro de servidor, re-tenta com backoff exponencial
                 if r.status_code == 429 or r.status_code >= 500:
                     time.sleep(self.backoff_base * (2 ** k))
                     continue
@@ -61,6 +64,7 @@ class TinyClient:
                 time.sleep(self.backoff_base * (2 ** k))
         return None
 
+    # Lista básica (não usamos na sincronização, mas fica disponível)
     def listar_produtos(self, pagina=1):
         url = "https://api.tiny.com.br/api2/produto.listar.php"
         r = self._post(url, {"pagina": pagina})
@@ -72,11 +76,36 @@ class TinyClient:
             return None, {"erro": f"http {r.status_code}", "raw": r.text[:500]}
         return payload, None
 
+    # Estoque por SKU
     def obter_estoque_sku(self, sku: str):
         url = "https://api.tiny.com.br/api2/produto.obter.estoque.php"
         r = self._post(url, {"sku": sku})
         if not r:
             return None, {"erro": "timeout/obter_estoque"}
+        try:
+            payload = r.json()
+        except Exception:
+            return None, {"erro": f"http {r.status_code}", "raw": r.text[:500]}
+        return payload, None
+
+    # Obter produto (para conseguir o ID)
+    def obter_produto(self, sku: str):
+        url = "https://api.tiny.com.br/api2/produto.obter.php"
+        r = self._post(url, {"sku": sku})
+        if not r:
+            return None, {"erro": "timeout/produto_obter"}
+        try:
+            payload = r.json()
+        except Exception:
+            return None, {"erro": f"http {r.status_code}", "raw": r.text[:500]}
+        return payload, None
+
+    # Estoque por ID
+    def obter_estoque_id(self, id_produto: str | int):
+        url = "https://api.tiny.com.br/api2/produto.obter.estoque.php"
+        r = self._post(url, {"id": id_produto})
+        if not r:
+            return None, {"erro": "timeout/obter_estoque_id"}
         try:
             payload = r.json()
         except Exception:
@@ -117,33 +146,65 @@ def somar_estoque_geral(depositos: list) -> int:
 
 def _ler_once(client: TinyClient, skus_alvo: list, sleep_between=0.12):
     """
-    Lê estoque/preço dos SKUs (1 a 1) com pausa padrão 120ms para evitar rate-limit.
-    Retorna (DataFrame, qtd_erros).
+    Leitura robusta por SKU:
+      - Para cada SKU, faz 3 microleituras e usa a MEDIANA do 'Geral'.
+      - Se via SKU vier vazio/0, tenta obter o 'id' (produto.obter) e reconsultar por id.
+      - Preço = média simples das leituras válidas.
     """
-    linhas = []
-    erros = 0
-    for sku in skus_alvo:
+    def _uma_leitura_por_sku(sku):
+        # 1) tentar por SKU
         payload, err = client.obter_estoque_sku(sku)
-        if err:
-            erros += 1
-            linhas.append({"SKU": sku, "Estoque_Fisico": 0, "Preco": 0.0, "erro": err.get("erro", "?")})
-        else:
-            dep = payload.get("retorno", {}).get("depositos", [])
+        if not err:
+            dep = payload.get("retorno", {}).get("depositos", []) or []
             preco = payload.get("retorno", {}).get("produto", {}).get("preco_custo_medio", 0)
-            linhas.append({
-                "SKU": sku,
-                "Estoque_Fisico": somar_estoque_geral(dep),
-                "Preco": br_to_float(preco) or 0.0,
-                "erro": ""
-            })
-        if sleep_between:
+            if isinstance(dep, list) and len(dep) > 0:
+                return dep, preco, "sku"
+
+        # 2) se vazio, tenta via ID
+        prod, err2 = client.obter_produto(sku)
+        pid = prod.get("retorno", {}).get("produto", {}).get("id") if not err2 else None
+        if pid:
+            pay2, err3 = client.obter_estoque_id(pid)
+            if not err3:
+                dep2 = pay2.get("retorno", {}).get("depositos", []) or []
+                preco2 = pay2.get("retorno", {}).get("produto", {}).get("preco_custo_medio", 0)
+                return dep2, preco2, "id"
+
+        # 3) fracassou
+        return [], 0.0, "fail"
+
+    linhas = []
+    for sku in skus_alvo:
+        estoques, precos = [], []
+        fonte_usada = "sku"
+        for _ in range(3):
+            dep, preco, fonte = _uma_leitura_por_sku(sku)
+            fonte_usada = fonte
+            geral = somar_estoque_geral(dep)
+            estoques.append(geral)
+            precos.append(br_to_float(preco) or 0.0)
             time.sleep(sleep_between)
+
+        estoques_sorted = sorted(estoques)
+        med = estoques_sorted[1]  # mediana de 3
+        if med == 0 and max(estoques_sorted) > 0:
+            med = max(estoques_sorted)  # anti-queda espúria
+
+        prec_validos = [p for p in precos if p is not None]
+        preco_final = float(np.mean(prec_validos)) if prec_validos else 0.0
+
+        linhas.append({
+            "SKU": str(sku).upper().strip(),
+            "Estoque_Fisico": int(med),
+            "Preco": float(preco_final),
+            "erro": "" if fonte_usada != "fail" else "sem_deposito"
+        })
+
     df = pd.DataFrame(linhas)
     if not df.empty:
-        df["SKU"] = df["SKU"].astype(str).str.upper().str.strip()
         df["Estoque_Fisico"] = pd.to_numeric(df["Estoque_Fisico"], errors="coerce").fillna(0).astype(int)
         df["Preco"] = pd.to_numeric(df["Preco"], errors="coerce").fillna(0.0)
-    return df, erros
+    return df, 0
 
 def _auditar_diferencas(dfA, dfB, col="Estoque_Fisico"):
     m = dfA.merge(dfB, on="SKU", how="outer", suffixes=("_A", "_B"))
@@ -163,7 +224,7 @@ def ler_estoque_confiavel(conta: str, token: str, skus_catalogo: list,
     Leitura robusta:
       - leitura A e B
       - reconsulta somente dos outliers (diferença > delta_pct_outlier)
-      - fallback no ultimo_df se algo faltar
+      - fallback por SKU: se novo=0 e antigo>=1, mantém antigo
     Retorna (df[SKU,Estoque_Fisico,Preco], audit_dict)
     """
     client = TinyClient(token)
@@ -213,6 +274,16 @@ def ler_estoque_confiavel(conta: str, token: str, skus_catalogo: list,
                 base.loc[sku, ["Estoque_Fisico","Preco"]] = [0, 0.0]
 
     base = base.reset_index()
+
+    # --- Fallback por SKU: se novo = 0 e antigo >= 1, mantém antigo (proteção contra spikes)
+    if ultimo_df is not None and not ultimo_df.empty:
+        old_map = ultimo_df.set_index("SKU")
+        base = base.merge(old_map[["Estoque_Fisico"]].rename(columns={"Estoque_Fisico":"Old_Fisico"}),
+                          on="SKU", how="left")
+        base["Old_Fisico"] = pd.to_numeric(base["Old_Fisico"], errors="coerce").fillna(0).astype(int)
+        cond_queda_suspeita = (base["Estoque_Fisico"] == 0) & (base["Old_Fisico"] >= 1)
+        base.loc[cond_queda_suspeita, "Estoque_Fisico"] = base.loc[cond_queda_suspeita, "Old_Fisico"]
+
     base["Estoque_Fisico"] = pd.to_numeric(base["Estoque_Fisico"], errors="coerce").fillna(0).astype(int)
     base["Preco"] = pd.to_numeric(base["Preco"], errors="coerce").fillna(0.0)
 
@@ -247,11 +318,20 @@ def _revalidar_amostra(client: TinyClient, df_base: pd.DataFrame, sample_n=50):
     for sku in pick:
         payload, err = client.obter_estoque_sku(sku)
         if err:
+            # tenta por ID aqui também
+            prod, e2 = client.obter_produto(sku)
+            pid = prod.get("retorno", {}).get("produto", {}).get("id") if not e2 else None
+            if pid:
+                pay2, e3 = client.obter_estoque_id(pid)
+                if not e3:
+                    dep = pay2.get("retorno", {}).get("depositos", []) or []
+                    linhas.append({"SKU": sku, "Estoque_Fisico": somar_estoque_geral(dep)})
+                    time.sleep(0.12); continue
             linhas.append({"SKU": sku, "Estoque_Fisico": np.nan})
         else:
-            dep = payload.get("retorno", {}).get("depositos", [])
+            dep = payload.get("retorno", {}).get("depositos", []) or []
             linhas.append({"SKU": sku, "Estoque_Fisico": somar_estoque_geral(dep)})
-        time.sleep(0.12)  # respeitar limite
+        time.sleep(0.12)
 
     df_check = pd.DataFrame(linhas)
     df_check["Estoque_Fisico"] = pd.to_numeric(df_check["Estoque_Fisico"], errors="coerce")
@@ -338,14 +418,14 @@ def render_estoque_section(emp: str, _store_put, _store_delete, badge_ok):
     import streamlit as st
     from datetime import datetime
 
-    # 1) Tokens (menção direta conforme passado por você)
+    # Tokens fornecidos
     TOKENS = {
         "ALIVVIA": "b3ca9c3319ac75276c03e097296e15619259cab9029a1e45b781a07553bdb25b",
         "JCA":     "352880e9498ec1a29b81a9f0ea1a946a46415f93b2aa2706634f39064b750dcd",
     }
     token = TOKENS.get(emp.upper())
 
-    # 2) Catálogo do app (lista de SKUs permitidos)
+    # Catálogo do app (lista de SKUs permitidos)
     cat_df = st.session_state.get("catalogo_df", None)
     if cat_df is None or "sku" not in cat_df.columns:
         st.warning("Carregue o Padrão (KITS/CAT) no sidebar para habilitar o estoque via Tiny.")
