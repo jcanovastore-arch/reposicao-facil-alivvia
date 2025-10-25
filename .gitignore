@@ -6,3 +6,4 @@ __pycache__/
 *.xls
 *.csv
 .streamlit/secrets.toml
+tokens_tiny.json
