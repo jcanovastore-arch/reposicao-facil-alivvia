@@ -1,4 +1,4 @@
-# Reposição Logística — Alivvia (Streamlit)
+# Reposição Logística — Alivvia
 # Mantém as abas: Dados das Empresas, Compra Automática, Alocação de Compra
 # Patch: Estoque Físico via Tiny v3 (botão no sidebar). Sem alterar a lógica original.
 
