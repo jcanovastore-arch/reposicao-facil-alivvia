@@ -7,4 +7,5 @@ xlsxwriter==3.2.0
 Unidecode==1.3.8
 python-dateutil==2.9.0.post0
 altair<6
-xlrd==1.2.0   # coloque esta linha só se você PRECISAR abrir .xls antigos
+# se você PRECISAR abrir .xls antigos, inclua:
+xlrd==1.2.0
