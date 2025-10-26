@@ -173,23 +173,28 @@ def _carregar_skus_base(emp: str) -> list[str]:
 def sincronizar_estoque_tiny(emp: str, skus: list[str]) -> pd.DataFrame:
     """
     Retorna DF: SKU, Estoque_Fisico, status.
-    (Preço não vem do Tiny.)
+    (Preço não vem do Tiny.)  Mostra progresso para não parecer travado.
     """
     token = _tiny_v3_get_bearer(emp)
     linhas = []
-    for sku in skus:
+    total = len(skus)
+    prog = st.progress(0, text=f"Sincronizando {total} SKUs no Tiny ({emp})…")
+    for i, sku in enumerate(skus, start=1):
         try:
             pid = _tiny_v3_get_id_por_sku(token, sku)
             if not pid:
                 linhas.append({"SKU": sku, "Estoque_Fisico": 0, "status": "SKU não encontrado"})
-                continue
-            est = _tiny_v3_get_estoque_geral(token, pid)
-            if not est:
-                linhas.append({"SKU": sku, "Estoque_Fisico": 0, "status": "Sem depósito Geral"})
-                continue
-            linhas.append({"SKU": sku, "Estoque_Fisico": int(est["disponivel"] or 0), "status": "OK"})
+            else:
+                est = _tiny_v3_get_estoque_geral(token, pid)
+                if not est:
+                    linhas.append({"SKU": sku, "Estoque_Fisico": 0, "status": "Sem depósito Geral"})
+                else:
+                    linhas.append({"SKU": sku, "Estoque_Fisico": int(est["disponivel"] or 0), "status": "OK"})
         except Exception as e:
             linhas.append({"SKU": sku, "Estoque_Fisico": 0, "status": f"ERRO: {e}"})
+        if total:
+            prog.progress(min(i/total, 1.0), text=f"Sincronizando {i}/{total}…")
+    prog.empty()
     return pd.DataFrame(linhas)
 
 # =========================
@@ -716,8 +721,9 @@ with st.sidebar:
             else:
                 df_tiny = sincronizar_estoque_tiny(emp_sel, skus)
                 st.session_state.setdefault("estoque_tiny_por_emp", {})[emp_sel] = df_tiny
-                ok = int(df_tiny[df_tiny["Estoque_Fisico"] > 0].shape[0])
-                st.success(f"Tiny v3 ({emp_sel}) sincronizado: {len(df_tiny)} SKUs (com estoque >0: {ok}).")
+                ok = int((df_tiny["status"] == "OK").sum())
+                st.success(f"Tiny v3 ({emp_sel}) sincronizado: {len(df_tiny)} SKUs (OK: {ok}).")
+                st.dataframe(df_tiny, use_container_width=True, height=380)
                 st.caption("Obs.: Preço não vem do Tiny; o preço do seu arquivo físico será mantido.")
         except Exception as e:
             st.error(f"Falha ao sincronizar Tiny: {e}")
@@ -847,7 +853,7 @@ with tab2:
             except Exception as e:
                 st.error(str(e))
 
-        if empresa in st.session_state["resultado_compra"]:
+        if empresa in st.session_state["resultado_compra"]]:
             pkg = st.session_state["resultado_compra"][empresa]
             df_final = pkg["df"]
             painel = pkg["painel"]
