@@ -531,11 +531,12 @@ def mapear_tipo(df: pd.DataFrame) -> str:
 
     if tem_sku and (tem_v60 or tem_estoque_full or tem_transito):
         return "FULL"
-    if tem_sku and tem_estoque_generico e tem_preco:
+    if tem_sku and tem_estoque_generico and tem_preco:
         return "FISICO"
     if tem_sku and not tem_preco:
         return "VENDAS"
     return "DESCONHECIDO"
+
 
 def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
     if tipo == "FULL":
@@ -1122,7 +1123,7 @@ with tab2:
                 tem_A = "ALIVVIA" in st.session_state["resultado_compra"]
                 tem_J = "JCA"     in st.session_state["resultado_compra"]
 
-                if not (tem_A e tem_J):
+                if not (tem_A and tem_J):
                     st.info("Gere a compra para ALIVVIA e JCA para habilitar a lista combinada.")
                 else:
                     dfA = st.session_state["resultado_compra"]["ALIVVIA"]["df"][["SKU","fornecedor","Compra_Sugerida","Valor_Compra_R$","Estoque_Fisico","Preco"]].rename(
