@@ -135,24 +135,65 @@ def _tiny_v3_get_estoque_geral(token: str, product_id: int) -> dict | None:
 
 def _carregar_skus_base(emp: str) -> list[str]:
     """
-    Busca SKUs a partir de .uploads/<EMP>/ (arquivos PADRAO/KITS/CAT),
-    igual ao padrão do seu app antigo.
+    De onde pegar os SKUs, em ordem:
+    1) Padrão (KITS/CAT) já carregado em memória (st.session_state.catalogo_df)
+    2) Qualquer arquivo salvo para a EMPRESA (FULL / VENDAS / ESTOQUE) no cofre
+    3) Busca no disco .uploads/<EMP>/ com nomes contendo PADRAO/KITS/CAT
     """
+    # 1) Padrão em memória
+    try:
+        df_cat = st.session_state.get("catalogo_df")
+        if df_cat is not None and isinstance(df_cat, pd.DataFrame) and not df_cat.empty:
+            for col in ("sku", "component_sku", "codigo"):
+                if col in df_cat.columns:
+                    skus = (
+                        df_cat[col].dropna().astype(str).str.strip().str.upper().unique().tolist()
+                    )
+                    if skus:
+                        return skus
+    except Exception:
+        pass
+
+    # 2) Arquivos da própria empresa já salvos no cofre (.uploads/ também é populado)
+    for kind in ["FULL", "VENDAS", "ESTOQUE"]:
+        it = _store_get(emp, kind)
+        if it and it.get("bytes"):
+            try:
+                df = load_any_table_from_bytes(it["name"], it["bytes"])
+                # achar a coluna de SKU no arquivo
+                for c in ("SKU", "sku", "codigo", "codigo_sku"):
+                    if c in df.columns:
+                        skus = df[c].dropna().astype(str).str.strip().str.upper().unique().tolist()
+                        if skus:
+                            return skus
+            except Exception:
+                pass
+
+    # 3) (legado) procurar arquivos no disco
     base = os.path.join(".uploads", emp.upper())
     if os.path.isdir(base):
         for root, _, files in os.walk(base):
-            cand = [f for f in files if any(k in f.upper() for k in ("PADRAO","KITS","CAT")) and f.lower().endswith((".csv",".xlsx"))]
+            cand = [
+                f for f in files
+                if any(k in f.upper() for k in ("PADRAO", "KITS", "CAT"))
+                and f.lower().endswith((".csv", ".xlsx"))
+            ]
             cand.sort(reverse=True)
             if cand:
                 path = os.path.join(root, cand[0])
                 try:
-                    df = pd.read_excel(path) if path.lower().endswith(".xlsx") else pd.read_csv(path, sep=None, engine="python")
-                    for col in ("SKU","codigo","sku","component_sku"):
+                    if path.lower().endswith(".xlsx"):
+                        df = pd.read_excel(path, dtype=str, keep_default_na=False)
+                    else:
+                        df = pd.read_csv(path, dtype=str, keep_default_na=False, sep=None, engine="python")
+                    for col in ("SKU","sku","component_sku","codigo"):
                         if col in df.columns:
                             skus = df[col].dropna().astype(str).str.strip().str.upper().unique().tolist()
-                            if skus: return skus
+                            if skus:
+                                return skus
                 except Exception:
                     pass
+
     return []
 
 # ====== TINY v3 — Sincronização de Estoque Físico (Geral) ======
