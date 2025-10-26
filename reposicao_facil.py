@@ -99,10 +99,13 @@ def _tiny_v3_req(token: str, method: str, path: str, params=None):
     headers = {"Authorization": f"Bearer {token}"}
     for attempt in range(3):
         r = requests.request(method, url, params=params, headers=headers, timeout=30)
+        # backoff de sobrecarga
         if r.status_code in (429, 500, 502, 503, 504):
-            time.sleep(1.2 * (attempt + 1)); continue
-        if r.status_code == 401 and attempt == 0:
-            raise RuntimeError("401 Unauthorized na v3 (access_token inválido/expirado).")
+            time.sleep(1.2 * (attempt + 1))
+            continue
+        # 401: token ruim — deixe o chamador decidir renovar (mais controle)
+        if r.status_code == 401:
+            raise RuntimeError("401_UNAUTHORIZED")
         if not r.ok:
             raise RuntimeError(f"HTTP {r.status_code} em {path}: {r.text[:300]}")
         try:
@@ -110,6 +113,7 @@ def _tiny_v3_req(token: str, method: str, path: str, params=None):
         except Exception:
             raise RuntimeError(f"Resposta não-JSON em {path}: {r.text[:300]}")
     raise RuntimeError(f"Falha repetida em {path}")
+
 
 def _tiny_v3_get_id_por_sku(token: str, sku: str) -> int | None:
     data = _tiny_v3_req(token, "GET", "/produtos", params={"codigo": sku})
@@ -135,22 +139,47 @@ def _tiny_v3_get_estoque_geral(token: str, product_id: int) -> dict | None:
 
 def _carregar_skus_base(emp: str) -> list[str]:
     """
-    De onde pegar os SKUs, em ordem:
-    1) Padrão (KITS/CAT) já carregado em memória (st.session_state.catalogo_df)
-    2) Qualquer arquivo salvo para a EMPRESA (FULL / VENDAS / ESTOQUE) no cofre
-    3) Busca no disco .uploads/<EMP>/ com nomes contendo PADRAO/KITS/CAT
+    Busca SKUs a partir do Padrão carregado em memória (CAT/KITS) ou,
+    se não achar, procura em .uploads/<EMP> (PADRAO/KITS/CAT).
     """
-    # 1) Padrão em memória
     try:
-        df_cat = st.session_state.get("catalogo_df")
-        if df_cat is not None and isinstance(df_cat, pd.DataFrame) and not df_cat.empty:
-            for col in ("sku", "component_sku", "codigo"):
-                if col in df_cat.columns:
-                    skus = (
-                        df_cat[col].dropna().astype(str).str.strip().str.upper().unique().tolist()
-                    )
-                    if skus:
-                        return skus
+        # 1) Padrão em memória (mais rápido e confiável)
+        if st.session_state.get("catalogo_df") is not None:
+            dfc = st.session_state["catalogo_df"]
+            col = None
+            for c in ["sku", "component_sku", "codigo", "codigo_sku"]:
+                if c in dfc.columns:
+                    col = c
+                    break
+            if col:
+                skus = (
+                    dfc[col].dropna().astype(str).str.strip().str.upper().unique().tolist()
+                )
+                if skus:
+                    return skus
+    except Exception:
+        pass
+
+    # 2) Fallback: .uploads/<EMP> (compatível com seu fluxo antigo)
+    base = os.path.join(".uploads", emp.upper())
+    if os.path.isdir(base):
+        for root, _, files in os.walk(base):
+            cand = [f for f in files
+                    if any(k in f.upper() for k in ("PADRAO", "KITS", "CAT"))
+                    and f.lower().endswith((".csv", ".xlsx"))]
+            cand.sort(reverse=True)
+            if cand:
+                path = os.path.join(root, cand[0])
+                try:
+                    df = pd.read_excel(path) if path.lower().endswith(".xlsx") else pd.read_csv(path, sep=None, engine="python")
+                    for col in ("SKU", "sku", "component_sku", "codigo", "codigo_sku"):
+                        if col in df.columns:
+                            skus = df[col].dropna().astype(str).str.strip().str.upper().unique().tolist()
+                            if skus:
+                                return skus
+                except Exception:
+                    pass
+    return []
     except Exception:
         pass
 
@@ -197,25 +226,50 @@ def _carregar_skus_base(emp: str) -> list[str]:
     return []
 
 # ====== TINY v3 — Sincronização de Estoque Físico (Geral) ======
-def sincronizar_estoque_tiny(emp: str, skus: list[str]):
+def sincronizar_estoque_tiny(emp: str, skus: list[str]) -> pd.DataFrame:
     """
-    Retorna DataFrame com colunas: SKU, Estoque_Fisico.
-    (Preço não vem do Tiny; preservamos o Preço do seu arquivo físico se ele existir.)
+    Retorna DataFrame com colunas: SKU, Estoque_Fisico, status.
+    Mostra progresso e tenta renovar token Tiny se pegar 401.
     """
     token = _tiny_v3_get_bearer(emp)
     linhas = []
-    for sku in skus:
+    total = len(skus)
+    prog = st.progress(0, text=f"Sincronizando {total} SKUs no Tiny ({emp})…")
+    for i, sku in enumerate(skus, start=1):
         try:
-            pid = _tiny_v3_get_id_por_sku(token, sku)
+            try:
+                pid = _tiny_v3_get_id_por_sku(token, sku)
+            except RuntimeError as e:
+                if str(e) == "401_UNAUTHORIZED":
+                    # tenta renovar token uma única vez
+                    token = _tiny_v3_refresh_from_secrets(emp)
+                    pid = _tiny_v3_get_id_por_sku(token, sku)
+                else:
+                    raise
+
             if not pid:
-                linhas.append({"SKU": sku, "Estoque_Fisico": 0, "status": "SKU não encontrado"}); continue
-            est = _tiny_v3_get_estoque_geral(token, pid)
-            if not est:
-                linhas.append({"SKU": sku, "Estoque_Fisico": 0, "status": "Sem depósito Geral"}); continue
-            linhas.append({"SKU": sku, "Estoque_Fisico": int(est["disponivel"] or 0), "status": "OK"})
+                linhas.append({"SKU": sku, "Estoque_Fisico": 0, "status": "SKU não encontrado"})
+            else:
+                try:
+                    est = _tiny_v3_get_estoque_geral(token, pid)
+                except RuntimeError as e:
+                    if str(e) == "401_UNAUTHORIZED":
+                        token = _tiny_v3_refresh_from_secrets(emp)
+                        est = _tiny_v3_get_estoque_geral(token, pid)
+                    else:
+                        raise
+
+                if not est:
+                    linhas.append({"SKU": sku, "Estoque_Fisico": 0, "status": "Sem depósito Geral"})
+                else:
+                    disp = int(est.get("disponivel") or 0)
+                    linhas.append({"SKU": sku, "Estoque_Fisico": disp, "status": "OK"})
         except Exception as e:
             linhas.append({"SKU": sku, "Estoque_Fisico": 0, "status": f"ERRO: {e}"})
-    df = pd.DataFrame(linhas)
+        finally:
+            prog.progress(i/total, text=f"Sincronizando {i}/{total} SKUs…")
+    prog.empty()
+    return pd.DataFrame(linhas)
     return df
 # ====== FIM TINY v3 PATCH ======
 
@@ -833,7 +887,7 @@ with st.sidebar:
     LT = st.number_input("Lead time (dias)", value=0, step=1, min_value=0)
 
 # ====== Sidebar: Sincronização Tiny v3 (patch mínimo) ======
-with st.sidebar:
+ with st.sidebar:
     st.markdown("---")
     st.subheader("Estoque Físico via Tiny v3")
     emp_sel = st.radio("Empresa", ["ALIVVIA","JCA"], horizontal=True, key="emp_tiny_sel")
@@ -842,15 +896,18 @@ with st.sidebar:
         try:
             skus = _carregar_skus_base(emp_sel)
             if not skus:
-                st.error(f"Não achei SKUs em .uploads/{emp_sel}/ (PADRAO/KITS/CAT). Abra seu padrão primeiro.")
+                st.error(f"Não achei SKUs. Carregue o Padrão (CAT/KITS) no sidebar (ou garanta arquivos em .uploads/{emp_sel}/).")
             else:
-                df_tiny = sincronizar_estoque_tiny(emp_sel, skus)
+                with st.spinner("Chamando Tiny…"):
+                    df_tiny = sincronizar_estoque_tiny(emp_sel, skus)
                 st.session_state.setdefault("estoque_tiny_por_emp", {})[emp_sel] = df_tiny
-                ok = int(df_tiny[df_tiny["Estoque_Fisico"] > 0].shape[0])
-                st.success(f"Tiny v3 ({emp_sel}) sincronizado: {len(df_tiny)} SKUs (com estoque >0: {ok}).")
-                st.caption("Obs.: Preço não vem do Tiny; seu arquivo físico (se enviado) preserva os preços.")
+                ok = int((df_tiny["status"] == "OK").sum())
+                st.success(f"Tiny v3 ({emp_sel}) sincronizado: {len(df_tiny)} SKUs (OK: {ok}).")
+                st.dataframe(df_tiny, use_container_width=True, hide_index=True)
         except Exception as e:
-            st.error(f"Falha ao sincronizar Tiny: {e}")
+            # mostra erro claramente
+            st.exception(e)
+           st.error(f"Falha ao sincronizar Tiny: {e}")
 
     st.markdown("---")
     st.subheader("Padrão (KITS/CAT) — Google Sheets")
