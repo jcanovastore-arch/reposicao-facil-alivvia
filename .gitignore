@@ -7,3 +7,5 @@ __pycache__/
 *.csv
 .streamlit/secrets.toml
 tokens/
+backup_sistema_atual/
+.logs/
