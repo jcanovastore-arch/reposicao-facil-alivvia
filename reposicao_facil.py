@@ -5,6 +5,8 @@
 
 import os
 import io
+import json
+import time
 import hashlib
 import datetime as dt
 from dataclasses import dataclass
@@ -17,83 +19,149 @@ import requests
 import base64
 from urllib.parse import urlparse
 
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-# IMPORTANTE: o set_page_config deve ser a PRIMEIRA chamada st.* do app
+# ======== SEMPRE PRIMEIRO: CONFIG DA PÁGINA ========
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-
-# ====== INÍCIO: REFRESH AUTOMÁTICO DO TOKEN TINY (via Secrets) ======
-# Secrets esperados (em Settings -> Secrets do Streamlit Cloud):
-# [TINY_JCA]
-# client_id     = "tiny-api-...-...."
-# client_secret = "...."
-# refresh_token = "...."
-#
-# [TINY_ALIVVIA]
-# client_id     = "tiny-api-...-...."
-# client_secret = "...."
-# refresh_token = "...."
-
-_TINY_OIDC_TOKEN_URL = "https://accounts.tiny.com.br/realms/tiny/protocol/openid-connect/token"
-
-def _refresh_and_save(emp: str, sec_key: str):
-    """
-    Usa os Secrets (client_id, client_secret, refresh_token) para obter um access_token novo
-    e grava em tokens/tiny_<EMP>.json no formato esperado pelo restante do app.
-    """
-    try:
-        sec = st.secrets[sec_key]
-        payload = {
-            "grant_type": "refresh_token",
-            "client_id": sec["client_id"],
-            "client_secret": sec["client_secret"],
-            "refresh_token": sec["refresh_token"],
-        }
-        r = requests.post(_TINY_OIDC_TOKEN_URL, data=payload, timeout=30)
-        r.raise_for_status()
-        tok = r.json()
-        access_token = tok.get("access_token")
-        new_refresh  = tok.get("refresh_token")  # Tiny pode devolver outro refresh_token
-
-        if not access_token:
-            raise RuntimeError(f"Nenhum access_token retornado para {emp}. Resp: {tok}")
-
-        os.makedirs("tokens", exist_ok=True)
-        out_path = os.path.join("tokens", f"tiny_{emp}.json")
-        with open(out_path, "w", encoding="utf-8") as f:
-            import json as _json
-            _json.dump({
-                "access_token": access_token,
-                "refresh_token": new_refresh or sec["refresh_token"],
-            }, f, ensure_ascii=False)
-        return True, f"Token {emp} atualizado ({os.path.basename(out_path)})."
-    except Exception as e:
-        return False, f"{emp}: não consegui atualizar token — {e}"
-
-def ensure_tiny_tokens_from_secrets():
-    msgs = []
-    # JCA
-    try:
-        ok1, msg1 = _refresh_and_save("JCA", "TINY_JCA")
-        msgs.append(("success" if ok1 else "warning", msg1))
-    except Exception as e:
-        msgs.append(("warning", f"JCA: segredo ausente ou inválido — {e}"))
-    # ALIVVIA
-    try:
-        ok2, msg2 = _refresh_and_save("ALIVVIA", "TINY_ALIVVIA")
-        msgs.append(("success" if ok2 else "warning", msg2))
-    except Exception as e:
-        msgs.append(("warning", f"ALIVVIA: segredo ausente ou inválido — {e}"))
-    st.session_state["tiny_msgs"] = msgs
-
-# Chama uma vez ao carregar o app (antes de usar o Tiny em qualquer lugar do app)
-ensure_tiny_tokens_from_secrets()
-# ====== FIM: REFRESH AUTOMÁTICO DO TOKEN TINY ======
-
 
 # ======== URLs padrão (GOOGLE DRIVE) ========
 PADRAO_URL_DEFAULT = "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/export?format=xlsx"
 PADRAO_URL_EDIT    = "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/edit"
+
+# ===================== BLOCO NOVO: Tiny v3 (refresh + helpers) =====================
+_TINY_V3_BASE = "https://erp.tiny.com.br/public-api/v3"
+
+def _tiny_token_path(emp: str) -> str:
+    os.makedirs("tokens", exist_ok=True)
+    return os.path.join("tokens", f"tiny_{emp}.json")
+
+def _tiny_save_token(emp: str, access_token: str):
+    with open(_tiny_token_path(emp), "w", encoding="utf-8") as f:
+        json.dump({"access_token": access_token}, f, ensure_ascii=False, indent=2)
+
+def _tiny_load_access_token(emp: str) -> str:
+    p = _tiny_token_path(emp)
+    if not os.path.exists(p):
+        raise RuntimeError(f"Token v3 da empresa {emp} não encontrado em {p}.")
+    with open(p, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    tok = data.get("access_token")
+    if not tok:
+        raise RuntimeError(f"Arquivo {p} não contém 'access_token'.")
+    return tok
+
+def _tiny_refresh_and_store(emp: str, sec_key: str):
+    """
+    Lê st.secrets[sec_key] = {client_id, client_secret, refresh_token}
+    Faz refresh e salva access_token em tokens/tiny_<EMP>.json
+    """
+    if sec_key not in st.secrets:
+        st.session_state.setdefault("tiny_msgs", []).append(f"[{emp}] st.secrets['{sec_key}'] não configurado.")
+        return
+
+    creds = st.secrets[sec_key]
+    client_id     = creds.get("client_id")
+    client_secret = creds.get("client_secret")
+    refresh_token = creds.get("refresh_token")
+    if not all([client_id, client_secret, refresh_token]):
+        st.session_state.setdefault("tiny_msgs", []).append(f"[{emp}] credenciais incompletas em st.secrets['{sec_key}'].")
+        return
+
+    try:
+        r = requests.post(
+            "https://accounts.tiny.com.br/realms/tiny/protocol/openid-connect/token",
+            data={
+                "grant_type": "refresh_token",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "refresh_token": refresh_token,
+            },
+            timeout=30,
+        )
+        r.raise_for_status()
+        access_token = r.json().get("access_token")
+        if access_token:
+            _tiny_save_token(emp, access_token)
+            st.session_state.setdefault("tiny_msgs", []).append(f"[{emp}] access_token atualizado.")
+        else:
+            st.session_state.setdefault("tiny_msgs", []).append(f"[{emp}] refresh sem access_token.")
+    except Exception as e:
+        st.session_state.setdefault("tiny_msgs", []).append(f"[{emp}] falha no refresh: {e}")
+
+def ensure_tiny_tokens():
+    """Atualiza tokens das duas empresas se houver secrets configurados."""
+    _tiny_refresh_and_store("ALIVVIA", "TINY_ALIVVIA")
+    _tiny_refresh_and_store("JCA",      "TINY_JCA")
+
+def _tiny_req(token: str, method: str, path: str, params=None):
+    url = f"{_TINY_V3_BASE}/{path.lstrip('/')}"
+    headers = {"Authorization": f"Bearer {token}"}
+    for attempt in range(3):
+        r = requests.request(method, url, params=params, headers=headers, timeout=30)
+        if r.status_code in (429, 500, 502, 503, 504):
+            time.sleep(1.5 * (attempt + 1))
+            continue
+        if r.status_code == 401:
+            raise RuntimeError("401 Unauthorized: access_token inválido/expirado.")
+        if not r.ok:
+            raise RuntimeError(f"HTTP {r.status_code} em {path}: {r.text[:200]}")
+        try:
+            return r.json()
+        except Exception:
+            raise RuntimeError(f"Resposta não-JSON em {path}: {r.text[:200]}")
+    raise RuntimeError(f"Falha repetida em {path}")
+
+def _tiny_get_id_por_sku(token: str, sku: str) -> int | None:
+    data = _tiny_req(token, "GET", "/produtos", params={"codigo": sku})
+    itens = data.get("itens") or data.get("items") or data.get("data") or []
+    if not itens:
+        return None
+    pid = itens[0].get("id")
+    return int(pid) if pid else None
+
+def _tiny_get_estoque_geral(token: str, product_id: int) -> dict | None:
+    data = _tiny_req(token, "GET", f"/estoque/{product_id}")
+    depositos = data.get("depositos") or data.get("data", {}).get("depositos") or []
+    if not depositos:
+        return None
+    for d in depositos:
+        nome = (d.get("nome") or "").strip().lower()
+        if nome == "geral" or d.get("desconsiderar") is False:
+            return {
+                "deposito_nome": d.get("nome"),
+                "saldo": d.get("saldo"),
+                "reservado": d.get("reservado"),
+                "disponivel": d.get("disponivel"),
+            }
+    return None
+
+def _sincronizar_estoque_tiny(emp: str, sku_lista: list[str]) -> pd.DataFrame:
+    """
+    Puxa estoque (depósito 'Geral') do Tiny para uma lista de SKUs e retorna DF:
+    ['SKU','Estoque_Fisico'] — 'Preco' NÃO vem do Tiny (continua pelo upload, se houver).
+    """
+    token = _tiny_load_access_token(emp)
+    linhas = []
+    for sku in sku_lista:
+        try:
+            pid = _tiny_get_id_por_sku(token, sku)
+            if not pid:
+                linhas.append({"SKU": sku, "Estoque_Fisico": 0, "status": "SKU não encontrado"})
+                continue
+            est = _tiny_get_estoque_geral(token, pid)
+            if not est:
+                linhas.append({"SKU": sku, "Estoque_Fisico": 0, "status": "Sem depósito 'Geral'"})
+                continue
+            linhas.append({"SKU": sku, "Estoque_Fisico": int(est["disponivel"]), "status": "OK"})
+        except Exception as e:
+            linhas.append({"SKU": sku, "Estoque_Fisico": 0, "status": f"ERRO: {e}"})
+    df = pd.DataFrame(linhas)
+    # salva também na estrutura .uploads/<EMP>/ESTOQUE/ESTOQUE_ATUAL.csv
+    out_dir = os.path.join(".uploads", emp.upper(), "ESTOQUE")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "ESTOQUE_ATUAL.csv")
+    df.to_csv(out_path, index=False, encoding="utf-8")
+    return df
+
+# ===================== FIM BLOCO NOVO (Tiny) =====================
 
 # =============== Utils ===============
 def br_to_float(x):
@@ -115,7 +183,6 @@ def br_to_float(x):
 def norm_header(s: str) -> str:
     s = (s or "").strip().lower()
     s = unidecode(s)
-    # inclui "." para casos tipo "Qtde. Vendas" -> qtde_vendas
     for ch in [" ", "-", "(", ")", "/", "\\", "[", "]", "."]:
         s = s.replace(ch, "_")
     while "__" in s:
@@ -448,16 +515,12 @@ def sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 def _normalize_onedrive_url(url: str) -> str:
-    """
-    Aceita links do OneDrive (incluindo 1drv.ms) e converte para um endpoint de download direto.
-    Para links públicos, usamos o endpoint 'shares' (não requer token).
-    """
     try:
         u = urlparse(url)
         host = (u.netloc or "").lower()
         path = (u.path or "").lower()
         if "onedrive.live.com" in host and "download" in path:
-            return url  # já é direto
+            return url
         if "1drv.ms" in host or "onedrive.live.com" in host:
             enc = base64.urlsafe_b64encode(url.encode("utf-8")).decode("ascii").rstrip("=")
             return f"https://api.onedrive.com/v1.0/shares/u!{enc}/root/content"
@@ -466,13 +529,8 @@ def _normalize_onedrive_url(url: str) -> str:
     return url
 
 def baixar_padrao(url: str, destino: str) -> dict:
-    """
-    Baixa um XLSX do 'url' para 'destino', valida se é Excel e retorna metadados.
-    Suporta: Google Drive (export xlsx), GitHub raw, Dropbox (?dl=1), OneDrive (1drv.ms/onedrive.live.com).
-    """
     if not url or not url.strip():
         raise RuntimeError("URL do arquivo padrão não informada.")
-    # normaliza OneDrive se for o caso
     use_url = _normalize_onedrive_url(url.strip())
     try:
         r = requests.get(use_url, timeout=30, allow_redirects=True)
@@ -482,7 +540,7 @@ def baixar_padrao(url: str, destino: str) -> dict:
 
     content = r.content
     try:
-        pd.ExcelFile(io.BytesIO(content))  # valida
+        pd.ExcelFile(io.BytesIO(content))
     except Exception as e:
         raise RuntimeError(f"Arquivo baixado não é um XLSX válido: {e}")
 
@@ -533,7 +591,14 @@ def exportar_xlsx(df_final: pd.DataFrame, h: int, params: dict, pendencias: list
 
 # =============== UI ===============
 st.title("Reposição Logística — Alivvia")
-st.caption("FULL por anúncio; compra por componente; Shopee explode antes; painel (un/R$); prévia por SKU; filtro por fornecedor.")
+st.caption("FULL por anúncio; compra por componente; Shopee explode antes; painel de estoques; prévia por SKU; filtro por fornecedor.")
+
+# Atualiza tokens Tiny (silencioso; mensagens ficam em session_state['tiny_msgs'])
+ensure_tiny_tokens()
+if "tiny_msgs" in st.session_state and st.session_state["tiny_msgs"]:
+    with st.expander("🔐 Tiny OAuth (logs)"):
+        for m in st.session_state["tiny_msgs"]:
+            st.write("•", m)
 
 # exibe meta do padrão baixado, se houver (informativo)
 if st.session_state.get("padrao_meta"):
@@ -546,13 +611,6 @@ if "df_final" not in st.session_state:
     st.session_state.painel = None
 
 with st.sidebar:
-    # Mensagens do refresh de token (se existirem)
-    for lvl, txt in st.session_state.get("tiny_msgs", []):
-        if lvl == "success":
-            st.success(txt)
-        else:
-            st.warning(txt)
-
     st.subheader("Parâmetros")
     h  = st.selectbox("Horizonte (dias)", [30, 60, 90], index=1)
     g  = st.number_input("Crescimento % ao mês", value=0.0, step=1.0)
@@ -573,7 +631,6 @@ with st.sidebar:
         if st.button("Resetar para Drive (padrão)", use_container_width=True):
             st.session_state.padrao_url = PADRAO_URL_DEFAULT
             st.success("URL resetada para o Google Drive (xlsx export).")
-
     with colB:
         if st.button("🔄 Sincronizar padrão (baixar e usar)", use_container_width=True):
             try:
@@ -586,27 +643,32 @@ with st.sidebar:
             except Exception as e:
                 st.error(str(e))
 
-    st.markdown("### Carregar tokens do Tiny (JSON) — opcional")
-    up_al = st.file_uploader("tiny_ALIVVIA.json", type=["json"], key="up_alivvia_json")
-    if up_al is not None:
-        os.makedirs("tokens", exist_ok=True)
-        with open(os.path.join("tokens", "tiny_ALIVVIA.json"), "wb") as f:
-            f.write(up_al.read())
-        st.success("tiny_ALIVVIA.json salvo.")
-
-    up_jca = st.file_uploader("tiny_JCA.json", type=["json"], key="up_jca_json")
-    if up_jca is not None:
-        os.makedirs("tokens", exist_ok=True)
-        with open(os.path.join("tokens", "tiny_JCA.json"), "wb") as f:
-            f.write(up_jca.read())
-        st.success("tiny_JCA.json salvo.")
-
-    st.markdown(f"[🔗 Abrir no Google Drive para editar]({PADRAO_URL_EDIT})")
-
+# ===== Uploads + Sincronização Tiny =====
 col1, col2, col3 = st.columns(3)
-with col1: full_file   = st.file_uploader("FULL (Magiic)")
-with col2: fisico_file = st.file_uploader("Estoque Físico (CSV/XLSX/XLS)")
-with col3: shopee_file = st.file_uploader("Shopee / Mercado Turbo (vendas por SKU)")
+with col1:
+    full_file   = st.file_uploader("FULL (Magiic)")
+with col2:
+    # Botão NOVO: sincronizar estoque do Tiny v3 para ALIVVIA/JCA
+    st.write("Estoque Físico (CSV/XLSX/XLS) — ou sincronize pelo Tiny")
+    emp_escolha = st.selectbox("Empresa do Tiny", ["ALIVVIA", "JCA"], index=0)
+    if st.button("🔄 Sincronizar estoque do Tiny (depósito Geral)"):
+        try:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            cat_path_default = os.path.join(base_dir, "Padrao_produtos.xlsx")
+            cat_path = st.session_state.get("padrao_override_path", cat_path_default)
+            cat = carregar_padrao_produtos(cat_path)
+            # usamos os componentes do catálogo como base de SKUs
+            sku_lista = cat.catalogo_simples["component_sku"].dropna().astype(str).str.upper().unique().tolist()
+            df_tiny = _sincronizar_estoque_tiny(emp_escolha, sku_lista)
+            st.session_state["fisico_tiny_df"]    = df_tiny[["SKU","Estoque_Fisico"]].copy()
+            st.session_state["fisico_tiny_emp"]   = emp_escolha
+            st.success(f"Estoque do Tiny sincronizado para {emp_escolha}: {len(df_tiny)} SKUs.")
+            st.dataframe(df_tiny.head(20), use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.error(f"Falha ao sincronizar Tiny ({emp_escolha}): {e}")
+    fisico_file = st.file_uploader("OU subir Estoque Físico (CSV/XLSX/XLS)")
+with col3:
+    shopee_file = st.file_uploader("Shopee / Mercado Turbo (vendas por SKU)")
 
 st.divider()
 
@@ -615,11 +677,12 @@ if st.button("Gerar Compra", type="primary"):
     try:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         cat_path_default = os.path.join(base_dir, "Padrao_produtos.xlsx")
-        cat_path = st.session_state.get("padrao_override_path", cat_path_default)  # usa override se baixado
+        cat_path = st.session_state.get("padrao_override_path", cat_path_default)
         cat = carregar_padrao_produtos(cat_path)
 
         dfs, tipos = [], {}
-        for up in [full_file, fisico_file, shopee_file]:
+        # FULL e VENDAS continuam via upload
+        for up in [full_file, shopee_file]:
             if up is None:
                 continue
             df_raw = load_any_table(up)
@@ -630,6 +693,33 @@ if st.button("Gerar Compra", type="primary"):
             tipos[t] = up.name
             dfs.append((t, mapear_colunas(df_raw, t)))
 
+        # FISICO: pode vir de upload, de Tiny, ou dos dois (Tiny substitui Estoque; Preço do upload)
+        fisico_df_final = None
+
+        df_tiny = st.session_state.get("fisico_tiny_df")
+        df_up   = None
+        if fisico_file is not None:
+            df_raw_fis = load_any_table(fisico_file)
+            df_up = mapear_colunas(df_raw_fis, "FISICO")  # tem Preco e Estoque do upload
+
+        if df_tiny is not None and df_up is not None:
+            # Junta: Estoque do Tiny, Preço do upload (prioriza preço do upload)
+            fisico_df_final = df_tiny.merge(df_up[["SKU","Preco"]], on="SKU", how="left")
+            fisico_df_final["Preco"] = fisico_df_final["Preco"].fillna(0.0).astype(float)
+        elif df_tiny is not None and df_up is None:
+            # Só Tiny: Sem preço => 0
+            fisico_df_final = df_tiny.copy()
+            fisico_df_final["Preco"] = 0.0
+        elif df_tiny is None and df_up is not None:
+            # Só upload: usa upload normal
+            fisico_df_final = df_up.copy()
+        else:
+            st.error("Você precisa subir Estoque Físico OU sincronizar pelo Tiny antes de gerar a compra.")
+            st.stop()
+
+        dfs.append(("FISICO", fisico_df_final))
+
+        # Valida presença dos três tipos
         tipos_presentes = set([t for t, _ in dfs])
         faltantes = {"FULL", "FISICO", "VENDAS"} - tipos_presentes
         if faltantes:
