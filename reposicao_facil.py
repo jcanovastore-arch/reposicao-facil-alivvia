@@ -5,22 +5,34 @@
 
 import os
 import io
-import json
-import time
-import base64
 import hashlib
 import datetime as dt
 from dataclasses import dataclass
-from urllib.parse import urlparse
 
 import numpy as np
 import pandas as pd
-import requests
-import streamlit as st
 from unidecode import unidecode
+import streamlit as st
+import requests
+import base64
+from urllib.parse import urlparse
 
-# ====== INÍCIO: REFRESH AUTOMÁTICO DO TOKEN TINY ======
-import requests, json, os, streamlit as st
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# IMPORTANTE: o set_page_config deve ser a PRIMEIRA chamada st.* do app
+st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+# ====== INÍCIO: REFRESH AUTOMÁTICO DO TOKEN TINY (via Secrets) ======
+# Secrets esperados (em Settings -> Secrets do Streamlit Cloud):
+# [TINY_JCA]
+# client_id     = "tiny-api-...-...."
+# client_secret = "...."
+# refresh_token = "...."
+#
+# [TINY_ALIVVIA]
+# client_id     = "tiny-api-...-...."
+# client_secret = "...."
+# refresh_token = "...."
 
 _TINY_OIDC_TOKEN_URL = "https://accounts.tiny.com.br/realms/tiny/protocol/openid-connect/token"
 
@@ -41,225 +53,49 @@ def _refresh_and_save(emp: str, sec_key: str):
         r.raise_for_status()
         tok = r.json()
         access_token = tok.get("access_token")
-        new_refresh = tok.get("refresh_token")  # o Tiny costuma devolver um novo; usamos se vier
+        new_refresh  = tok.get("refresh_token")  # Tiny pode devolver outro refresh_token
 
         if not access_token:
             raise RuntimeError(f"Nenhum access_token retornado para {emp}. Resp: {tok}")
 
         os.makedirs("tokens", exist_ok=True)
-        # salva no formato usado pelo restante do app
         out_path = os.path.join("tokens", f"tiny_{emp}.json")
         with open(out_path, "w", encoding="utf-8") as f:
-            json.dump({
+            import json as _json
+            _json.dump({
                 "access_token": access_token,
-                "refresh_token": new_refresh or sec["refresh_token"]
+                "refresh_token": new_refresh or sec["refresh_token"],
             }, f, ensure_ascii=False)
-        return True, out_path
+        return True, f"Token {emp} atualizado ({os.path.basename(out_path)})."
     except Exception as e:
-        return False, str(e)
+        return False, f"{emp}: não consegui atualizar token — {e}"
 
 def ensure_tiny_tokens_from_secrets():
-    ok1, msg1 = _refresh_and_save("JCA", "TINY_JCA")
-    if ok1:
-        st.sidebar.success("Token JCA atualizado (tiny_JCA.json).")
-    else:
-        st.sidebar.warning(f"JCA: não consegui atualizar token — {msg1}")
+    msgs = []
+    # JCA
+    try:
+        ok1, msg1 = _refresh_and_save("JCA", "TINY_JCA")
+        msgs.append(("success" if ok1 else "warning", msg1))
+    except Exception as e:
+        msgs.append(("warning", f"JCA: segredo ausente ou inválido — {e}"))
+    # ALIVVIA
+    try:
+        ok2, msg2 = _refresh_and_save("ALIVVIA", "TINY_ALIVVIA")
+        msgs.append(("success" if ok2 else "warning", msg2))
+    except Exception as e:
+        msgs.append(("warning", f"ALIVVIA: segredo ausente ou inválido — {e}"))
+    st.session_state["tiny_msgs"] = msgs
 
-    ok2, msg2 = _refresh_and_save("ALIVVIA", "TINY_ALIVVIA")
-    if ok2:
-        st.sidebar.success("Token ALIVVIA atualizado (tiny_ALIVVIA.json).")
-    else:
-        st.sidebar.warning(f"ALIVVIA: não consegui atualizar token — {msg2}")
-
-# chama uma vez ao iniciar a app (antes de usar o Tiny)
+# Chama uma vez ao carregar o app (antes de usar o Tiny em qualquer lugar do app)
 ensure_tiny_tokens_from_secrets()
 # ====== FIM: REFRESH AUTOMÁTICO DO TOKEN TINY ======
 
 
-# ============================================================================
-#                           CONFIG
-# ============================================================================
+# ======== URLs padrão (GOOGLE DRIVE) ========
 PADRAO_URL_DEFAULT = "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/export?format=xlsx"
 PADRAO_URL_EDIT    = "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/edit"
 
-# ============================================================================
-#                HELPERS v3 TINY — ESTOQUE (ALIVVIA/JCA)
-# ============================================================================
-_TINY_V3_BASE = "https://erp.tiny.com.br/public-api/v3"
-
-def _tiny_v3_token_path(emp: str) -> str:
-    os.makedirs("tokens", exist_ok=True)
-    return os.path.join("tokens", f"tiny_{emp}.json")
-
-def _tiny_v3_load_access_token(emp: str) -> str:
-    """
-    1) Primeiro tenta arquivo tokens/tiny_<EMP>.json  (igual no seu PC)
-       {"access_token": "...", "refresh_token": "..."}
-    2) Se não existir, tenta nos Secrets do Streamlit:
-         TINY_<EMP>_ACCESS_TOKEN="..."
-       ou (opcional) TOKENS_JSON_<EMP> com o JSON completo.
-    """
-    path = _tiny_v3_token_path(emp)
-    # 1) arquivo local
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        tok = (data or {}).get("access_token")
-        if tok:
-            return tok
-        raise RuntimeError(f"Arquivo {path} não contém 'access_token'.")
-
-    # 2) secrets (Streamlit Cloud)
-    #   - string simples: TINY_ALIVVIA_ACCESS_TOKEN / TINY_JCA_ACCESS_TOKEN
-    key_simple = f"TINY_{emp}_ACCESS_TOKEN"
-    if key_simple in st.secrets:
-        tok = str(st.secrets[key_simple]).strip()
-        if tok:
-            return tok
-
-    #   - JSON completo: TOKENS_JSON_ALIVVIA / TOKENS_JSON_JCA
-    key_json = f"TOKENS_JSON_{emp}"
-    if key_json in st.secrets:
-        try:
-            data = json.loads(str(st.secrets[key_json]))
-            tok = (data or {}).get("access_token")
-            if tok:
-                return tok
-        except Exception:
-            pass
-
-    raise RuntimeError(f"Token v3 da empresa {emp} não encontrado em {path} nem nos Secrets.")
-
-def _tiny_v3_req(token: str, method: str, path: str, params=None):
-    url = f"{_TINY_V3_BASE}/{path.lstrip('/')}"
-    headers = {"Authorization": f"Bearer {token}"}
-    for attempt in range(3):
-        r = requests.request(method, url, params=params, headers=headers, timeout=30)
-        if r.status_code in (429, 500, 502, 503, 504):
-            time.sleep(1.5 * (attempt + 1))
-            continue
-        if r.status_code == 401:
-            raise RuntimeError("401 Unauthorized: token inválido ou expirado.")
-        if not r.ok:
-            raise RuntimeError(f"HTTP {r.status_code} em {path}: {r.text[:300]}")
-        try:
-            return r.json()
-        except Exception:
-            raise RuntimeError(f"Resposta não-JSON em {path}: {r.text[:300]}")
-    raise RuntimeError(f"Falha repetida em {path}")
-
-def _tiny_v3_get_id_por_sku(token: str, sku: str) -> int | None:
-    data = _tiny_v3_req(token, "GET", "/produtos", params={"codigo": sku})
-    itens = data.get("itens") or data.get("items") or data.get("data") or []
-    if not itens:
-        return None
-    pid = itens[0].get("id")
-    return int(pid) if pid else None
-
-def _tiny_v3_get_estoque_geral(token: str, product_id: int) -> dict | None:
-    data = _tiny_v3_req(token, "GET", f"/estoque/{product_id}")
-    depositos = data.get("depositos") or data.get("data", {}).get("depositos") or []
-    if not depositos:
-        return None
-    for d in depositos:
-        nome = (d.get("nome") or "").strip().lower()
-        if nome == "geral" or d.get("desconsiderar") is False:
-            return {
-                "deposito_id": d.get("id"),
-                "deposito_nome": d.get("nome"),
-                "saldo": d.get("saldo"),
-                "reservado": d.get("reservado"),
-                "disponivel": d.get("disponivel"),
-            }
-    return None
-
-def _carregar_skus_base(emp: str) -> list[str]:
-    # 1) df_padrao_<EMP> em session
-    key = f"df_padrao_{emp}"
-    if key in st.session_state:
-        df = st.session_state[key]
-        for col in ("SKU", "codigo", "sku", "component_sku"):
-            if col in df.columns:
-                skus = df[col].dropna().astype(str).str.strip().unique().tolist()
-                if skus:
-                    return skus
-    # 2) último arquivo PADRAO/KITS/CAT em .uploads/<EMP>/
-    base = os.path.join(".uploads", emp.upper())
-    if os.path.isdir(base):
-        for root, _, files in os.walk(base):
-            cand = [f for f in files if any(k in f.upper() for k in ("PADRAO", "KITS", "CAT")) and f.lower().endswith((".csv", ".xlsx"))]
-            cand.sort(reverse=True)
-            if cand:
-                path = os.path.join(root, cand[0])
-                try:
-                    if path.lower().endswith(".xlsx"):
-                        df = pd.read_excel(path)
-                    else:
-                        df = pd.read_csv(path, sep=None, engine="python")
-                    for col in ("SKU", "codigo", "sku", "component_sku"):
-                        if col in df.columns:
-                            skus = df[col].dropna().astype(str).str.strip().unique().tolist()
-                            if skus:
-                                return skus
-                except Exception:
-                    pass
-    return []
-
-def _sincronizar_estoque_v3(emp: str) -> pd.DataFrame:
-    token = _tiny_v3_load_access_token(emp)
-    skus = _carregar_skus_base(emp)
-    if not skus:
-        raise RuntimeError(f"Não encontrei SKUs para {emp}. Abra o PADRÃO/KITS/CAT primeiro.")
-    linhas = []
-    for sku in skus:
-        try:
-            pid = _tiny_v3_get_id_por_sku(token, sku)
-            if not pid:
-                linhas.append({"SKU": sku, "status": "SKU não encontrado"})
-                continue
-            est = _tiny_v3_get_estoque_geral(token, pid)
-            if not est:
-                linhas.append({"SKU": sku, "product_id": pid, "status": "Sem depósito 'Geral'"})
-                continue
-            linhas.append({
-                "SKU": sku,
-                "product_id": pid,
-                "deposito_nome": est["deposito_nome"],
-                "saldo": est["saldo"],
-                "reservado": est["reservado"],
-                "disponivel": est["disponivel"],
-                "status": "OK",
-            })
-        except Exception as e:
-            linhas.append({"SKU": sku, "status": f"ERRO: {e}"})
-    return pd.DataFrame(linhas)
-
-def _salvar_estoque_upload(emp: str, df: pd.DataFrame) -> str:
-    out_dir = os.path.join(".uploads", emp.upper(), "ESTOQUE")
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "ESTOQUE_ATUAL.csv")
-    df.to_csv(out_path, index=False, encoding="utf-8")
-    return out_path
-
-def render_estoque_section(emp: str):
-    st.subheader(f"📦 Estoque — {emp}")
-    def _sync_and_show():
-        try:
-            df = _sincronizar_estoque_v3(emp)
-            path = _salvar_estoque_upload(emp, df)
-            st.success(f"Estoque atualizado via Tiny v3 ({emp}). Salvo em: {path}")
-            st.dataframe(df, use_container_width=True, hide_index=True)
-            st.session_state[f"df_estoque_{emp}"] = df
-        except Exception as e:
-            st.error(f"Falha ao sincronizar estoque ({emp}): {e}")
-    _sync_and_show()
-    if st.button("🔄 Forçar sincronização com o Tiny", key=f"btn_sync_{emp}"):
-        _sync_and_show()
-
-# ============================================================================
-#                     FUNÇÕES DO SEU APP (COMPRA) — IGUAIS
-# ============================================================================
-
+# =============== Utils ===============
 def br_to_float(x):
     if pd.isna(x):
         return np.nan
@@ -279,6 +115,7 @@ def br_to_float(x):
 def norm_header(s: str) -> str:
     s = (s or "").strip().lower()
     s = unidecode(s)
+    # inclui "." para casos tipo "Qtde. Vendas" -> qtde_vendas
     for ch in [" ", "-", "(", ")", "/", "\\", "[", "]", "."]:
         s = s.replace(ch, "_")
     while "__" in s:
@@ -295,6 +132,7 @@ class Catalogo:
     catalogo_simples: pd.DataFrame
     kits_reais: pd.DataFrame
 
+# =============== Padrão produtos (KITS + CAT) ===============
 def carregar_padrao_produtos(caminho: str) -> Catalogo:
     try:
         xls = pd.ExcelFile(caminho)
@@ -354,6 +192,7 @@ def construir_kits_efetivo(cat: Catalogo) -> pd.DataFrame:
     kits = kits.drop_duplicates(subset=["kit_sku", "component_sku"], keep="first")
     return kits
 
+# =============== Leitura genérica ===============
 def load_any_table(uploaded_file) -> pd.DataFrame:
     if uploaded_file is None:
         return None
@@ -370,6 +209,7 @@ def load_any_table(uploaded_file) -> pd.DataFrame:
 
     df.columns = [norm_header(c) for c in df.columns]
 
+    # FULL com header na 3ª linha (caso tenha 2 linhas de título)
     if ("sku" not in df.columns) and ("codigo" not in df.columns) and ("codigo_sku" not in df.columns) and len(df) > 0:
         try:
             uploaded_file.seek(0)
@@ -378,6 +218,7 @@ def load_any_table(uploaded_file) -> pd.DataFrame:
         except Exception:
             pass
 
+    # limpar TOTAL/TOTAIS e SKU vazio
     cols = set(df.columns)
     sku_col = next((c for c in ["sku","codigo","codigo_sku"] if c in cols), None)
     if sku_col:
@@ -387,8 +228,11 @@ def load_any_table(uploaded_file) -> pd.DataFrame:
         df = df[~df[c].astype(str).str.contains(r"^TOTALS?$|^TOTAIS?$", case=False, na=False)]
     return df.reset_index(drop=True)
 
+# =============== Detecção por conteúdo (tolerante) ===============
 def mapear_tipo(df: pd.DataFrame) -> str:
     cols = [c.lower() for c in df.columns]
+
+    # FULL: tem vendas_60d + (estoque/transito) + SKU convencional
     tem_vendas60 = any(c.startswith("vendas_60d") or c in {"vendas 60d","vendas_qtd_60d"} for c in cols)
     tem_estoque  = any(c in {"estoque_full","estoque_atual"} for c in cols)
     tem_transito = any(c in {"em_transito","em transito","em_transito_full","em_transito_do_anuncio"} for c in cols)
@@ -396,18 +240,21 @@ def mapear_tipo(df: pd.DataFrame) -> str:
     if tem_sku_std and ((tem_vendas60 and tem_estoque) or (tem_vendas60 and tem_transito) or (tem_estoque and tem_transito)):
         return "FULL"
 
+    # FÍSICO: tem alguma SKU + estoque + preço
     tem_preco = any(c in {"preco","preco_compra","preco_medio","custo","custo_medio"} for c in cols)
     tem_estoque_fis = any(c in {"estoque_atual","qtd","quantidade"} for c in cols)
     tem_sku_livre = any("sku" in c for c in cols)
     if tem_sku_livre and tem_estoque_fis and tem_preco:
         return "FISICO"
 
+    # VENDAS: tem alguma SKU + alguma quantidade (qtde/quant/venda/order) e não tem preço
     tem_qtd_livre = any(("qtde" in c) or ("quant" in c) or ("venda" in c) or ("order" in c) for c in cols)
     if tem_sku_livre and tem_qtd_livre and not tem_preco:
         return "VENDAS"
 
     return "DESCONHECIDO"
 
+# =============== Mapeamento de colunas ===============
 def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
     if tipo == "FULL":
         if "sku" in df.columns:
@@ -455,7 +302,7 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
     if tipo == "VENDAS":
         sku_col = next((c for c in df.columns if "sku" in c.lower()), None)
         if sku_col is None:
-            raise RuntimeError("VENDAS inválido: não achei coluna de SKU.")
+            raise RuntimeError("VENDAS inválido: não achei coluna de SKU (ex.: SKU, Model SKU, Variation SKU).")
         df["SKU"] = df[sku_col].map(norm_sku)
 
         cand_qty = []
@@ -469,14 +316,16 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
             if score > 0:
                 cand_qty.append((score, c))
         if not cand_qty:
-            raise RuntimeError("VENDAS inválido: não achei coluna de Quantidade.")
+            raise RuntimeError("VENDAS inválido: não achei coluna de Quantidade (ex.: Qtde. Vendas, Quantidade, Orders).")
         cand_qty.sort(reverse=True)
         qcol = cand_qty[0][1]
+
         df["Quantidade"] = df[qcol].map(br_to_float).fillna(0).astype(int)
         return df[["SKU","Quantidade"]].copy()
 
     raise RuntimeError("Tipo de arquivo desconhecido.")
 
+# =============== Explosão e Cálculo ===============
 def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_col: str) -> pd.DataFrame:
     base = df.copy()
     base["kit_sku"] = base[sku_col].map(norm_sku)
@@ -492,16 +341,19 @@ def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_co
 def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     kits = construir_kits_efetivo(cat)
 
+    # FULL (por anúncio)
     full = full_df.copy()
     full["SKU"]             = full["SKU"].map(norm_sku)
     full["Vendas_Qtd_60d"]  = full["Vendas_Qtd_60d"].astype(int)
     full["Estoque_Full"]    = full["Estoque_Full"].astype(int)
     full["Em_Transito"]     = full["Em_Transito"].astype(int)
 
+    # Shopee/MT → já 60d
     shp = vendas_df.copy()
     shp["SKU"]              = shp["SKU"].map(norm_sku)
     shp["Quantidade_60d"]   = shp["Quantidade"].astype(int)
 
+    # Explodir p/ componentes
     ml_comp = explodir_por_kits(
         full[["SKU","Vendas_Qtd_60d"]].rename(columns={"SKU":"kit_sku","Vendas_Qtd_60d":"Qtd"}),
         kits,"kit_sku","Qtd"
@@ -518,6 +370,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     demanda[["ML_60d","Shopee_60d"]] = demanda[["ML_60d","Shopee_60d"]].fillna(0).astype(int)
     demanda["TOTAL_60d"] = np.maximum(demanda["ML_60d"] + demanda["Shopee_60d"], demanda["ML_60d"]).astype(int)
 
+    # Físico
     fis = fisico_df.copy()
     fis["SKU"]            = fis["SKU"].map(norm_sku)
     fis["Estoque_Fisico"] = fis["Estoque_Fisico"].fillna(0).astype(int)
@@ -527,6 +380,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     base["Estoque_Fisico"] = base["Estoque_Fisico"].fillna(0).astype(int)
     base["Preco"]          = base["Preco"].fillna(0.0)
 
+    # Planejamento por anúncio → envio desejado
     fator = (1.0 + g/100.0) ** (h/30.0)
     fk = full.copy()
     fk["vendas_dia"]     = fk["Vendas_Qtd_60d"] / 60.0
@@ -542,17 +396,22 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     base = base.merge(necessidade, on="SKU", how="left")
     base["Necessidade"] = base["Necessidade"].fillna(0).astype(int)
 
+    # Reserva Shopee 30d
     base["Demanda_dia"]  = base["TOTAL_60d"] / 60.0
     base["Reserva_30d"]  = np.round(base["Demanda_dia"] * 30).astype(int)
     base["Folga_Fisico"] = (base["Estoque_Fisico"] - base["Reserva_30d"]).clip(lower=0).astype(int)
 
+    # Compra
     base["Compra_Sugerida"] = (base["Necessidade"] - base["Folga_Fisico"]).clip(lower=0).astype(int)
 
+    # status_reposicao = nao_repor ⇒ zera compra
     mask_nao = base["status_reposicao"].str.lower().str.contains("nao_repor", na=False)
     base.loc[mask_nao, "Compra_Sugerida"] = 0
 
+    # Valores
     base["Valor_Compra_R$"] = (base["Compra_Sugerida"].astype(float) * base["Preco"].astype(float)).round(2)
 
+    # Vendas no horizonte h
     base["Vendas_h_ML"]     = np.round(base["ML_60d"] * (h/60.0)).astype(int)
     base["Vendas_h_Shopee"] = np.round(base["Shopee_60d"] * (h/60.0)).astype(int)
 
@@ -565,6 +424,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
         "ML_60d","Shopee_60d","TOTAL_60d","Reserva_30d","Folga_Fisico","Necessidade"
     ]].reset_index(drop=True)
 
+    # Painel de estoques
     fis_unid  = int(fis["Estoque_Fisico"].sum())
     fis_valor = float((fis["Estoque_Fisico"] * fis["Preco"]).sum())
 
@@ -579,6 +439,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     painel = {"full_unid": full_unid, "full_valor": full_valor, "fisico_unid": fis_unid, "fisico_valor": fis_valor}
     return df_final, painel
 
+# =============== Export XLSX (sem recálculo) ===============
 def sha256_of_csv(df: pd.DataFrame) -> str:
     csv_bytes = df.to_csv(index=False).encode("utf-8")
     return hashlib.sha256(csv_bytes).hexdigest()
@@ -587,12 +448,16 @@ def sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 def _normalize_onedrive_url(url: str) -> str:
+    """
+    Aceita links do OneDrive (incluindo 1drv.ms) e converte para um endpoint de download direto.
+    Para links públicos, usamos o endpoint 'shares' (não requer token).
+    """
     try:
         u = urlparse(url)
         host = (u.netloc or "").lower()
         path = (u.path or "").lower()
         if "onedrive.live.com" in host and "download" in path:
-            return url
+            return url  # já é direto
         if "1drv.ms" in host or "onedrive.live.com" in host:
             enc = base64.urlsafe_b64encode(url.encode("utf-8")).decode("ascii").rstrip("=")
             return f"https://api.onedrive.com/v1.0/shares/u!{enc}/root/content"
@@ -601,21 +466,29 @@ def _normalize_onedrive_url(url: str) -> str:
     return url
 
 def baixar_padrao(url: str, destino: str) -> dict:
+    """
+    Baixa um XLSX do 'url' para 'destino', valida se é Excel e retorna metadados.
+    Suporta: Google Drive (export xlsx), GitHub raw, Dropbox (?dl=1), OneDrive (1drv.ms/onedrive.live.com).
+    """
     if not url or not url.strip():
         raise RuntimeError("URL do arquivo padrão não informada.")
+    # normaliza OneDrive se for o caso
     use_url = _normalize_onedrive_url(url.strip())
     try:
         r = requests.get(use_url, timeout=30, allow_redirects=True)
         r.raise_for_status()
     except Exception as e:
         raise RuntimeError(f"Falha ao baixar o padrão: {e}")
+
     content = r.content
     try:
-        pd.ExcelFile(io.BytesIO(content))
+        pd.ExcelFile(io.BytesIO(content))  # valida
     except Exception as e:
         raise RuntimeError(f"Arquivo baixado não é um XLSX válido: {e}")
+
     with open(destino, "wb") as f:
         f.write(content)
+
     meta = {
         "bytes": len(content),
         "sha256": sha256_bytes(content),
@@ -658,22 +531,28 @@ def exportar_xlsx(df_final: pd.DataFrame, h: int, params: dict, pendencias: list
     output.seek(0)
     return output.read()
 
-# ============================================================================
-#                                 UI
-# ============================================================================
-st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
+# =============== UI ===============
 st.title("Reposição Logística — Alivvia")
-st.caption("FULL por anúncio; compra por componente; Shopee explode antes; painel de estoques; prévia por SKU; filtro por fornecedor.")
+st.caption("FULL por anúncio; compra por componente; Shopee explode antes; painel (un/R$); prévia por SKU; filtro por fornecedor.")
 
+# exibe meta do padrão baixado, se houver (informativo)
 if st.session_state.get("padrao_meta"):
     m = st.session_state["padrao_meta"]
     st.caption(f"Padrão em uso: {os.path.basename(m['saved_to'])} • {m['bytes']:,} bytes • SHA256 {m['sha256'][:12]}…")
 
+# ---- Estado: mantém o resultado calculado para evitar recálculo
 if "df_final" not in st.session_state:
     st.session_state.df_final = None
     st.session_state.painel = None
 
 with st.sidebar:
+    # Mensagens do refresh de token (se existirem)
+    for lvl, txt in st.session_state.get("tiny_msgs", []):
+        if lvl == "success":
+            st.success(txt)
+        else:
+            st.warning(txt)
+
     st.subheader("Parâmetros")
     h  = st.selectbox("Horizonte (dias)", [30, 60, 90], index=1)
     g  = st.number_input("Crescimento % ao mês", value=0.0, step=1.0)
@@ -707,7 +586,7 @@ with st.sidebar:
             except Exception as e:
                 st.error(str(e))
 
-    st.markdown("### Carregar tokens do Tiny (JSON)")
+    st.markdown("### Carregar tokens do Tiny (JSON) — opcional")
     up_al = st.file_uploader("tiny_ALIVVIA.json", type=["json"], key="up_alivvia_json")
     if up_al is not None:
         os.makedirs("tokens", exist_ok=True)
@@ -724,11 +603,60 @@ with st.sidebar:
 
     st.markdown(f"[🔗 Abrir no Google Drive para editar]({PADRAO_URL_EDIT})")
 
-# ===== Resultado (mantido) =====
+col1, col2, col3 = st.columns(3)
+with col1: full_file   = st.file_uploader("FULL (Magiic)")
+with col2: fisico_file = st.file_uploader("Estoque Físico (CSV/XLSX/XLS)")
+with col3: shopee_file = st.file_uploader("Shopee / Mercado Turbo (vendas por SKU)")
+
+st.divider()
+
+# ------- Botão: somente calcula e salva no estado
+if st.button("Gerar Compra", type="primary"):
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        cat_path_default = os.path.join(base_dir, "Padrao_produtos.xlsx")
+        cat_path = st.session_state.get("padrao_override_path", cat_path_default)  # usa override se baixado
+        cat = carregar_padrao_produtos(cat_path)
+
+        dfs, tipos = [], {}
+        for up in [full_file, fisico_file, shopee_file]:
+            if up is None:
+                continue
+            df_raw = load_any_table(up)
+            t = mapear_tipo(df_raw)
+            if t == "DESCONHECIDO":
+                st.error(f"Arquivo '{up.name}' não reconhecido. Reexporte com colunas corretas.")
+                st.stop()
+            tipos[t] = up.name
+            dfs.append((t, mapear_colunas(df_raw, t)))
+
+        tipos_presentes = set([t for t, _ in dfs])
+        faltantes = {"FULL", "FISICO", "VENDAS"} - tipos_presentes
+        if faltantes:
+            st.error(f"Entradas inválidas. Faltou: {', '.join(sorted(faltantes))}. Detectei: {', '.join(sorted(tipos_presentes))}.")
+            st.stop()
+
+        full_df   = [df for t, df in dfs if t == "FULL"][0]
+        fisico_df = [df for t, df in dfs if t == "FISICO"][0]
+        vendas_df = [df for t, df in dfs if t == "VENDAS"][0]
+
+        df_final, painel = calcular(full_df, fisico_df, vendas_df, cat, h=h, g=g, LT=LT)
+
+        # ► Salva o resultado no estado (não some ao clicar em filtros)
+        st.session_state.df_final = df_final
+        st.session_state.painel   = painel
+
+        st.success("Cálculo concluído. Use os filtros abaixo sem recálculo.")
+    except Exception as e:
+        st.error(str(e))
+        st.stop()
+
+# ================= RENDERIZAÇÃO PÓS-CÁLCULO (sem recálculo) ================
 if st.session_state.df_final is not None:
     df_final = st.session_state.df_final.copy()
     painel   = st.session_state.painel
 
+    # Painel
     st.subheader("📊 Painel de Estoques")
     cA, cB, cC, cD = st.columns(4)
     cA.metric("Full (un)",  f"{painel['full_unid']:,}".replace(",", "."))
@@ -738,10 +666,13 @@ if st.session_state.df_final is not None:
 
     st.divider()
 
+    # ===== Filtro por Fornecedor (persistente)
     fornecedores = sorted(df_final["fornecedor"].fillna("").unique())
     sel_fornec = st.multiselect("Filtrar por Fornecedor", fornecedores, key="filt_fornec")
+
     mostra = df_final if not sel_fornec else df_final[df_final["fornecedor"].isin(sel_fornec)]
 
+    # ===== Prévia por SKU com lista (evita erro de digitação)
     with st.expander("🔎 Prévia por SKU (opcional)"):
         sku_opts = sorted(mostra["SKU"].unique())
         sel_skus = st.multiselect("Escolha 1 ou mais SKUs", sku_opts, key="filt_sku_preview")
@@ -784,11 +715,5 @@ if st.session_state.df_final is not None:
             st.info("Planilha gerada a partir do mesmo DataFrame exibido (paridade garantida).")
         except Exception as e:
             st.error(f"Exportação bloqueada pela Auditoria: {e}")
-
-# ===== Bloco de ESTOQUE (Tiny v3) — ALIVVIA e JCA =====
-st.divider()
-render_estoque_section("ALIVVIA")
-st.divider()
-render_estoque_section("JCA")
 
 st.caption("© Alivvia — simples, robusto e auditável.")
