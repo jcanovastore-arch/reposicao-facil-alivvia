@@ -1,8 +1,12 @@
 streamlit==1.37.1
 pandas==2.2.2
 numpy==1.26.4
+requests==2.32.3
 openpyxl==3.1.5
 xlsxwriter==3.2.0
-requests==2.32.3
 Unidecode==1.3.8
-xlrd==2.0.1
+python-dateutil==2.9.0.post0
+altair<6
+# Se você PRECISAR abrir .xls antigos, mantenha esta linha:
+xlrd==1.2.0
+# Caso não precise de .xls, remova a linha acima.
