@@ -853,7 +853,7 @@ with tab2:
             except Exception as e:
                 st.error(str(e))
 
-        if empresa in st.session_state["resultado_compra"]]:
+        if empresa in st.session_state["resultado_compra"]:
             pkg = st.session_state["resultado_compra"][empresa]
             df_final = pkg["df"]
             painel = pkg["painel"]
