@@ -95,29 +95,143 @@ def _tiny_v3_req(token: str, method: str, path: str, params=None):
             raise RuntimeError(f"Resposta não-JSON em {path}: {r.text[:300]}")
     raise RuntimeError(f"Falha repetida em {path}")
 
-def _tiny_v3_get_id_por_sku(token: str, sku: str) -> int | None:
-    data = _tiny_v3_req(token, "GET", "/produtos", params={"codigo": sku})
+# ----------- (NOVO) utilitários p/ achar Variação + Preço -----------
+def _node_get_code(node) -> Optional[str]:
+    if isinstance(node, dict):
+        for k in ('codigo','sku','codigo_sku','codigo_item','codigo_interno'):
+            v = node.get(k)
+            if v is not None and str(v).strip() != "":
+                return str(v).strip().upper()
+    return None
+
+def _node_get_id(node) -> Optional[int]:
+    if isinstance(node, dict):
+        for k in ('id','idVariacao','id_variacao','idProduto'):
+            v = node.get(k)
+            if v not in (None, "", []):
+                try:
+                    return int(v)
+                except:
+                    pass
+    return None
+
+def _search_price_in_node(node) -> Optional[float]:
+    """
+    Prioridade de custo: precoCustoMedio → precoCusto → precoMedio → preco/precoVenda → precoPromocional
+    Aceita estar em: node, node['precos'], node['data'].
+    """
+    if not isinstance(node, dict):
+        return None
+    priorities = [
+        'precoCustoMedio','preco_custo_medio','custoMedio','custo_medio',
+        'precoCusto','preco_custo','precoCompra','preco_compra',
+        'precoMedio','preco_medio',
+        'preco','precoVenda','preco_venda',
+        'precoPromocional','preco_promocional'
+    ]
+    spaces = [node]
+    for key in ('precos', 'data'):
+        if key in node and isinstance(node[key], dict):
+            spaces.append(node[key])
+    for space in spaces:
+        for k in priorities:
+            if k in space and space[k] not in (None, "", []):
+                try:
+                    return br_to_float(space[k])  # definido abaixo
+                except Exception:
+                    pass
+    return None
+
+def _scan_find_sku(node, skuU: str, result: dict):
+    """Busca recursiva por um nó cuja 'codigo/sku' == skuU; captura id, ean/gtin e nó para preço."""
+    if isinstance(node, dict):
+        code = _node_get_code(node)
+        if code == skuU:
+            if 'id' not in result or result['id'] is None:
+                result['id'] = _node_get_id(node)
+            if 'ean' not in result or not result['ean']:
+                e = node.get('ean') or node.get('gtin')
+                result['ean'] = str(e) if e not in (None,"") else ""
+            result['price_node'] = node
+        for v in node.values():
+            _scan_find_sku(v, skuU, result)
+    elif isinstance(node, list):
+        for e in node:
+            _scan_find_sku(e, skuU, result)
+
+def _tiny_v3_resolve_variacao_por_sku(token: str, sku: str) -> Tuple[Optional[int], Optional[int], Optional[str], Optional[float]]:
+    """
+    Retorna: (pai_id, variacao_id, ean, preco_float) para o SKU informado (variação).
+    """
+    skuU = (sku or "").strip().upper()
+    if not skuU:
+        return None, None, None, None
+
+    data = _tiny_v3_req(token, "GET", "/produtos", params={"codigo": skuU})
     itens = data.get("itens") or data.get("items") or data.get("data") or []
     if not itens:
-        return None
-    pid = itens[0].get("id")
-    return int(pid) if pid else None
+        return None, None, None, None
+    pai_id = itens[0].get("id")
+    if not pai_id:
+        return None, None, None, None
+    pai_id = int(pai_id)
 
-def _tiny_v3_get_estoque_geral(token: str, product_id: int) -> dict | None:
-    data = _tiny_v3_req(token, "GET", f"/estoque/{product_id}")
-    depositos = data.get("depositos") or data.get("data", {}).get("depositos") or []
-    if not depositos:
-        return None
+    # 1) Varrendo JSON do PAI
+    det = _tiny_v3_req(token, "GET", f"/produtos/{pai_id}")
+    found = {}
+    _scan_find_sku(det, skuU, found)
+    if found.get('id'):
+        preco = _search_price_in_node(found.get('price_node', {}))
+        return pai_id, int(found['id']), (found.get('ean') or ""), preco
+
+    # 2) Fallback: endpoint /variacoes (se habilitado)
+    try:
+        v = _tiny_v3_req(token, "GET", f"/produtos/{pai_id}/variacoes")
+        for key in ('variacoes','items','data','dados'):
+            lst = v.get(key)
+            if not lst:
+                continue
+            for n in lst:
+                if _node_get_code(n) == skuU:
+                    vid = _node_get_id(n)
+                    ean = n.get('ean') or n.get('gtin') or ""
+                    preco = _search_price_in_node(n)
+                    return pai_id, (int(vid) if vid else None), str(ean), preco
+    except Exception:
+        pass
+
+    return pai_id, None, None, None
+
+def _tiny_v3_get_estoque_geral(token: str, produto_ou_variacao_id: int) -> dict | None:
+    """
+    Busca no depósito 'Geral' (preferencial) para o ID informado (variação).
+    """
+    data = _tiny_v3_req(token, "GET", f"/estoque/{produto_ou_variacao_id}")
+    depositos = data.get("depositos") or data.get("data", {}).get("depositos") or data.get("data", {}).get("deposito") or []
+    if not isinstance(depositos, list):
+        depositos = [depositos] if depositos else []
+    pref = None
     for d in depositos:
         nome = (d.get("nome") or "").strip().lower()
-        if nome == "geral" or d.get("desconsiderar") is False:
-            return {
-                "deposito_nome": d.get("nome"),
-                "saldo": d.get("saldo"),
-                "reservado": d.get("reservado"),
-                "disponivel": d.get("disponivel"),
-            }
-    return None
+        if nome == "geral":
+            pref = d
+            break
+    if not pref and depositos:
+        # pega primeiro com desconsiderar == False, senão o primeiro
+        pref = next((d for d in depositos if d.get("desconsiderar") is False), depositos[0])
+
+    if not pref:
+        return None
+
+    saldo = int(pref.get("saldo") or 0)
+    reservado = int(pref.get("reservado") or 0)
+    disponivel = int(pref.get("disponivel") or (saldo - reservado))
+    return {
+        "deposito_nome": pref.get("nome") or "",
+        "saldo": saldo,
+        "reservado": reservado,
+        "disponivel": disponivel,
+    }
 
 def _carregar_skus_base(emp: str) -> list[str]:
     """
@@ -172,35 +286,48 @@ def _carregar_skus_base(emp: str) -> list[str]:
 
 def sincronizar_estoque_tiny(emp: str, skus: list[str]) -> pd.DataFrame:
     """
-    Retorna DF: SKU, Estoque_Fisico, status.
-    (Preço não vem do Tiny.)  Mostra progresso para não parecer travado.
+    Retorna DF no FORMATO DA PLANILHA FÍSICA: SKU, Estoque_Fisico, Preco (+ status p/ debug).
+    Agora resolve a VARIAÇÃO pelo SKU e traz o custo/preço da variação.
     """
     token = _tiny_v3_get_bearer(emp)
     linhas = []
     total = len(skus)
     prog = st.progress(0, text=f"Sincronizando {total} SKUs no Tiny ({emp})…")
     for i, sku in enumerate(skus, start=1):
+        skuU = (sku or "").strip().upper()
         try:
-            pid = _tiny_v3_get_id_por_sku(token, sku)
-            if not pid:
-                linhas.append({"SKU": sku, "Estoque_Fisico": 0, "status": "SKU não encontrado"})
+            pai_id, var_id, ean, preco = _tiny_v3_resolve_variacao_por_sku(token, skuU)
+            if not pai_id:
+                linhas.append({"SKU": skuU, "Estoque_Fisico": 0, "Preco": 0.0, "status": "SKU não encontrado"})
+            elif not var_id:
+                linhas.append({"SKU": skuU, "Estoque_Fisico": 0, "Preco": float(preco or 0.0), "status": f"SKU do PAI (sem variação)"})
             else:
-                est = _tiny_v3_get_estoque_geral(token, pid)
-                if not est:
-                    linhas.append({"SKU": sku, "Estoque_Fisico": 0, "status": "Sem depósito Geral"})
-                else:
-                    linhas.append({"SKU": sku, "Estoque_Fisico": int(est["disponivel"] or 0), "status": "OK"})
+                est = _tiny_v3_get_estoque_geral(token, var_id)
+                dispo = int(est["disponivel"]) if est else 0
+                # se não veio preço no nó da variação, tenta pegar via produtos/{var_id}
+                if preco is None:
+                    try:
+                        det_var = _tiny_v3_req(token, "GET", f"/produtos/{var_id}")
+                        preco = _search_price_in_node(det_var)
+                    except Exception:
+                        preco = None
+                linhas.append({"SKU": skuU, "Estoque_Fisico": dispo, "Preco": float(preco or 0.0), "status": "OK"})
         except Exception as e:
-            linhas.append({"SKU": sku, "Estoque_Fisico": 0, "status": f"ERRO: {e}"})
+            linhas.append({"SKU": skuU, "Estoque_Fisico": 0, "Preco": 0.0, "status": f"ERRO: {e}"})
         if total:
             prog.progress(min(i/total, 1.0), text=f"Sincronizando {i}/{total}…")
     prog.empty()
-    return pd.DataFrame(linhas)
+    cols = ["SKU","Estoque_Fisico","Preco","status"]
+    df = pd.DataFrame(linhas)[cols]
+    # normaliza tipos
+    df["Estoque_Fisico"] = pd.to_numeric(df["Estoque_Fisico"], errors="coerce").fillna(0).astype(int)
+    df["Preco"] = pd.to_numeric(df["Preco"], errors="coerce").fillna(0.0)
+    return df
 
 # =========================
 #  App base
 # =========================
-VERSION = "v3.3.1"
+VERSION = "v3.3.2"
 
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
@@ -720,11 +847,18 @@ with st.sidebar:
                 st.error(f"Não achei SKUs. Carregue o Padrão (KITS/CAT) e/ou arquivos em .uploads/{emp_sel}/.")
             else:
                 df_tiny = sincronizar_estoque_tiny(emp_sel, skus)
+                # guarda para visualização
                 st.session_state.setdefault("estoque_tiny_por_emp", {})[emp_sel] = df_tiny
                 ok = int((df_tiny["status"] == "OK").sum())
                 st.success(f"Tiny v3 ({emp_sel}) sincronizado: {len(df_tiny)} SKUs (OK: {ok}).")
                 st.dataframe(df_tiny, use_container_width=True, height=380)
-                st.caption("Obs.: Preço não vem do Tiny; o preço do seu arquivo físico será mantido.")
+                st.caption("Obs.: Agora o preço vem do Tiny (custo médio quando houver). O arquivo de estoque do sistema foi atualizado.")
+
+                # >>>>>>>>>>>>>> SUBSTITUI A PLANILHA MANUAL (mesmo formato) <<<<<<<<<<<<<<
+                csv_bytes = df_tiny[["SKU","Estoque_Fisico","Preco"]].to_csv(index=False).encode("utf-8")
+                _store_put(emp_sel, "ESTOQUE", "Estoque_Tiny.csv", csv_bytes)
+                st.session_state[emp_sel]["ESTOQUE"] = {"name": "Estoque_Tiny.csv", "bytes": csv_bytes}
+                # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
         except Exception as e:
             st.error(f"Falha ao sincronizar Tiny: {e}")
 

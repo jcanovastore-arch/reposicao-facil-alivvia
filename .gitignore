@@ -1,11 +1,12 @@
-venv/
-.env/
-*.pyc
-__pycache__/
-*.xlsx
-*.xls
-*.csv
-.streamlit/secrets.toml
+# artefatos locais
+.uploads/
 tokens/
-backup_sistema_atual/
-.logs/
+__pycache__/
+*.pyc
+
+# configs locais do VSCode/PyCharm
+.vscode/
+.idea/
+
+# streamlit local
+.streamlit/secrets.toml
