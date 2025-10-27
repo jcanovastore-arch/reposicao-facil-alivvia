@@ -40,9 +40,25 @@ def _tiny_v3_load_access_token(emp: str) -> str | None:
     p = _tiny_v3_token_path(emp)
     if not os.path.exists(p):
         return None
-    with open(p, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return data.get("access_token")
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+
+    tok = data.get("access_token")
+    exp = data.get("expires_in")
+    saved = data.get("saved_at")
+    # Se temos controle de validade, considera vencido 60s antes
+    if tok and exp and saved:
+        try:
+            exp = int(exp); saved = int(saved)
+            if time.time() >= saved + exp - 60:
+                return None  # força refresh
+        except Exception:
+            pass
+    return tok
+
 
 def _tiny_v3_refresh_from_secrets(emp: str) -> str:
     sec_key = f"TINY_{emp.upper()}"
