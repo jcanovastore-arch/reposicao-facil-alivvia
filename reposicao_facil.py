@@ -1003,6 +1003,7 @@ with tab2:
             except Exception as e:
                 st.error(str(e))
 
+        # Exibição do resultado desta EMPRESA
         if empresa in st.session_state["resultado_compra"]:
             pkg = st.session_state["resultado_compra"][empresa]
             df_final = pkg["df"]
@@ -1065,20 +1066,63 @@ with tab2:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key=f"d_fil_{empresa}"
                 )
-            with colx2:
-                xlsx_filtrado = exportar_xlsx(df_view, h=h, params={"g": g, "LT": LT, "empresa": empresa, "filtro": "on"})
-                st.download_button(
-                    "Baixar XLSX (filtrado)", data=xlsx_filtrado,
-                    file_name=f"Compra_Sugerida_{empresa}_{h}d_filtrado.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"d_fil_{empresa}"
+
+            # -------- NOVO: Comparar ALIVVIA x JCA por SKU (sem alterar a lógica principal) --------
+            with st.expander("🔎 Buscar SKU e comparar compra sugerida nas duas contas", expanded=False):
+                sku_query = st.text_input(
+                    "SKU exato do componente (não kit)",
+                    key="cmp_sku_query",
+                    placeholder="Ex.: LUVA-NEOPRENE-PRETA-G"
                 )
+                st.caption("Dica: gere a compra nas duas empresas para a comparação funcionar.")
+
+                if st.button("Comparar ALIVVIA x JCA", key="btn_cmp_duas_contas"):
+                    try:
+                        alvo = norm_sku(sku_query)
+                        if not alvo:
+                            st.warning("Informe um SKU.")
+                        else:
+                            rows = []
+                            for emp in ["ALIVVIA", "JCA"]:
+                                res_emp = st.session_state.get("resultado_compra", {}).get(emp)
+                                if not res_emp:
+                                    rows.append({
+                                        "Empresa": emp, "SKU": alvo,
+                                        "Compra_Sugerida": None, "Preco": None, "Valor_Compra_R$": None,
+                                        "Obs": "Gere a compra para esta empresa"
+                                    })
+                                    continue
+                                df_emp = res_emp["df"]
+                                r = df_emp[df_emp["SKU"] == alvo]
+                                if r.empty:
+                                    rows.append({
+                                        "Empresa": emp, "SKU": alvo,
+                                        "Compra_Sugerida": 0, "Preco": None, "Valor_Compra_R$": None,
+                                        "Obs": "SKU não encontrado no resultado"
+                                    })
+                                else:
+                                    r0 = r.iloc[0]
+                                    rows.append({
+                                        "Empresa": emp,
+                                        "SKU": r0["SKU"],
+                                        "Compra_Sugerida": int(r0.get("Compra_Sugerida", 0)),
+                                        "Preco": float(r0.get("Preco", 0.0)),
+                                        "Valor_Compra_R$": float(r0.get("Valor_Compra_R$", 0.0)),
+                                        "Obs": ""
+                                    })
+                            cmp_df = pd.DataFrame(rows)
+                            st.dataframe(cmp_df, use_container_width=True, hide_index=True)
+                            st.download_button(
+                                "Baixar comparação (.csv)",
+                                data=cmp_df.to_csv(index=False).encode("utf-8"),
+                                file_name=f"Comparacao_ALIVVIA_JCA_{alvo}.csv",
+                                mime="text/csv",
+                                key="dl_cmp_duas_contas"
+                            )
+                    except Exception as e:
+                        st.error(f"Falha na comparação: {e}")
         else:
             st.info("Clique Gerar Compra para calcular e então aplicar filtros.")
-
-        else:
-            st.info("Clique Gerar Compra para calcular e então aplicar filtros.")
-
 # ================== TAB 3: Alocação de Compra ==================
 with tab3:
     st.subheader("Distribuir quantidade entre empresas — proporcional às vendas (FULL + Shopee)")
