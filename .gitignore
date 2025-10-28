@@ -1,12 +1,3 @@
-# artefatos locais
-.uploads/
+tiny_secrets.json
 tokens/
-__pycache__/
-*.pyc
-
-# configs locais do VSCode/PyCharm
-.vscode/
-.idea/
-
-# streamlit local
-.streamlit/secrets.toml
+.uploads/

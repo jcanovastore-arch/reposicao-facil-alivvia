@@ -1065,6 +1065,17 @@ with tab2:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key=f"d_fil_{empresa}"
                 )
+            with colx2:
+                xlsx_filtrado = exportar_xlsx(df_view, h=h, params={"g": g, "LT": LT, "empresa": empresa, "filtro": "on"})
+                st.download_button(
+                    "Baixar XLSX (filtrado)", data=xlsx_filtrado,
+                    file_name=f"Compra_Sugerida_{empresa}_{h}d_filtrado.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"d_fil_{empresa}"
+                )
+        else:
+            st.info("Clique Gerar Compra para calcular e então aplicar filtros.")
+
         else:
             st.info("Clique Gerar Compra para calcular e então aplicar filtros.")
 
