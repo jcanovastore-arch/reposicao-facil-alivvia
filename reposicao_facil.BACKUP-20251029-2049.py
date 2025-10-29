@@ -26,7 +26,7 @@ from orion.dominio.padrao import Catalogo, _carregar_padrao_de_content, carregar
 # =========================
 #  VersÃ£o do App
 # =========================
-VERSION = "v3.4.2"
+VERSION = "v3.3.6"
 
 # =========================
 #  TINY v3 â€” Helpers
@@ -859,86 +859,7 @@ with tab1:
 
 # ================== TAB 2: Compra AutomÃ¡tica ==================
 with tab2:
-    st.subheader("Gerar Compra (por empresa)
-
-# =============== Orion P1 — Comparador novo com filtros (ALIVVIA x JCA) ===============
-with st.expander("🔎 Comparador (novo — com filtros Orion)", expanded=False):
-    try:
-        resA = st.session_state.get("resultado_compra", {}).get("ALIVVIA")
-        resJ = st.session_state.get("resultado_compra", {}).get("JCA")
-        if not (resA and resJ):
-            st.info("Gere a compra em **ALIVVIA** e **JCA** nesta aba para habilitar o comparador com filtros.")
-        else:
-            dfA = resA["df"].copy()
-            dfJ = resJ["df"].copy()
-
-            try:
-                from orion.ui.components import bloco_filtros_e_selecao, preparar_df_para_oc
-                df_viewA, _ = bloco_filtros_e_selecao(dfA, "ALIVVIA", state_key_prefix="cmp")
-                df_viewJ, _ = bloco_filtros_e_selecao(dfJ, "JCA",     state_key_prefix="cmpJ")
-            except Exception as _e:
-                st.warning("Não encontrei o módulo de UI Orion; exibindo sem filtros avançados. " + str(_e))
-                df_viewA, df_viewJ = dfA, dfJ
-
-            sku_suggestions = df_viewA["SKU"].dropna().astype(str).unique().tolist()[:100]
-            sku_query = st.text_input(
-                "SKU exato do componente (não kit)", key="cmp_sku_query",
-                placeholder=(sku_suggestions[0] if sku_suggestions else "Ex.: LUVA-NEOPRENE-PRETA-G")
-            )
-
-            colK1, colK2 = st.columns([1,1])
-            with colK1: st.caption("Vendas 60d = FULL (kits explodidos) + Shopee (kits explodidos).")
-            with colK2: st.caption("Estoque Físico conforme arquivo/Tiny salvo por empresa.")
-
-            if st.button("Comparar ALIVVIA x JCA (com filtros)", key="btn_cmp_orion"):
-                alvo = (sku_query or "").strip().upper()
-                if not alvo:
-                    st.warning("Informe um SKU componente.")
-                else:
-                    def pick_metrics(df):
-                        r = df[df["SKU"] == alvo]
-                        if r.empty:
-                            return 0, 0, 0, 0.0, "SKU não encontrado no resultado"
-                        r0 = r.iloc[0]
-                        vendas60 = int(r0.get("TOTAL_60d", int(r0.get("ML_60d",0)) + int(r0.get("Shopee_60d",0))))
-                        est_fis  = int(r0.get("Estoque_Fisico", 0))
-                        comp_sug = int(r0.get("Compra_Sugerida", 0))
-                        preco    = float(r0.get("Preco", 0.0))
-                        valor    = float(comp_sug * preco)
-                        return vendas60, est_fis, comp_sug, valor, ""
-
-                    vA, eA, cA, valA, obsA = pick_metrics(df_viewA)
-                    vJ, eJ, cJ, valJ, obsJ = pick_metrics(df_viewJ)
-
-                    m1, m2, m3, m4 = st.columns(4)
-                    m1.metric("ALIVVIA — Vendas 60d", f"{vA:,}".replace(",", "."))
-                    m2.metric("ALIVVIA — Estoque Físico", f"{eA:,}".replace(",", "."))
-                    m3.metric("ALIVVIA — Compra Sugerida", f"{cA:,}".replace(",", "."))
-                    m4.metric("ALIVVIA — Valor Compra (R$)", f"R$ {valA:,.2f}")
-
-                    n1, n2, n3, n4 = st.columns(4)
-                    n1.metric("JCA — Vendas 60d", f"{vJ:,}".replace(",", "."))
-                    n2.metric("JCA — Estoque Físico", f"{eJ:,}".replace(",", "."))
-                    n3.metric("JCA — Compra Sugerida", f"{cJ:,}".replace(",", "."))
-                    n4.metric("JCA — Valor Compra (R$)", f"R$ {valJ:,.2f}")
-
-                    rows = [
-                        {"Empresa": "ALIVVIA", "SKU": alvo, "Compra_Sugerida": cA, "Preco": (valA/cA if cA else 0.0), "Valor_Compra_R$": valA, "Obs": obsA},
-                        {"Empresa": "JCA",     "SKU": alvo, "Compra_Sugerida": cJ, "Preco": (valJ/cJ if cJ else 0.0), "Valor_Compra_R$": valJ, "Obs": obsJ},
-                    ]
-                    cmp_df = pd.DataFrame(rows)
-                    st.dataframe(cmp_df, use_container_width=True, hide_index=True)
-                    st.download_button(
-                        "Baixar comparação (.csv)",
-                        data=cmp_df.to_csv(index=False).encode("utf-8"),
-                        file_name=f"Comparacao_ALIVVIA_JCA_{alvo}.csv",
-                        mime="text/csv",
-                        key="dl_cmp_orion"
-                    )
-    except Exception as e:
-        st.error("Falha no comparador com filtros: " + str(e))
-# =============== /Orion P1 – fim do comparador com filtros ===============
- â€” filtros e seleÃ§Ã£o para OC")
+    st.subheader("Gerar Compra (por empresa) â€” filtros e seleÃ§Ã£o para OC")
 
     # Helpers da aba
     def _filtro_texto_inteligente(df: pd.DataFrame, texto: str, colunas_busca: list[str]) -> pd.DataFrame:
@@ -1210,16 +1131,15 @@ with tab3:
                 dJ = int(demJ.loc[demJ["SKU"] == sku_norm, "Demanda_60d"].sum())
                 total = dA + dJ
 
-if total > 0:
-    propA = dA / total
-    propJ = dJ / total
-    # arredondamento half-up para A; J recebe o resto para fechar o lote
-    alocA = int(round(qtd_lote * propA))
-    alocJ = int(qtd_lote - alocA)
-else:
-    st.warning("Sem vendas detectadas nas duas contas; aplicação 50/50 por falta de histórico.")
-    alocA = int(qtd_lote // 2)
-    alocJ = int(qtd_lote - alocA)
+                if total == 0:
+                    st.warning("Sem vendas detectadas; alocaÃ§Ã£o 50/50.")
+                    propA = propJ = 0.5
+                else:
+                    propA = dA / total
+                    propJ = dJ / total
+
+                alocA = int(round(qtd_lote * propA))
+                alocJ = int(qtd_lote - alocA)
 
                 res = pd.DataFrame([
                     {"Empresa": "ALIVVIA", "SKU": sku_norm, "Demanda_60d": dA, "Proporcao": round(propA, 4), "Alocacao_Sugerida": alocA},
@@ -1238,7 +1158,6 @@ else:
 
 # ---------- RodapÃ© ----------
 st.caption(f"Â© Alivvia â€” {VERSION}")
-
 
 
 
