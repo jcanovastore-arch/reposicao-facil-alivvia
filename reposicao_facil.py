@@ -1,6 +1,6 @@
 # Reposição Logística — Alivvia
 # Mantém as abas: Dados das Empresas, Compra Automática, Alocação de Compra
-# Patch: Estoque Físico via Tiny v3 (botão no sidebar). Sem alterar a lógica original.
+# Inclui: filtros inteligentes, seleção persistente p/ OC, Tiny v3, alocação proporcional 60d
 
 import io
 import os
@@ -11,6 +11,9 @@ import hashlib
 import datetime as dt
 from dataclasses import dataclass
 from typing import Optional, Tuple
+from orion.ui.components import bloco_filtros_e_selecao, preparar_df_para_oc
+
+
 
 import numpy as np
 import pandas as pd
@@ -22,7 +25,7 @@ from unidecode import unidecode
 # =========================
 #  Versão do App
 # =========================
-VERSION = "v3.3.3"
+VERSION = "v3.3.4"
 
 # =========================
 #  TINY v3 — Helpers
@@ -54,7 +57,6 @@ def _tiny_v3_load_access_token(emp: str) -> str | None:
     tok = data.get("access_token")
     exp = data.get("expires_in")
     saved = data.get("saved_at")
-    # Se temos controle de validade, considera vencido 60s antes
     if tok and exp and saved:
         try:
             exp = int(exp); saved = int(saved)
@@ -106,7 +108,6 @@ def _tiny_v3_req(token: str, method: str, path: str, params=None):
             time.sleep(1.2 * (attempt + 1))
             continue
         if r.status_code == 401:
-            # não tentamos refresh aqui (feito no caller quando necessário)
             raise RuntimeError("401 Unauthorized (access_token inválido/expirado).")
         if not r.ok:
             raise RuntimeError(f"HTTP {r.status_code} em {path}: {r.text[:300]}")
@@ -117,6 +118,7 @@ def _tiny_v3_req(token: str, method: str, path: str, params=None):
     raise RuntimeError(f"Falha repetida em {path}")
 
 # ----------- Utilitários p/ achar Variação + Preço -----------
+
 def _node_get_code(node) -> Optional[str]:
     if isinstance(node, dict):
         for k in ('codigo','sku','codigo_sku','codigo_item','codigo_interno'):
@@ -149,10 +151,6 @@ def br_to_float(x):
         return np.nan
 
 def _search_price_in_node(node) -> Optional[float]:
-    """
-    Prioridade de custo: precoCustoMedio → precoCusto → precoMedio → preco/precoVenda → precoPromocional
-    Aceita estar em: node, node['precos'], node['data'].
-    """
     if not isinstance(node, dict):
         return None
     priorities = [
@@ -176,7 +174,6 @@ def _search_price_in_node(node) -> Optional[float]:
     return None
 
 def _scan_find_sku(node, skuU: str, result: dict):
-    """Busca recursiva por um nó cuja 'codigo/sku' == skuU; captura id, ean/gtin e nó para preço."""
     if isinstance(node, dict):
         code = _node_get_code(node)
         if code == skuU:
@@ -193,9 +190,6 @@ def _scan_find_sku(node, skuU: str, result: dict):
             _scan_find_sku(e, skuU, result)
 
 def _tiny_v3_resolve_variacao_por_sku(token: str, sku: str) -> Tuple[Optional[int], Optional[int], Optional[str], Optional[float]]:
-    """
-    Retorna: (pai_id, variacao_id, ean, preco_float) para o SKU informado (variação).
-    """
     skuU = (sku or "").strip().upper()
     if not skuU:
         return None, None, None, None
@@ -209,7 +203,6 @@ def _tiny_v3_resolve_variacao_por_sku(token: str, sku: str) -> Tuple[Optional[in
         return None, None, None, None
     pai_id = int(pai_id)
 
-    # 1) Varrendo JSON do PAI
     det = _tiny_v3_req(token, "GET", f"/produtos/{pai_id}")
     found = {}
     _scan_find_sku(det, skuU, found)
@@ -217,7 +210,6 @@ def _tiny_v3_resolve_variacao_por_sku(token: str, sku: str) -> Tuple[Optional[in
         preco = _search_price_in_node(found.get('price_node', {}))
         return pai_id, int(found['id']), (found.get('ean') or ""), preco
 
-    # 2) Fallback: endpoint /variacoes (se habilitado)
     try:
         v = _tiny_v3_req(token, "GET", f"/produtos/{pai_id}/variacoes")
         for key in ('variacoes','items','data','dados'):
@@ -237,13 +229,9 @@ def _tiny_v3_resolve_variacao_por_sku(token: str, sku: str) -> Tuple[Optional[in
 
 def _is_considerado_deposito(d) -> bool:
     v = d.get("desconsiderar")
-    # Considera considerado se NÃO for "S/True/1"
     return str(v).strip().upper() not in {"S", "TRUE", "1"}
 
 def _tiny_v3_get_estoque_geral(token: str, produto_ou_variacao_id: int) -> dict | None:
-    """
-    Busca no depósito 'Geral' (preferencial) para o ID informado (variação).
-    """
     data = _tiny_v3_req(token, "GET", f"/estoque/{produto_ou_variacao_id}")
     depositos = data.get("depositos") or data.get("data", {}).get("depositos") or data.get("data", {}).get("deposito") or []
     if not isinstance(depositos, list):
@@ -252,10 +240,8 @@ def _tiny_v3_get_estoque_geral(token: str, produto_ou_variacao_id: int) -> dict 
     for d in depositos:
         nome = (d.get("nome") or "").strip().lower()
         if nome == "geral":
-            pref = d
-            break
+            pref = d; break
     if not pref and depositos:
-        # pega primeiro com desconsiderar == False/"N", senão o primeiro
         pref = next((d for d in depositos if _is_considerado_deposito(d)), depositos[0])
 
     if not pref:
@@ -264,27 +250,16 @@ def _tiny_v3_get_estoque_geral(token: str, produto_ou_variacao_id: int) -> dict 
     saldo = int(pref.get("saldo") or 0)
     reservado = int(pref.get("reservado") or 0)
     disponivel = int(pref.get("disponivel") or (saldo - reservado))
-    return {
-        "deposito_nome": pref.get("nome") or "",
-        "saldo": saldo,
-        "reservado": reservado,
-        "disponivel": disponivel,
-    }
+    return {"deposito_nome": pref.get("nome") or "", "saldo": saldo, "reservado": reservado, "disponivel": disponivel}
 
 def _carregar_skus_base(emp: str) -> list[str]:
-    """
-    Busca SKUs a partir do Padrão carregado (CAT) ou,
-    se não achar, procura em .uploads/<EMP>/ (PADRAO/KITS/CAT).
-    """
-    # 1) Padrão em memória
     try:
         dfc = st.session_state.get("catalogo_df")
         if dfc is not None and isinstance(dfc, pd.DataFrame) and not dfc.empty:
             col = None
             for c in ("sku", "component_sku", "codigo", "codigo_sku"):
                 if c in dfc.columns:
-                    col = c
-                    break
+                    col = c; break
             if col:
                 skus = (
                     dfc[col].dropna().astype(str).str.strip().str.upper().unique().tolist()
@@ -294,7 +269,6 @@ def _carregar_skus_base(emp: str) -> list[str]:
     except Exception:
         pass
 
-    # 2) Fallback: .uploads/<EMP>
     base = os.path.join(".uploads", emp.upper())
     if os.path.isdir(base):
         for root, _, files in os.walk(base):
@@ -323,11 +297,6 @@ def _carregar_skus_base(emp: str) -> list[str]:
     return []
 
 def sincronizar_estoque_tiny(emp: str, skus: list[str]) -> pd.DataFrame:
-    """
-    Retorna DF no FORMATO DA PLANILHA FÍSICA: SKU, Estoque_Fisico, Preco (+ status p/ debug).
-    Agora resolve a VARIAÇÃO pelo SKU e traz o custo/preço da variação.
-    Faz refresh automático do token se pegar 401 durante a execução.
-    """
     token = _tiny_v3_get_bearer(emp)
     linhas = []
     total = len(skus)
@@ -339,7 +308,6 @@ def sincronizar_estoque_tiny(emp: str, skus: list[str]) -> pd.DataFrame:
                 pai_id, var_id, ean, preco = _tiny_v3_resolve_variacao_por_sku(token, skuU)
             except RuntimeError as e:
                 if "401" in str(e):
-                    # refresh e tenta de novo
                     token = _tiny_v3_refresh_from_secrets(emp)
                     pai_id, var_id, ean, preco = _tiny_v3_resolve_variacao_por_sku(token, skuU)
                 else:
@@ -359,7 +327,6 @@ def sincronizar_estoque_tiny(emp: str, skus: list[str]) -> pd.DataFrame:
                     else:
                         raise
                 dispo = int(est["disponivel"]) if est else 0
-                # se não veio preço no nó da variação, tenta pegar via produtos/{var_id}
                 if preco is None:
                     try:
                         det_var = _tiny_v3_req(token, "GET", f"/produtos/{var_id}")
@@ -374,7 +341,6 @@ def sincronizar_estoque_tiny(emp: str, skus: list[str]) -> pd.DataFrame:
     prog.empty()
     cols = ["SKU","Estoque_Fisico","Preco","status"]
     df = pd.DataFrame(linhas)[cols]
-    # normaliza tipos
     df["Estoque_Fisico"] = pd.to_numeric(df["Estoque_Fisico"], errors="coerce").fillna(0).astype(int)
     df["Preco"] = pd.to_numeric(df["Preco"], errors="coerce").fillna(0.0)
     return df
@@ -405,19 +371,6 @@ def extract_sheet_id_from_url(url: str) -> Optional[str]:
         return None
     m = re.search(r"/d/([a-zA-Z0-9\-_]+)/", url)
     return m.group(1) if m else None
-
-def baixar_xlsx_por_link_google(url: str) -> bytes:
-    s = _requests_session()
-    if "export?format=xlsx" in url:
-        r = s.get(url, timeout=30)
-        r.raise_for_status()
-        return r.content
-    sid = extract_sheet_id_from_url(url)
-    if not sid:
-        raise RuntimeError("Link inválido do Google Sheets (esperado .../d/<ID>/...).")
-    r = s.get(gs_export_xlsx_url(sid), timeout=30)
-    r.raise_for_status()
-    return r.content
 
 def baixar_xlsx_do_sheets(sheet_id: str) -> bytes:
     s = _requests_session()
@@ -518,6 +471,9 @@ def _ensure_state():
     st.session_state.setdefault("kits_df", None)
     st.session_state.setdefault("loaded_at", None)
     st.session_state.setdefault("resultado_compra", {})
+    st.session_state.setdefault("estoque_tiny_por_emp", {})
+    st.session_state.setdefault("df_compra", None)
+    st.session_state.setdefault("oc_selection", {"ALIVVIA": set(), "JCA": set()})
     for emp in ["ALIVVIA", "JCA"]:
         st.session_state.setdefault(emp, {})
         for kind in ["FULL", "VENDAS", "ESTOQUE"]:
@@ -593,7 +549,7 @@ def _carregar_padrao_de_content(content: bytes) -> "Catalogo":
     df_kits = df_kits[["kit_sku", "component_sku", "qty"]].copy()
     df_kits["kit_sku"] = df_kits["kit_sku"].map(norm_sku)
     df_kits["component_sku"] = df_kits["component_sku"].map(norm_sku)
-    df_kits["qty"] = df_kits["qty"].map(br_to_float).fillna(0).astype(int)
+    df_kits["qty"] = pd.to_numeric(df_kits["qty"], errors="coerce").fillna(0).astype(int)
     df_kits = df_kits[df_kits["qty"] >= 1].drop_duplicates(subset=["kit_sku", "component_sku"])
 
     # CATALOGO
@@ -657,13 +613,13 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
         c_v = [c for c in df.columns if c in ["vendas_qtd_60d", "vendas_60d", "vendas 60d"] or c.startswith("vendas_60d")]
         if not c_v:
             raise RuntimeError("FULL inválido: faltou Vendas_60d.")
-        df["Vendas_Qtd_60d"] = df[c_v[0]].map(br_to_float).fillna(0).astype(int)
+        df["Vendas_Qtd_60d"] = pd.to_numeric(df[c_v[0]].map(br_to_float), errors="coerce").fillna(0).astype(int)
         c_e = [c for c in df.columns if c in ["estoque_full", "estoque_atual"] or ("estoque" in c and "full" in c)]
         if not c_e:
             raise RuntimeError("FULL inválido: faltou Estoque_Full.")
-        df["Estoque_Full"] = df[c_e[0]].map(br_to_float).fillna(0).astype(int)
+        df["Estoque_Full"] = pd.to_numeric(df[c_e[0]].map(br_to_float), errors="coerce").fillna(0).astype(int)
         c_t = [c for c in df.columns if c in ["em_transito", "em transito", "em_transito_full"] or ("transito" in c)]
-        df["Em_Transito"] = df[c_t[0]].map(br_to_float).fillna(0).astype(int) if c_t else 0
+        df["Em_Transito"] = pd.to_numeric(df[c_t[0]].map(br_to_float), errors="coerce").fillna(0).astype(int) if c_t else 0
         return df[["SKU", "Vendas_Qtd_60d", "Estoque_Full", "Em_Transito"]].copy()
 
     if tipo == "FISICO":
@@ -681,11 +637,11 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
         c_q = [c for c in df.columns if c in ["estoque_atual", "qtd", "quantidade"] or ("estoque" in c)]
         if not c_q:
             raise RuntimeError("FÍSICO inválido: faltou Estoque.")
-        df["Estoque_Fisico"] = df[c_q[0]].map(br_to_float).fillna(0).astype(int)
+        df["Estoque_Fisico"] = pd.to_numeric(df[c_q[0]].map(br_to_float), errors="coerce").fillna(0).astype(int)
         c_p = [c for c in df.columns if c in ["preco", "preco_compra", "custo", "custo_medio", "preco_medio", "preco_unitario"]]
         if not c_p:
             raise RuntimeError("FÍSICO inválido: faltou Preço/Custo.")
-        df["Preco"] = df[c_p[0]].map(br_to_float).fillna(0.0)
+        df["Preco"] = pd.to_numeric(df[c_p[0]].map(br_to_float), errors="coerce").fillna(0.0)
         return df[["SKU", "Estoque_Fisico", "Preco"]].copy()
 
     if tipo == "VENDAS":
@@ -697,21 +653,17 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
         for c in df.columns:
             cl = c.lower()
             score = 0
-            if "qtde" in cl:
-                score += 3
-            if "quant" in cl:
-                score += 2
-            if "venda" in cl:
-                score += 1
-            if "order" in cl:
-                score += 1
+            if "qtde" in cl: score += 3
+            if "quant" in cl: score += 2
+            if "venda" in cl: score += 1
+            if "order" in cl: score += 1
             if score > 0:
                 cand_qty.append((score, c))
         if not cand_qty:
             raise RuntimeError("VENDAS inválido: não achei Quantidade.")
         cand_qty.sort(reverse=True)
         qcol = cand_qty[0][1]
-        df["Quantidade"] = df[qcol].map(br_to_float).fillna(0).astype(int)
+        df["Quantidade"] = pd.to_numeric(df[qcol].map(br_to_float), errors="coerce").fillna(0).astype(int)
         return df[["SKU", "Quantidade"]].copy()
 
     raise RuntimeError("Tipo desconhecido.")
@@ -720,10 +672,10 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
 def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_col: str) -> pd.DataFrame:
     base = df.copy()
     base["kit_sku"] = base[sku_col].map(norm_sku)
-    base["qtd"] = base[qtd_col].astype(int)
+    base["qtd"] = pd.to_numeric(base[qtd_col], errors="coerce").fillna(0).astype(int)
     merged = base.merge(kits, on="kit_sku", how="left")
     exploded = merged.dropna(subset=["component_sku"]).copy()
-    exploded["qty"] = exploded["qty"].astype(int)
+    exploded["qty"] = pd.to_numeric(exploded["qty"], errors="coerce").fillna(0).astype(int)
     exploded["quantidade_comp"] = exploded["qtd"] * exploded["qty"]
     out = exploded.groupby("component_sku", as_index=False)["quantidade_comp"].sum()
     out = out.rename(columns={"component_sku": "SKU", "quantidade_comp": "Quantidade"})
@@ -746,7 +698,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: "Catalogo", h=60, g=0.0, LT=0):
     full["SKU"] = full["SKU"].map(norm_sku)
     full["Vendas_Qtd_60d"] = full["Vendas_Qtd_60d"].astype(int)
     full["Estoque_Full"] = full["Estoque_Full"].astype(int)
-    full["Em_Transito"] = full["Em_Transito"].astype(int)
+    full["Em_Transito"] = pd.to_numeric(full["Em_Transito"], errors="coerce").fillna(0).astype(int)
 
     shp = vendas_df.copy()
     shp["SKU"] = shp["SKU"].map(norm_sku)
@@ -765,7 +717,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: "Catalogo", h=60, g=0.0, LT=0):
 
     demanda = cat_df.merge(ml_comp, on="SKU", how="left").merge(shopee_comp, on="SKU", how="left")
     demanda[["ML_60d", "Shopee_60d"]] = demanda[["ML_60d", "Shopee_60d"]].apply(pd.to_numeric, errors="coerce").fillna(0).clip(lower=0).astype(int)
-    demanda["TOTAL_60d"] = np.maximum(demanda["ML_60d"] + demanda["Shopee_60d"], demanda["ML_60d"]).astype(int)
+    demanda["TOTAL_60d"] = (demanda["ML_60d"] + demanda["Shopee_60d"]).astype(int)
 
     fis = fisico_df.copy()
     fis["SKU"] = fis["SKU"].map(norm_sku)
@@ -889,14 +841,10 @@ with st.sidebar:
                 st.error(f"Não achei SKUs. Carregue o Padrão (KITS/CAT) e/ou arquivos em .uploads/{emp_sel}/.")
             else:
                 df_tiny = sincronizar_estoque_tiny(emp_sel, skus)
-                # guarda para visualização
-                st.session_state.setdefault("estoque_tiny_por_emp", {})[emp_sel] = df_tiny
+                st.session_state["estoque_tiny_por_emp"][emp_sel] = df_tiny
                 ok = int((df_tiny["status"] == "OK").sum())
                 st.success(f"Tiny v3 ({emp_sel}) sincronizado: {len(df_tiny)} SKUs (OK: {ok}).")
                 st.dataframe(df_tiny, use_container_width=True, height=380)
-                st.caption("Obs.: Agora o preço vem do Tiny (custo médio quando houver). O arquivo de estoque do sistema foi atualizado.")
-
-                # Substitui a planilha manual (mesmo formato)
                 csv_bytes = df_tiny[["SKU","Estoque_Fisico","Preco"]].to_csv(index=False).encode("utf-8")
                 _store_put(emp_sel, "ESTOQUE", "Estoque_Tiny.csv", csv_bytes)
                 st.session_state[emp_sel]["ESTOQUE"] = {"name": "Estoque_Tiny.csv", "bytes": csv_bytes}
@@ -981,14 +929,10 @@ with tab1:
 
 # ================== TAB 2: Compra Automática ==================
 with tab2:
-    st.subheader("Gerar Compra (por empresa) — lógica original")
+    st.subheader("Gerar Compra (por empresa) — filtros e seleção para OC")
 
-    # ————— Helpers desta aba —————
+    # Helpers da aba
     def _filtro_texto_inteligente(df: pd.DataFrame, texto: str, colunas_busca: list[str]) -> pd.DataFrame:
-        """
-        Busca por substring (case-insensitive) em colunas de texto (ex.: SKU/fornecedor).
-        Ex.: "404" encontra tudo que contiver 404. Pode aceitar vários termos separados por espaço (todos precisam bater).
-        """
         if not texto:
             return df
         termos = [t.strip() for t in str(texto).split() if t.strip()]
@@ -1009,10 +953,6 @@ with tab2:
         return base[mask_total]
 
     def _preparar_df_compra(base: pd.DataFrame) -> pd.DataFrame:
-        """
-        Monta o pacote mínimo para a OC: SKU, Descricao, Qtd (Compra_Sugerida), PrecoUnit (Preco) e fornecedor (se existir).
-        Filtra somente Qtd > 0.
-        """
         df = base.copy()
         if "Descricao" not in df.columns:
             df["Descricao"] = df["SKU"]
@@ -1066,8 +1006,7 @@ with tab2:
                 df_final, painel = calcular(full_df, fisico_df, vendas_df, cat, h=h, g=g, LT=LT)
 
                 st.session_state["resultado_compra"][empresa] = {"df": df_final, "painel": painel}
-                st.session_state.setdefault("oc_selection", {})
-                st.session_state["oc_selection"][empresa] = set()  # zera seleção
+                st.session_state["oc_selection"][empresa] = set()  # zera seleção desta empresa
                 st.success("Cálculo concluído e salvo. Aplique filtros e selecione os itens.")
             except Exception as e:
                 st.error(str(e))
@@ -1085,87 +1024,48 @@ with tab2:
             cC.metric("Físico (un)", f"{painel['fisico_unid']:,}".replace(",", "."))
             cD.metric("Físico (R$)", f"R$ {painel['fisico_valor']:,.2f}")
 
-            # ----------- Filtros -----------
-            with st.expander("Filtros (após geração) — sem recálculo", expanded=True):
-                colf1, colf2, colf3 = st.columns([1,1,1])
+       # ——— ORION/ATHENAS: filtros inteligentes + seleção persistente ———
+df_view, sel_set = bloco_filtros_e_selecao(df_final, empresa, state_key_prefix="oc")
 
-                # 1) Fornecedor (multiselect)
-                fornecedores = sorted([f for f in df_final["fornecedor"].dropna().astype(str).unique().tolist() if f != ""])
-                sel_fornec = colf1.multiselect("Fornecedor", options=fornecedores, default=[], key=f"filtro_fornec_{empresa}")
+# —— Botões de envio para a Ordem de Compra ——
+col_send1, col_send2, col_send3 = st.columns([1,1,1])
 
-                # 2) SKU (auto-completar, pesquisável). Opção "(todos)" não filtra.
-                sku_all = sorted(df_final["SKU"].dropna().astype(str).unique().tolist())
-                sku_opts = ["(todos)"] + sku_all
-                sku_auto = colf2.selectbox("SKU (auto-completar)", options=sku_opts, index=0, key=f"sku_auto_{empresa}")
+with col_send1:
+    if st.button("➡️ Enviar **SELECIONADOS** para a Ordem de Compra", use_container_width=True, key=f"oc_send_sel_{empresa}"):
+        if not sel_set:
+            st.warning("Nenhum SKU selecionado. Marque ou use os botões de seleção rápida.")
+        else:
+            base_sel = df_final[df_final["SKU"].astype(str).isin(list(sel_set))]
+            df_export = preparar_df_para_oc(base_sel)
+            if df_export.empty:
+                st.warning("Os selecionados não têm Compra_Sugerida > 0.")
+            else:
+                st.session_state["df_compra"] = df_export
+                st.success(f"{len(df_export)} itens selecionados enviados para a página 🧾 Ordem de Compra.")
 
-                # 3) Busca inteligente (substring) — ex.: 404 PRETO → precisa conter "404" e "PRETO" em SKU ou Fornecedor
-                busca_txt = colf3.text_input("Busca inteligente (SKU/Fornecedor)", key=f"busca_txt_{empresa}", placeholder="Ex.: 404 PRETO, HIDRO, MINI…")
+with col_send2:
+    if st.button("➡️ Enviar ITENS **FILTRADOS** para a Ordem de Compra", use_container_width=True, key=f"oc_send_filtrado_{empresa}"):
+        df_export = preparar_df_para_oc(df_view)
+        if df_export.empty:
+            st.warning("Nada para enviar: ajuste os filtros ou gere a compra novamente.")
+        else:
+            st.session_state["df_compra"] = df_export
+            st.success(f"{len(df_export)} itens (filtrados) enviados para a página 🧾 Ordem de Compra.")
 
-            # Aplica filtros
-            df_view = df_final.copy()
-            if sel_fornec:
-                df_view = df_view[df_view["fornecedor"].isin(sel_fornec)]
-            if sku_auto and sku_auto != "(todos)":
-                df_view = df_view[df_view["SKU"].astype(str).str.upper() == str(sku_auto).upper()]
-            if busca_txt:
-                df_view = _filtro_texto_inteligente(df_view, busca_txt, ["SKU", "fornecedor"])
-
-            # Colunas adicionais e ordenação de visualização
-            if "TOTAL_60d" not in df_view.columns and {"ML_60d","Shopee_60d"}.issubset(df_view.columns):
-                df_view["TOTAL_60d"] = df_view[["ML_60d", "Shopee_60d"]].sum(axis=1)
-
-            cols_show = [
-                "fornecedor", "SKU",
-                "Vendas_h_Shopee", "Vendas_h_ML", "TOTAL_60d",
-                "Estoque_Fisico", "Preco",
-                "Compra_Sugerida", "Valor_Compra_R$",
-            ]
-            df_view = df_view[[c for c in cols_show if c in df_view.columns]].copy()
-
-            # Totais do conjunto filtrado
-            tot_compra = float(df_view.get("Valor_Compra_R$", pd.Series(dtype=float)).sum())
-            tot_qtd = int(pd.to_numeric(df_view.get("Compra_Sugerida", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
-            colm1, colm2 = st.columns([1,1])
-            colm1.info(f"**Total Compra Sugerida (un):** {tot_qtd:,}".replace(",", "."))
-            colm2.info(f"**Valor Total (R$) do conjunto filtrado:** R$ {tot_compra:,.2f}")
-
-            # ---------- Seleção com checkbox para enviar para OC ----------
-            st.caption("Marque os SKUs que deseja **enviar para a Ordem de Compra**. A seleção independe dos filtros (ela fica salva por SKU).")
-
-            st.session_state.setdefault("oc_selection", {})
-            sel_set = st.session_state["oc_selection"].setdefault(empresa, set())
-
-            df_show = df_view.copy()
-            df_show.insert(0, "Selecionar", df_show["SKU"].isin(sel_set))
-
-            edited = st.data_editor(
-                df_show,
-                use_container_width=True,
-                height=520,
-                hide_index=True,
-                column_config={
-                    "Selecionar": st.column_config.CheckboxColumn(label="Selecionar", help="Marque para incluir na OC"),
-                    "Preco": st.column_config.NumberColumn(format="R$ %.2f"),
-                    "Valor_Compra_R$": st.column_config.NumberColumn(format="R$ %.2f"),
-                },
-                disabled=[c for c in df_show.columns if c not in ("Selecionar",)],
-                key=f"grid_compra_{empresa}"
-            )
-
-            marcados_agora = set(edited.loc[edited["Selecionar"] == True, "SKU"].astype(str).tolist())
-            apareceram = set(df_view["SKU"].astype(str).tolist())
-            sel_set |= marcados_agora           # adiciona os marcados desta tela
-            sel_set -= (apareceram - marcados_agora)  # remove os desmarcados desta tela
-            st.session_state["oc_selection"][empresa] = sel_set
-
-            # Botões de envio
-            col_send1, col_send2, col_send3 = st.columns([1,1,1])
+with col_send3:
+    if st.button("➡️ Enviar **TODA** a compra (sem filtro) para a Ordem de Compra", use_container_width=True, key=f"oc_send_tudo_{empresa}"):
+        df_export = preparar_df_para_oc(df_final)
+        if df_export.empty:
+            st.warning("Nada para enviar: gere a compra novamente.")
+        else:
+            st.session_state["df_compra"] = df_export
+            st.success(f"{len(df_export)} itens (todos) enviados para a página 🧾 Ordem de Compra.")
 
             with col_send1:
                 if st.button("➡️ Enviar **SELECIONADOS** para a Ordem de Compra", use_container_width=True, key=f"oc_send_sel_{empresa}"):
                     try:
                         if not sel_set:
-                            st.warning("Nenhum SKU selecionado. Marque pelo menos um.")
+                            st.warning("Nenhum SKU selecionado. Marque ou use os botões de seleção rápida.")
                         else:
                             base_sel = st.session_state["resultado_compra"][empresa]["df"]
                             base_sel = base_sel[base_sel["SKU"].astype(str).isin(list(sel_set))]
@@ -1177,7 +1077,6 @@ with tab2:
                                 st.success(f"{len(df_export)} itens selecionados enviados para a página 🧾 Ordem de Compra.")
                     except Exception as e:
                         st.error(f"Falha no envio dos selecionados: {e}")
-
             with col_send2:
                 if st.button("➡️ Enviar ITENS **FILTRADOS** para a Ordem de Compra", use_container_width=True, key=f"oc_send_filtrado_{empresa}"):
                     try:
@@ -1189,7 +1088,6 @@ with tab2:
                             st.success(f"{len(df_export)} itens (filtrados) enviados para a página 🧾 Ordem de Compra.")
                     except Exception as e:
                         st.error(f"Falha no envio filtrado: {e}")
-
             with col_send3:
                 if st.button("➡️ Enviar **TODA** a compra (sem filtro) para a Ordem de Compra", use_container_width=True, key=f"oc_send_tudo_{empresa}"):
                     try:
@@ -1202,7 +1100,7 @@ with tab2:
                     except Exception as e:
                         st.error(f"Falha no envio total: {e}")
 
-            # -------- Downloads (mantidos) --------
+            # Downloads (opcional)
             colx1, colx2 = st.columns([1, 1])
             with colx1:
                 try:
@@ -1227,7 +1125,7 @@ with tab2:
                 except Exception as e:
                     st.error(f"Falha ao gerar XLSX filtrado: {e}")
 
-            # -------- Comparador ALIVVIA x JCA por SKU (mantido) --------
+            # Comparador ALIVVIA x JCA por SKU (opcional)
             with st.expander("🔎 Buscar SKU e comparar compra sugerida nas duas contas", expanded=False):
                 sku_query = st.text_input(
                     "SKU exato do componente (não kit)",
@@ -1274,8 +1172,6 @@ with tab2:
                         st.error(f"Falha na comparação: {e}")
         else:
             st.info("Clique Gerar Compra para calcular e então aplicar filtros.")
-# ================== TAB 3: Alocação de Compra ==================
-
 
 # ================== TAB 3: Alocação de Compra ==================
 with tab3:
@@ -1285,13 +1181,16 @@ with tab3:
     else:
         CATALOGO = st.session_state.catalogo_df
         sku_opcoes = CATALOGO["sku"].dropna().astype(str).sort_values().unique().tolist()
-        sku_escolhido = st.selectbox("SKU do componente para alocar", sku_opcoes, key="alloc_sku")
+        sku_escolhido = st.selectbox("SKU do componente para alocar", ["(selecione)"] + sku_opcoes, key="alloc_sku")
         qtd_lote = st.number_input("Quantidade total do lote", min_value=1, value=1000, step=50)
 
         st.caption("Necessita FULL e Shopee/MT salvos para ALIVVIA e JCA na aba Dados.")
 
         if st.button("Calcular alocação proporcional", type="primary"):
             try:
+                if sku_escolhido in ("", "(selecione)"):
+                    raise RuntimeError("Escolha um SKU para alocar.")
+
                 missing = []
                 for emp in ["ALIVVIA", "JCA"]:
                     if not (st.session_state[emp]["FULL"]["name"] and st.session_state[emp]["FULL"]["bytes"]):
@@ -1311,7 +1210,6 @@ with tab3:
                         raise RuntimeError(f"Vendas inválido ({emp}).")
                     return mapear_colunas(fa, tfa), mapear_colunas(sa, tsa)
 
-                # dados
                 full_A, shp_A = read_pair("ALIVVIA")
                 full_J, shp_J = read_pair("JCA")
 
