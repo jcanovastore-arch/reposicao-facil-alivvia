@@ -983,6 +983,50 @@ with tab1:
 with tab2:
     st.subheader("Gerar Compra (por empresa) — lógica original")
 
+    # ————— Helpers desta aba —————
+    def _filtro_texto_inteligente(df: pd.DataFrame, texto: str, colunas_busca: list[str]) -> pd.DataFrame:
+        """
+        Busca por substring (case-insensitive) em colunas de texto (ex.: SKU/fornecedor).
+        Ex.: "404" encontra tudo que contiver 404. Pode aceitar vários termos separados por espaço (todos precisam bater).
+        """
+        if not texto:
+            return df
+        termos = [t.strip() for t in str(texto).split() if t.strip()]
+        if not termos:
+            return df
+        base = df.copy()
+        for col in colunas_busca:
+            if col not in base.columns:
+                base[col] = ""
+            base[col] = base[col].astype(str)
+        mask_total = np.ones(len(base), dtype=bool)
+        for termo in termos:
+            termo_up = termo.upper()
+            mask_termo = np.zeros(len(base), dtype=bool)
+            for col in colunas_busca:
+                mask_termo = mask_termo | base[col].str.upper().str.contains(termo_up, na=False)
+            mask_total = mask_total & mask_termo
+        return base[mask_total]
+
+    def _preparar_df_compra(base: pd.DataFrame) -> pd.DataFrame:
+        """
+        Monta o pacote mínimo para a OC: SKU, Descricao, Qtd (Compra_Sugerida), PrecoUnit (Preco) e fornecedor (se existir).
+        Filtra somente Qtd > 0.
+        """
+        df = base.copy()
+        if "Descricao" not in df.columns:
+            df["Descricao"] = df["SKU"]
+        df["Qtd"] = pd.to_numeric(df.get("Compra_Sugerida", 0), errors="coerce").fillna(0).astype(float)
+        df["PrecoUnit"] = pd.to_numeric(df.get("Preco", 0.0), errors="coerce").fillna(0.0).astype(float)
+        keep = ["SKU", "Descricao", "Qtd", "PrecoUnit"]
+        if "fornecedor" in df.columns:
+            keep.append("fornecedor")
+        df = df[keep].copy()
+        df = df[df["Qtd"] > 0]
+        df["SKU"] = df["SKU"].astype(str).str.strip().str.upper()
+        df["Descricao"] = df["Descricao"].astype(str).str.strip()
+        return df.reset_index(drop=True)
+
     if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
         st.info("Carregue o Padrão (KITS/CAT) no sidebar.")
     else:
@@ -1007,12 +1051,9 @@ with tab2:
                 t_full = mapear_tipo(full_raw)
                 t_v = mapear_tipo(vendas_raw)
                 t_f = mapear_tipo(fisico_raw)
-                if t_full != "FULL":
-                    raise RuntimeError("FULL inválido.")
-                if t_v != "VENDAS":
-                    raise RuntimeError("Vendas inválido.")
-                if t_f != "FISICO":
-                    raise RuntimeError("Estoque inválido.")
+                if t_full != "FULL":   raise RuntimeError("FULL inválido.")
+                if t_v != "VENDAS":    raise RuntimeError("Vendas inválido.")
+                if t_f != "FISICO":    raise RuntimeError("Estoque inválido.")
 
                 full_df = mapear_colunas(full_raw, t_full)
                 vendas_df = mapear_colunas(vendas_raw, t_v)
@@ -1025,67 +1066,149 @@ with tab2:
                 df_final, painel = calcular(full_df, fisico_df, vendas_df, cat, h=h, g=g, LT=LT)
 
                 st.session_state["resultado_compra"][empresa] = {"df": df_final, "painel": painel}
-                st.success("Cálculo concluído e salvo. Aplique filtros abaixo.")
+                st.session_state.setdefault("oc_selection", {})
+                st.session_state["oc_selection"][empresa] = set()  # zera seleção
+                st.success("Cálculo concluído e salvo. Aplique filtros e selecione os itens.")
             except Exception as e:
                 st.error(str(e))
 
         # Exibição do resultado desta EMPRESA
-        if empresa in st.session_state["resultado_compra"]:
+        if empresa in st.session_state.get("resultado_compra", {}):
             pkg = st.session_state["resultado_compra"][empresa]
-            df_final = pkg["df"]
+            df_final = pkg["df"].copy()
             painel = pkg["painel"]
 
+            # Métricas gerais
             cA, cB, cC, cD = st.columns(4)
             cA.metric("Full (un)", f"{painel['full_unid']:,}".replace(",", "."))
             cB.metric("Full (R$)", f"R$ {painel['full_valor']:,.2f}")
             cC.metric("Físico (un)", f"{painel['fisico_unid']:,}".replace(",", "."))
             cD.metric("Físico (R$)", f"R$ {painel['fisico_valor']:,.2f}")
 
+            # ----------- Filtros -----------
             with st.expander("Filtros (após geração) — sem recálculo", expanded=True):
+                colf1, colf2, colf3 = st.columns([1,1,1])
+
+                # 1) Fornecedor (multiselect)
                 fornecedores = sorted([f for f in df_final["fornecedor"].dropna().astype(str).unique().tolist() if f != ""])
-                sel_fornec = st.multiselect("Fornecedor", options=fornecedores, default=[], key=f"filtro_fornec_{empresa}")
+                sel_fornec = colf1.multiselect("Fornecedor", options=fornecedores, default=[], key=f"filtro_fornec_{empresa}")
 
+                # 2) SKU (auto-completar, pesquisável). Opção "(todos)" não filtra.
                 sku_all = sorted(df_final["SKU"].dropna().astype(str).unique().tolist())
-                txt = st.text_input("Pesquisar SKU (parte do código)", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO…")
-                if txt:
-                    sku_filtrado = [s for s in sku_all if txt.upper() in s.upper()]
-                else:
-                    sku_filtrado = sku_all
-                sel_skus = st.multiselect("Selecione SKUs", options=sku_filtrado, default=[], key=f"filtro_sku_{empresa}")
+                sku_opts = ["(todos)"] + sku_all
+                sku_auto = colf2.selectbox("SKU (auto-completar)", options=sku_opts, index=0, key=f"sku_auto_{empresa}")
 
+                # 3) Busca inteligente (substring) — ex.: 404 PRETO → precisa conter "404" e "PRETO" em SKU ou Fornecedor
+                busca_txt = colf3.text_input("Busca inteligente (SKU/Fornecedor)", key=f"busca_txt_{empresa}", placeholder="Ex.: 404 PRETO, HIDRO, MINI…")
+
+            # Aplica filtros
             df_view = df_final.copy()
             if sel_fornec:
                 df_view = df_view[df_view["fornecedor"].isin(sel_fornec)]
-            if sel_skus:
-                df_view = df_view[df_view["SKU"].isin(sel_skus)]
+            if sku_auto and sku_auto != "(todos)":
+                df_view = df_view[df_view["SKU"].astype(str).str.upper() == str(sku_auto).upper()]
+            if busca_txt:
+                df_view = _filtro_texto_inteligente(df_view, busca_txt, ["SKU", "fornecedor"])
 
-            # salva a view filtrada para a página de OC também
-            st.session_state.setdefault("resultado_compra", {}).setdefault(empresa, {})
-            st.session_state["resultado_compra"][empresa]["view"] = df_view.copy()
+            # Colunas adicionais e ordenação de visualização
+            if "TOTAL_60d" not in df_view.columns and {"ML_60d","Shopee_60d"}.issubset(df_view.columns):
+                df_view["TOTAL_60d"] = df_view[["ML_60d", "Shopee_60d"]].sum(axis=1)
 
             cols_show = [
                 "fornecedor", "SKU",
-                "Vendas_h_Shopee", "Vendas_h_ML",
+                "Vendas_h_Shopee", "Vendas_h_ML", "TOTAL_60d",
                 "Estoque_Fisico", "Preco",
                 "Compra_Sugerida", "Valor_Compra_R$",
             ]
-            df_view_sub = df_view[[c for c in cols_show if c in df_view.columns]].copy()
+            df_view = df_view[[c for c in cols_show if c in df_view.columns]].copy()
 
-            st.caption(f"Linhas após filtros: {len(df_view_sub)}")
-            st.dataframe(
-                df_view_sub,
+            # Totais do conjunto filtrado
+            tot_compra = float(df_view.get("Valor_Compra_R$", pd.Series(dtype=float)).sum())
+            tot_qtd = int(pd.to_numeric(df_view.get("Compra_Sugerida", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+            colm1, colm2 = st.columns([1,1])
+            colm1.info(f"**Total Compra Sugerida (un):** {tot_qtd:,}".replace(",", "."))
+            colm2.info(f"**Valor Total (R$) do conjunto filtrado:** R$ {tot_compra:,.2f}")
+
+            # ---------- Seleção com checkbox para enviar para OC ----------
+            st.caption("Marque os SKUs que deseja **enviar para a Ordem de Compra**. A seleção independe dos filtros (ela fica salva por SKU).")
+
+            st.session_state.setdefault("oc_selection", {})
+            sel_set = st.session_state["oc_selection"].setdefault(empresa, set())
+
+            df_show = df_view.copy()
+            df_show.insert(0, "Selecionar", df_show["SKU"].isin(sel_set))
+
+            edited = st.data_editor(
+                df_show,
                 use_container_width=True,
-                height=500,
+                height=520,
                 hide_index=True,
+                column_config={
+                    "Selecionar": st.column_config.CheckboxColumn(label="Selecionar", help="Marque para incluir na OC"),
+                    "Preco": st.column_config.NumberColumn(format="R$ %.2f"),
+                    "Valor_Compra_R$": st.column_config.NumberColumn(format="R$ %.2f"),
+                },
+                disabled=[c for c in df_show.columns if c not in ("Selecionar",)],
+                key=f"grid_compra_{empresa}"
             )
 
-            # --------- Downloads sempre visíveis após cálculo ---------
+            marcados_agora = set(edited.loc[edited["Selecionar"] == True, "SKU"].astype(str).tolist())
+            apareceram = set(df_view["SKU"].astype(str).tolist())
+            sel_set |= marcados_agora           # adiciona os marcados desta tela
+            sel_set -= (apareceram - marcados_agora)  # remove os desmarcados desta tela
+            st.session_state["oc_selection"][empresa] = sel_set
+
+            # Botões de envio
+            col_send1, col_send2, col_send3 = st.columns([1,1,1])
+
+            with col_send1:
+                if st.button("➡️ Enviar **SELECIONADOS** para a Ordem de Compra", use_container_width=True, key=f"oc_send_sel_{empresa}"):
+                    try:
+                        if not sel_set:
+                            st.warning("Nenhum SKU selecionado. Marque pelo menos um.")
+                        else:
+                            base_sel = st.session_state["resultado_compra"][empresa]["df"]
+                            base_sel = base_sel[base_sel["SKU"].astype(str).isin(list(sel_set))]
+                            df_export = _preparar_df_compra(base_sel)
+                            if df_export.empty:
+                                st.warning("Os selecionados não têm Compra_Sugerida > 0.")
+                            else:
+                                st.session_state["df_compra"] = df_export
+                                st.success(f"{len(df_export)} itens selecionados enviados para a página 🧾 Ordem de Compra.")
+                    except Exception as e:
+                        st.error(f"Falha no envio dos selecionados: {e}")
+
+            with col_send2:
+                if st.button("➡️ Enviar ITENS **FILTRADOS** para a Ordem de Compra", use_container_width=True, key=f"oc_send_filtrado_{empresa}"):
+                    try:
+                        df_export = _preparar_df_compra(df_view)
+                        if df_export.empty:
+                            st.warning("Nada para enviar: ajuste os filtros ou gere a compra novamente.")
+                        else:
+                            st.session_state["df_compra"] = df_export
+                            st.success(f"{len(df_export)} itens (filtrados) enviados para a página 🧾 Ordem de Compra.")
+                    except Exception as e:
+                        st.error(f"Falha no envio filtrado: {e}")
+
+            with col_send3:
+                if st.button("➡️ Enviar **TODA** a compra (sem filtro) para a Ordem de Compra", use_container_width=True, key=f"oc_send_tudo_{empresa}"):
+                    try:
+                        df_export = _preparar_df_compra(st.session_state["resultado_compra"][empresa]["df"])
+                        if df_export.empty:
+                            st.warning("Nada para enviar: gere a compra novamente.")
+                        else:
+                            st.session_state["df_compra"] = df_export
+                            st.success(f"{len(df_export)} itens (todos) enviados para a página 🧾 Ordem de Compra.")
+                    except Exception as e:
+                        st.error(f"Falha no envio total: {e}")
+
+            # -------- Downloads (mantidos) --------
             colx1, colx2 = st.columns([1, 1])
             with colx1:
                 try:
-                    xlsx = exportar_xlsx(df_final, h=h, params={"g": g, "LT": LT, "empresa": empresa})
+                    xlsx_all = exportar_xlsx(st.session_state["resultado_compra"][empresa]["df"], h=h, params={"g": g, "LT": LT, "empresa": empresa})
                     st.download_button(
-                        "Baixar XLSX (completo)", data=xlsx,
+                        "Baixar XLSX (completo)", data=xlsx_all,
                         file_name=f"Compra_Sugerida_{empresa}_{h}d.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key=f"d_all_{empresa}"
@@ -1104,43 +1227,34 @@ with tab2:
                 except Exception as e:
                     st.error(f"Falha ao gerar XLSX filtrado: {e}")
 
-            # --------- Comparar ALIVVIA x JCA por SKU ---------
+            # -------- Comparador ALIVVIA x JCA por SKU (mantido) --------
             with st.expander("🔎 Buscar SKU e comparar compra sugerida nas duas contas", expanded=False):
                 sku_query = st.text_input(
                     "SKU exato do componente (não kit)",
-                    key="cmp_sku_query",
+                    key=f"cmp_sku_query_{empresa}",
                     placeholder="Ex.: LUVA-NEOPRENE-PRETA-G"
                 )
                 st.caption("Dica: gere a compra nas duas empresas para a comparação funcionar.")
-
-                if st.button("Comparar ALIVVIA x JCA", key="btn_cmp_duas_contas"):
+                if st.button("Comparar ALIVVIA x JCA", key=f"btn_cmp_duas_contas_{empresa}"):
                     try:
                         alvo = norm_sku(sku_query)
                         if not alvo:
                             st.warning("Informe um SKU.")
                         else:
                             rows = []
-                            for emp in ["ALIVVIA", "JCA"]:
-                                res_emp = st.session_state.get("resultado_compra", {}).get(emp)
+                            for emp_cmp in ["ALIVVIA", "JCA"]:
+                                res_emp = st.session_state.get("resultado_compra", {}).get(emp_cmp)
                                 if not res_emp:
-                                    rows.append({
-                                        "Empresa": emp, "SKU": alvo,
-                                        "Compra_Sugerida": None, "Preco": None, "Valor_Compra_R$": None,
-                                        "Obs": "Gere a compra para esta empresa"
-                                    })
+                                    rows.append({"Empresa": emp_cmp, "SKU": alvo, "Compra_Sugerida": None, "Preco": None, "Valor_Compra_R$": None, "Obs": "Gere a compra para esta empresa"})
                                     continue
                                 df_emp = res_emp["df"]
                                 r = df_emp[df_emp["SKU"] == alvo]
                                 if r.empty:
-                                    rows.append({
-                                        "Empresa": emp, "SKU": alvo,
-                                        "Compra_Sugerida": 0, "Preco": None, "Valor_Compra_R$": None,
-                                        "Obs": "SKU não encontrado no resultado"
-                                    })
+                                    rows.append({"Empresa": emp_cmp, "SKU": alvo, "Compra_Sugerida": 0, "Preco": None, "Valor_Compra_R$": None, "Obs": "SKU não encontrado no resultado"})
                                 else:
                                     r0 = r.iloc[0]
                                     rows.append({
-                                        "Empresa": emp,
+                                        "Empresa": emp_cmp,
                                         "SKU": r0["SKU"],
                                         "Compra_Sugerida": int(r0.get("Compra_Sugerida", 0)),
                                         "Preco": float(r0.get("Preco", 0.0)),
@@ -1154,48 +1268,14 @@ with tab2:
                                 data=cmp_df.to_csv(index=False).encode("utf-8"),
                                 file_name=f"Comparacao_ALIVVIA_JCA_{alvo}.csv",
                                 mime="text/csv",
-                                key="dl_cmp_duas_contas"
+                                key=f"dl_cmp_duas_contas_{empresa}"
                             )
                     except Exception as e:
                         st.error(f"Falha na comparação: {e}")
-
-            # --------- Enviar para OC (filtrado ou tudo) ---------
-            def _preparar_df_compra(base: pd.DataFrame) -> pd.DataFrame:
-                # Garante colunas mínimas: SKU, Descricao, Qtd, PrecoUnit (+Fornecedor se existir)
-                df = base.copy()
-                df["Descricao"] = df["SKU"]  # por enquanto, usa o próprio SKU como descrição
-                df["Qtd"] = pd.to_numeric(df.get("Compra_Sugerida", 0), errors="coerce").fillna(0).astype(float)
-                df["PrecoUnit"] = pd.to_numeric(df.get("Preco", 0.0), errors="coerce").fillna(0.0).astype(float)
-                keep = ["SKU", "Descricao", "Qtd", "PrecoUnit"]
-                if "fornecedor" in df.columns:
-                    keep.append("fornecedor")
-                df = df[keep].copy()
-                df = df[df["Qtd"] > 0].reset_index(drop=True)
-                df["SKU"] = df["SKU"].astype(str).str.strip().str.upper()
-                df["Descricao"] = df["Descricao"].astype(str).str.strip()
-                return df
-
-            col_send1, col_send2 = st.columns([1,1])
-            with col_send1:
-                if st.button("➡️ Enviar ITENS FILTRADOS para a Ordem de Compra", use_container_width=True, key=f"oc_send_filtrado_{empresa}"):
-                    df_export = _preparar_df_compra(df_view)
-                    if df_export.empty:
-                        st.warning("Nada para enviar: ajuste os filtros ou gere a compra novamente.")
-                    else:
-                        st.session_state["df_compra"] = df_export
-                        st.success(f"{len(df_export)} itens enviados para a página 🧾 Ordem de Compra.")
-
-            with col_send2:
-                if st.button("➡️ Enviar TODA a compra (sem filtro) para a Ordem de Compra", use_container_width=True, key=f"oc_send_tudo_{empresa}"):
-                    df_export = _preparar_df_compra(df_final)
-                    if df_export.empty:
-                        st.warning("Nada para enviar: gere a compra novamente.")
-                    else:
-                        st.session_state["df_compra"] = df_export
-                        st.success(f"{len(df_export)} itens enviados para a página 🧾 Ordem de Compra.")
-
         else:
             st.info("Clique Gerar Compra para calcular e então aplicar filtros.")
+# ================== TAB 3: Alocação de Compra ==================
+
 
 # ================== TAB 3: Alocação de Compra ==================
 with tab3:
