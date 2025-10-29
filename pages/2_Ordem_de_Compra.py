@@ -14,18 +14,10 @@ st.caption("Passo 1 — criar e gravar OC (JSON + XLSX) sem download automático
 BASE_OC_DIR = "ordens_compra"
 LOGO_DIR = "assets/logos"
 
-# Paleta por empresa (ALIVVIA / JCA) — logos e cores padronizados
+# Paleta por empresa (ALIVVIA / JCA)
 PALETAS = {
-    "ALIVVIA": {
-        "prim": "#195A64",
-        "sec":  "#BBE64E",
-        "logo": os.path.join(LOGO_DIR, "alivvia_logo.png"),
-    },
-    "JCA": {
-        "prim": "#6E3CBC",    # roxo padrão JCA
-        "sec":  "#B497E6",    # apoio claro
-        "logo": os.path.join(LOGO_DIR, "jca_logo.png"),
-    },
+    "ALIVVIA": {"prim": "#195A64", "sec": "#BBE64E", "logo": os.path.join(LOGO_DIR, "alivvia.png")},
+    "JCA":     {"prim": "#6B3FA0", "sec": "#B695E8", "logo": os.path.join(LOGO_DIR, "jca.png")},
 }
 
 # -------------------------
@@ -103,7 +95,6 @@ def gerar_xlsx_oc(empresa: str, numero: str, cab: dict, itens_df: pd.DataFrame) 
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as w:
-        # criar worksheet manualmente (layout controlado)
         ws = w.book.add_worksheet("Ordem de Compra")
         w.sheets["Ordem de Compra"] = ws
 
@@ -116,7 +107,7 @@ def gerar_xlsx_oc(empresa: str, numero: str, cab: dict, itens_df: pd.DataFrame) 
         fmt_lbl   = w.book.add_format({"italic": True, "align": "right"})
         fmt_val   = w.book.add_format({"bold": True})
 
-        # Larguras / Header
+        # Larguras
         ws.set_column(0, 0, 16)  # SKU
         ws.set_column(1, 1, 42)  # Descrição
         ws.set_column(2, 4, 14)  # Qtd, Unit, Subtotal
@@ -230,12 +221,12 @@ if submitted:
         cab = {
             "numero_oc": num,
             "empresa": empresa,
-            "fornecedor": (fornecedor or "").strip(),
+            "fornecedor": fornecedor.strip(),
             "data_emissao": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "com_nf": bool(com_nf),
             "frete": float(frete or 0.0),
             "criado_por": (criado_por or "").strip(),
-            "observacoes": (obs or "").strip(),
+            "observacoes": obs.strip(),
             "status": "ABERTA",
         }
 
@@ -259,13 +250,13 @@ if submitted:
         nova = pd.DataFrame([{
             "numero_oc": num,
             "empresa": empresa,
-            "fornecedor": cab["fornecedor"],
+            "fornecedor": fornecedor.strip(),
             "data_emissao": cab["data_emissao"],
             "itens": str(len(itens)),
             "total": f"{total_itens + frete_v:.2f}",
             "frete": f"{frete_v:.2f}",
-            "status": cab["status"],
-            "com_nf": "Sim" if cab["com_nf"] else "Não",
+            "status": "ABERTA",
+            "com_nf": "Sim" if com_nf else "Não",
             "caminho_json": json_path,
             "caminho_xlsx": xlsx_path,
             "ultima_atualizacao": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -278,7 +269,7 @@ if submitted:
         st.success(f"OC gravada: {num}")
         st.caption(f"Arquivos salvos: {json_path} e {xlsx_path}")
 
-        # Botões opcionais (download manual — não é obrigatório)
+        # Botões opcionais (download manual)
         colD, colE = st.columns([1,1])
         with colD:
             st.download_button("⬇️ Baixar XLSX", data=xlsx_bytes, file_name=f"{num}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

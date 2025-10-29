@@ -900,6 +900,7 @@ with st.sidebar:
 # ================== Título ==================
 st.title("Reposição Logística — Alivvia")
 st.caption(f"Versão: {VERSION}")
+st.markdown(f"<div style='text-align:right;color:#999'>Versão {APP_VERSION}</div>", unsafe_allow_html=True)
 
 if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
     st.warning("► Carregue o Padrão (KITS/CAT) no sidebar antes de usar as abas.")
@@ -1048,6 +1049,54 @@ with tab2:
                 height=500,
                 hide_index=True,
             )
+# =========================
+# [OC-HOOK] Enviar itens p/ página "🧾 Ordem de Compra"
+# Explicação simples:
+# - Botão 1: envia SÓ o que está visível nos filtros (df_view)
+# - Botão 2: envia TUDO calculado (df_final)
+# A página 2_Ordem_de_Compra.py vai pré-carregar isso automaticamente.
+# =========================
+
+def _preparar_df_compra(base: pd.DataFrame) -> pd.DataFrame:
+    # Garante colunas mínimas: SKU, Descricao, Qtd, PrecoUnit (+Fornecedor se existir)
+    df = base.copy()
+    # Fonte: sua tabela tem "SKU", "Compra_Sugerida", "Preco" e "fornecedor"
+    # "Descricao": se você tiver coluna de descrição depois, trocamos aqui.
+    df["Descricao"] = df["SKU"]  # por enquanto, usa o próprio SKU como descrição
+    df["Qtd"] = pd.to_numeric(df.get("Compra_Sugerida", 0), errors="coerce").fillna(0).astype(float)
+    df["PrecoUnit"] = pd.to_numeric(df.get("Preco", 0.0), errors="coerce").fillna(0.0).astype(float)
+
+    keep = ["SKU", "Descricao", "Qtd", "PrecoUnit"]
+    if "fornecedor" in df.columns:
+        keep.append("fornecedor")  # opcional: ajuda a pré-selecionar fornecedor na OC
+    df = df[keep].copy()
+
+    # Só itens que realmente têm quantidade pra comprar
+    df = df[df["Qtd"] > 0].reset_index(drop=True)
+    # Normaliza
+    df["SKU"] = df["SKU"].astype(str).str.strip().str.upper()
+    df["Descricao"] = df["Descricao"].astype(str).str.strip()
+    return df
+
+col_send1, col_send2 = st.columns([1,1])
+with col_send1:
+    if st.button("➡️ Enviar ITENS FILTRADOS para a Ordem de Compra", use_container_width=True, key=f"oc_send_filtrado_{empresa}"):
+        df_export = _preparar_df_compra(df_view)
+        if df_export.empty:
+            st.warning("Nada para enviar: ajuste os filtros ou gere a compra novamente.")
+        else:
+            st.session_state["df_compra"] = df_export
+            st.success(f"{len(df_export)} itens enviados para a página 🧾 Ordem de Compra.")
+
+with col_send2:
+    if st.button("➡️ Enviar TODA a compra (sem filtro) para a Ordem de Compra", use_container_width=True, key=f"oc_send_tudo_{empresa}"):
+        df_export = _preparar_df_compra(df_final)
+        if df_export.empty:
+            st.warning("Nada para enviar: gere a compra novamente.")
+        else:
+            st.session_state["df_compra"] = df_export
+            st.success(f"{len(df_export)} itens enviados para a página 🧾 Ordem de Compra.")
+
 
             colx1, colx2 = st.columns([1, 1])
             with colx1:
