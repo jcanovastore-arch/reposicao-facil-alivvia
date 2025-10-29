@@ -12,6 +12,13 @@ import datetime as dt
 from dataclasses import dataclass
 from typing import Optional, Tuple
 from orion.ui.components import bloco_filtros_e_selecao, preparar_df_para_oc
+from orion.integracoes.tiny_v3 import (
+    tiny_get_bearer,
+    tiny_refresh_from_secrets,
+    tiny_resolve_variacao_por_sku,
+    tiny_get_estoque_geral,
+)
+from orion.dominio.padrao import Catalogo, carregar_padrao_do_xlsx, _carregar_padrao_de_content
 
 
 
@@ -138,6 +145,17 @@ def _node_get_id(node) -> Optional[int]:
                     pass
     return None
 
+def br_to_float(x):
+    if pd.isna(x):
+        return np.nan
+    if isinstance(x, (int, float, np.integer, np.floating)):
+        return float(x)
+    s = str(x).strip()
+    s = s.replace("\u00a0", " ").replace("R$", "").replace(" ", "").replace(".", "").replace(",", ".")
+    try:
+        return float(s)
+    except:
+        return np.nan
 
 def _search_price_in_node(node) -> Optional[float]:
     if not isinstance(node, dict):
