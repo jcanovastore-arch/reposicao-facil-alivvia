@@ -1160,5 +1160,3 @@ with tab3:
 st.caption(f"Â© Alivvia â€” {VERSION}")
 
 
-
-
