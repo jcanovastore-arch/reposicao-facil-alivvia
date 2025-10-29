@@ -20,6 +20,11 @@ from requests.adapters import HTTPAdapter, Retry
 from unidecode import unidecode
 
 # =========================
+#  Versão do App
+# =========================
+VERSION = "v3.3.3"
+
+# =========================
 #  TINY v3 — Helpers
 # =========================
 _TINY_V3_BASE = "https://erp.tiny.com.br/public-api/v3"
@@ -58,7 +63,6 @@ def _tiny_v3_load_access_token(emp: str) -> str | None:
         except Exception:
             pass
     return tok
-
 
 def _tiny_v3_refresh_from_secrets(emp: str) -> str:
     sec_key = f"TINY_{emp.upper()}"
@@ -102,6 +106,7 @@ def _tiny_v3_req(token: str, method: str, path: str, params=None):
             time.sleep(1.2 * (attempt + 1))
             continue
         if r.status_code == 401:
+            # não tentamos refresh aqui (feito no caller quando necessário)
             raise RuntimeError("401 Unauthorized (access_token inválido/expirado).")
         if not r.ok:
             raise RuntimeError(f"HTTP {r.status_code} em {path}: {r.text[:300]}")
@@ -111,7 +116,7 @@ def _tiny_v3_req(token: str, method: str, path: str, params=None):
             raise RuntimeError(f"Resposta não-JSON em {path}: {r.text[:300]}")
     raise RuntimeError(f"Falha repetida em {path}")
 
-# ----------- (NOVO) utilitários p/ achar Variação + Preço -----------
+# ----------- Utilitários p/ achar Variação + Preço -----------
 def _node_get_code(node) -> Optional[str]:
     if isinstance(node, dict):
         for k in ('codigo','sku','codigo_sku','codigo_item','codigo_interno'):
@@ -130,6 +135,18 @@ def _node_get_id(node) -> Optional[int]:
                 except:
                     pass
     return None
+
+def br_to_float(x):
+    if pd.isna(x):
+        return np.nan
+    if isinstance(x, (int, float, np.integer, np.floating)):
+        return float(x)
+    s = str(x).strip()
+    s = s.replace("\u00a0", " ").replace("R$", "").replace(" ", "").replace(".", "").replace(",", ".")
+    try:
+        return float(s)
+    except:
+        return np.nan
 
 def _search_price_in_node(node) -> Optional[float]:
     """
@@ -153,7 +170,7 @@ def _search_price_in_node(node) -> Optional[float]:
         for k in priorities:
             if k in space and space[k] not in (None, "", []):
                 try:
-                    return br_to_float(space[k])  # definido abaixo
+                    return br_to_float(space[k])
                 except Exception:
                     pass
     return None
@@ -218,6 +235,11 @@ def _tiny_v3_resolve_variacao_por_sku(token: str, sku: str) -> Tuple[Optional[in
 
     return pai_id, None, None, None
 
+def _is_considerado_deposito(d) -> bool:
+    v = d.get("desconsiderar")
+    # Considera considerado se NÃO for "S/True/1"
+    return str(v).strip().upper() not in {"S", "TRUE", "1"}
+
 def _tiny_v3_get_estoque_geral(token: str, produto_ou_variacao_id: int) -> dict | None:
     """
     Busca no depósito 'Geral' (preferencial) para o ID informado (variação).
@@ -233,8 +255,8 @@ def _tiny_v3_get_estoque_geral(token: str, produto_ou_variacao_id: int) -> dict 
             pref = d
             break
     if not pref and depositos:
-        # pega primeiro com desconsiderar == False, senão o primeiro
-        pref = next((d for d in depositos if d.get("desconsiderar") is False), depositos[0])
+        # pega primeiro com desconsiderar == False/"N", senão o primeiro
+        pref = next((d for d in depositos if _is_considerado_deposito(d)), depositos[0])
 
     if not pref:
         return None
@@ -304,6 +326,7 @@ def sincronizar_estoque_tiny(emp: str, skus: list[str]) -> pd.DataFrame:
     """
     Retorna DF no FORMATO DA PLANILHA FÍSICA: SKU, Estoque_Fisico, Preco (+ status p/ debug).
     Agora resolve a VARIAÇÃO pelo SKU e traz o custo/preço da variação.
+    Faz refresh automático do token se pegar 401 durante a execução.
     """
     token = _tiny_v3_get_bearer(emp)
     linhas = []
@@ -312,13 +335,29 @@ def sincronizar_estoque_tiny(emp: str, skus: list[str]) -> pd.DataFrame:
     for i, sku in enumerate(skus, start=1):
         skuU = (sku or "").strip().upper()
         try:
-            pai_id, var_id, ean, preco = _tiny_v3_resolve_variacao_por_sku(token, skuU)
+            try:
+                pai_id, var_id, ean, preco = _tiny_v3_resolve_variacao_por_sku(token, skuU)
+            except RuntimeError as e:
+                if "401" in str(e):
+                    # refresh e tenta de novo
+                    token = _tiny_v3_refresh_from_secrets(emp)
+                    pai_id, var_id, ean, preco = _tiny_v3_resolve_variacao_por_sku(token, skuU)
+                else:
+                    raise
+
             if not pai_id:
                 linhas.append({"SKU": skuU, "Estoque_Fisico": 0, "Preco": 0.0, "status": "SKU não encontrado"})
             elif not var_id:
-                linhas.append({"SKU": skuU, "Estoque_Fisico": 0, "Preco": float(preco or 0.0), "status": f"SKU do PAI (sem variação)"})
+                linhas.append({"SKU": skuU, "Estoque_Fisico": 0, "Preco": float(preco or 0.0), "status": "SKU do PAI (sem variação)"})
             else:
-                est = _tiny_v3_get_estoque_geral(token, var_id)
+                try:
+                    est = _tiny_v3_get_estoque_geral(token, var_id)
+                except RuntimeError as e:
+                    if "401" in str(e):
+                        token = _tiny_v3_refresh_from_secrets(emp)
+                        est = _tiny_v3_get_estoque_geral(token, var_id)
+                    else:
+                        raise
                 dispo = int(est["disponivel"]) if est else 0
                 # se não veio preço no nó da variação, tenta pegar via produtos/{var_id}
                 if preco is None:
@@ -343,7 +382,6 @@ def sincronizar_estoque_tiny(emp: str, skus: list[str]) -> pd.DataFrame:
 # =========================
 #  App base
 # =========================
-VERSION = "v3.3.2"
 
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
@@ -354,7 +392,7 @@ DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"
 
 def _requests_session() -> requests.Session:
     s = requests.Session()
-    retries = Retry(total=3, backoff_factor=0.6, status_forcelist=[429, 500, 502, 503, 504], allowed_methods=["GET"])
+    retries = Retry(total=3, backoff_factor=0.6, status_forcelist=[429, 500, 502, 503, 504], allowed_methods=frozenset(["GET"]))
     s.mount("https://", HTTPAdapter(max_retries=retries))
     s.headers.update({"User-Agent": "Mozilla/5.0"})
     return s
@@ -400,18 +438,6 @@ def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [norm_header(c) for c in df.columns]
     return df
-
-def br_to_float(x):
-    if pd.isna(x):
-        return np.nan
-    if isinstance(x, (int, float, np.integer, np.floating)):
-        return float(x)
-    s = str(x).strip()
-    s = s.replace("\u00a0", " ").replace("R$", "").replace(" ", "").replace(".", "").replace(",", ".")
-    try:
-        return float(s)
-    except:
-        return np.nan
 
 def norm_sku(x: str) -> str:
     if pd.isna(x):
@@ -870,11 +896,10 @@ with st.sidebar:
                 st.dataframe(df_tiny, use_container_width=True, height=380)
                 st.caption("Obs.: Agora o preço vem do Tiny (custo médio quando houver). O arquivo de estoque do sistema foi atualizado.")
 
-                # >>>>>>>>>>>>>> SUBSTITUI A PLANILHA MANUAL (mesmo formato) <<<<<<<<<<<<<<
+                # Substitui a planilha manual (mesmo formato)
                 csv_bytes = df_tiny[["SKU","Estoque_Fisico","Preco"]].to_csv(index=False).encode("utf-8")
                 _store_put(emp_sel, "ESTOQUE", "Estoque_Tiny.csv", csv_bytes)
                 st.session_state[emp_sel]["ESTOQUE"] = {"name": "Estoque_Tiny.csv", "bytes": csv_bytes}
-                # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
         except Exception as e:
             st.error(f"Falha ao sincronizar Tiny: {e}")
 
@@ -900,7 +925,7 @@ with st.sidebar:
 # ================== Título ==================
 st.title("Reposição Logística — Alivvia")
 st.caption(f"Versão: {VERSION}")
-st.markdown(f"<div style='text-align:right;color:#999'>Versão {APP_VERSION}</div>", unsafe_allow_html=True)
+st.markdown(f"<div style='text-align:right;color:#999'>Versão {VERSION}</div>", unsafe_allow_html=True)
 
 if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
     st.warning("► Carregue o Padrão (KITS/CAT) no sidebar antes de usar as abas.")
@@ -1034,6 +1059,10 @@ with tab2:
             if sel_skus:
                 df_view = df_view[df_view["SKU"].isin(sel_skus)]
 
+            # salva a view filtrada para a página de OC também
+            st.session_state.setdefault("resultado_compra", {}).setdefault(empresa, {})
+            st.session_state["resultado_compra"][empresa]["view"] = df_view.copy()
+
             cols_show = [
                 "fornecedor", "SKU",
                 "Vendas_h_Shopee", "Vendas_h_ML",
@@ -1049,74 +1078,33 @@ with tab2:
                 height=500,
                 hide_index=True,
             )
-# =========================
-# [OC-HOOK] Enviar itens p/ página "🧾 Ordem de Compra"
-# Explicação simples:
-# - Botão 1: envia SÓ o que está visível nos filtros (df_view)
-# - Botão 2: envia TUDO calculado (df_final)
-# A página 2_Ordem_de_Compra.py vai pré-carregar isso automaticamente.
-# =========================
 
-def _preparar_df_compra(base: pd.DataFrame) -> pd.DataFrame:
-    # Garante colunas mínimas: SKU, Descricao, Qtd, PrecoUnit (+Fornecedor se existir)
-    df = base.copy()
-    # Fonte: sua tabela tem "SKU", "Compra_Sugerida", "Preco" e "fornecedor"
-    # "Descricao": se você tiver coluna de descrição depois, trocamos aqui.
-    df["Descricao"] = df["SKU"]  # por enquanto, usa o próprio SKU como descrição
-    df["Qtd"] = pd.to_numeric(df.get("Compra_Sugerida", 0), errors="coerce").fillna(0).astype(float)
-    df["PrecoUnit"] = pd.to_numeric(df.get("Preco", 0.0), errors="coerce").fillna(0.0).astype(float)
-
-    keep = ["SKU", "Descricao", "Qtd", "PrecoUnit"]
-    if "fornecedor" in df.columns:
-        keep.append("fornecedor")  # opcional: ajuda a pré-selecionar fornecedor na OC
-    df = df[keep].copy()
-
-    # Só itens que realmente têm quantidade pra comprar
-    df = df[df["Qtd"] > 0].reset_index(drop=True)
-    # Normaliza
-    df["SKU"] = df["SKU"].astype(str).str.strip().str.upper()
-    df["Descricao"] = df["Descricao"].astype(str).str.strip()
-    return df
-
-col_send1, col_send2 = st.columns([1,1])
-with col_send1:
-    if st.button("➡️ Enviar ITENS FILTRADOS para a Ordem de Compra", use_container_width=True, key=f"oc_send_filtrado_{empresa}"):
-        df_export = _preparar_df_compra(df_view)
-        if df_export.empty:
-            st.warning("Nada para enviar: ajuste os filtros ou gere a compra novamente.")
-        else:
-            st.session_state["df_compra"] = df_export
-            st.success(f"{len(df_export)} itens enviados para a página 🧾 Ordem de Compra.")
-
-with col_send2:
-    if st.button("➡️ Enviar TODA a compra (sem filtro) para a Ordem de Compra", use_container_width=True, key=f"oc_send_tudo_{empresa}"):
-        df_export = _preparar_df_compra(df_final)
-        if df_export.empty:
-            st.warning("Nada para enviar: gere a compra novamente.")
-        else:
-            st.session_state["df_compra"] = df_export
-            st.success(f"{len(df_export)} itens enviados para a página 🧾 Ordem de Compra.")
-
-
+            # --------- Downloads sempre visíveis após cálculo ---------
             colx1, colx2 = st.columns([1, 1])
             with colx1:
-                xlsx = exportar_xlsx(df_final, h=h, params={"g": g, "LT": LT, "empresa": empresa})
-                st.download_button(
-                    "Baixar XLSX (completo)", data=xlsx,
-                    file_name=f"Compra_Sugerida_{empresa}_{h}d.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"d_all_{empresa}"
-                )
+                try:
+                    xlsx = exportar_xlsx(df_final, h=h, params={"g": g, "LT": LT, "empresa": empresa})
+                    st.download_button(
+                        "Baixar XLSX (completo)", data=xlsx,
+                        file_name=f"Compra_Sugerida_{empresa}_{h}d.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"d_all_{empresa}"
+                    )
+                except Exception as e:
+                    st.error(f"Falha ao gerar XLSX completo: {e}")
             with colx2:
-                xlsx_filtrado = exportar_xlsx(df_view, h=h, params={"g": g, "LT": LT, "empresa": empresa, "filtro": "on"})
-                st.download_button(
-                    "Baixar XLSX (filtrado)", data=xlsx_filtrado,
-                    file_name=f"Compra_Sugerida_{empresa}_{h}d_filtrado.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"d_fil_{empresa}"
-                )
+                try:
+                    xlsx_filtrado = exportar_xlsx(df_view, h=h, params={"g": g, "LT": LT, "empresa": empresa, "filtro": "on"})
+                    st.download_button(
+                        "Baixar XLSX (filtrado)", data=xlsx_filtrado,
+                        file_name=f"Compra_Sugerida_{empresa}_{h}d_filtrado.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"d_fil_{empresa}"
+                    )
+                except Exception as e:
+                    st.error(f"Falha ao gerar XLSX filtrado: {e}")
 
-            # -------- NOVO: Comparar ALIVVIA x JCA por SKU (sem alterar a lógica principal) --------
+            # --------- Comparar ALIVVIA x JCA por SKU ---------
             with st.expander("🔎 Buscar SKU e comparar compra sugerida nas duas contas", expanded=False):
                 sku_query = st.text_input(
                     "SKU exato do componente (não kit)",
@@ -1170,8 +1158,45 @@ with col_send2:
                             )
                     except Exception as e:
                         st.error(f"Falha na comparação: {e}")
+
+            # --------- Enviar para OC (filtrado ou tudo) ---------
+            def _preparar_df_compra(base: pd.DataFrame) -> pd.DataFrame:
+                # Garante colunas mínimas: SKU, Descricao, Qtd, PrecoUnit (+Fornecedor se existir)
+                df = base.copy()
+                df["Descricao"] = df["SKU"]  # por enquanto, usa o próprio SKU como descrição
+                df["Qtd"] = pd.to_numeric(df.get("Compra_Sugerida", 0), errors="coerce").fillna(0).astype(float)
+                df["PrecoUnit"] = pd.to_numeric(df.get("Preco", 0.0), errors="coerce").fillna(0.0).astype(float)
+                keep = ["SKU", "Descricao", "Qtd", "PrecoUnit"]
+                if "fornecedor" in df.columns:
+                    keep.append("fornecedor")
+                df = df[keep].copy()
+                df = df[df["Qtd"] > 0].reset_index(drop=True)
+                df["SKU"] = df["SKU"].astype(str).str.strip().str.upper()
+                df["Descricao"] = df["Descricao"].astype(str).str.strip()
+                return df
+
+            col_send1, col_send2 = st.columns([1,1])
+            with col_send1:
+                if st.button("➡️ Enviar ITENS FILTRADOS para a Ordem de Compra", use_container_width=True, key=f"oc_send_filtrado_{empresa}"):
+                    df_export = _preparar_df_compra(df_view)
+                    if df_export.empty:
+                        st.warning("Nada para enviar: ajuste os filtros ou gere a compra novamente.")
+                    else:
+                        st.session_state["df_compra"] = df_export
+                        st.success(f"{len(df_export)} itens enviados para a página 🧾 Ordem de Compra.")
+
+            with col_send2:
+                if st.button("➡️ Enviar TODA a compra (sem filtro) para a Ordem de Compra", use_container_width=True, key=f"oc_send_tudo_{empresa}"):
+                    df_export = _preparar_df_compra(df_final)
+                    if df_export.empty:
+                        st.warning("Nada para enviar: gere a compra novamente.")
+                    else:
+                        st.session_state["df_compra"] = df_export
+                        st.success(f"{len(df_export)} itens enviados para a página 🧾 Ordem de Compra.")
+
         else:
             st.info("Clique Gerar Compra para calcular e então aplicar filtros.")
+
 # ================== TAB 3: Alocação de Compra ==================
 with tab3:
     st.subheader("Distribuir quantidade entre empresas — proporcional às vendas (FULL + Shopee)")
@@ -1260,7 +1285,7 @@ with tab3:
                     mime="text/csv"
                 )
             except Exception as e:
-                st.error(str(e))
+                st.error(f"Falha na alocação: {e}")
 
 # ---------- Rodapé ----------
 st.caption(f"© Alivvia — {VERSION}")
