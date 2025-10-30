@@ -1,7 +1,7 @@
-# Reposicao Logistica — Alivvia
-# Abas: Dados das Empresas | Compra Automatica | Alocacao de Compra
-# Recursos: Google Sheets (padrao), Tiny v3 (estoque fisico), filtros e selecao persistente, comparador e alocacao proporcional
-# Versao: v3.5.0 (clean)
+# Reposição Logística — Alivvia
+# Mantém as abas: Dados das Empresas, Compra Automática, Alocação de Compra
+# Inclui: filtros inteligentes, seleção persistente p/ OC, Tiny v3, alocação proporcional 60d
+# ORION v3.4.0 — Catalogo/KITS movidos para orion/dominio/padrao.py e TAB2 corrigida
 
 import io
 import os
@@ -10,7 +10,7 @@ import json
 import time
 import hashlib
 import datetime as dt
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -19,31 +19,60 @@ import requests
 from requests.adapters import HTTPAdapter, Retry
 from unidecode import unidecode
 
-# =========================
-#  Configuracoes gerais
-# =========================
-VERSION = "v3.5.0"
-DEFAULT_SHEET_LINK = "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/edit"
-DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"
+# ORION: imports organizados
+from orion.ui.components import bloco_filtros_e_selecao, preparar_df_para_oc
+from orion.dominio.padrao import Catalogo, _carregar_padrao_de_content, carregar_padrao_do_xlsx
 
 # =========================
-#  Tiny v3
+#  Versão do App
+# =========================
+VERSION = "v3.4.4"
+# ===== DIAGN�STICO ORION =====
+try:
+    import os, sys, time, subprocess
+    import streamlit as st
+    _branch = ""
+    try:
+        _branch = subprocess.check_output(["git","rev-parse","--abbrev-ref","HEAD"], text=True).strip()
+    except Exception as _e:
+        _branch = f"n/a ({_e})"
+
+    st.sidebar.markdown("### ?? Diagn�stico de Execu��o")
+    st.sidebar.write({
+        "VERSION": VERSION,
+        "__file__": __file__,
+        "cwd": os.getcwd(),
+        "python": sys.executable,
+        "git_branch": _branch
+    })
+    try:
+        _mtime = time.ctime(os.path.getmtime(__file__))
+        st.sidebar.write({"file_mtime": _mtime})
+    except Exception as _:
+        pass
+    st.caption(f"?? BUILD {VERSION} � branch: {_branch}")
+except Exception as _e:
+    pass
+# ===== /DIAGN�STICO ORION =====
+
+# =========================
+#  TINY v3 — Helpers
 # =========================
 _TINY_V3_BASE = "https://erp.tiny.com.br/public-api/v3"
 
 def _tiny_v3_token_path(emp: str) -> str:
     os.makedirs("tokens", exist_ok=True)
-    return os.path.join("tokens", f"tiny_{emp.upper()}.json")
+    return os.path.join("tokens", f"tiny_{emp}.json")
 
-def _tiny_v3_save_access_token(emp: str, access_token: str, expires_in: Optional[int] = None):
+def _tiny_v3_save_access_token(emp: str, access_token: str, expires_in: int | None = None):
     data = {"access_token": access_token}
     if expires_in:
-        data["expires_in"] = int(expires_in)
+        data["expires_in"] = expires_in
         data["saved_at"] = int(time.time())
     with open(_tiny_v3_token_path(emp), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-def _tiny_v3_load_access_token(emp: str) -> Optional[str]:
+def _tiny_v3_load_access_token(emp: str) -> str | None:
     p = _tiny_v3_token_path(emp)
     if not os.path.exists(p):
         return None
@@ -52,6 +81,7 @@ def _tiny_v3_load_access_token(emp: str) -> Optional[str]:
             data = json.load(f)
     except Exception:
         return None
+
     tok = data.get("access_token")
     exp = data.get("expires_in")
     saved = data.get("saved_at")
@@ -59,7 +89,7 @@ def _tiny_v3_load_access_token(emp: str) -> Optional[str]:
         try:
             exp = int(exp); saved = int(saved)
             if time.time() >= saved + exp - 60:
-                return None
+                return None  # força refresh
         except Exception:
             pass
     return tok
@@ -68,7 +98,7 @@ def _tiny_v3_refresh_from_secrets(emp: str) -> str:
     sec_key = f"TINY_{emp.upper()}"
     if sec_key not in st.secrets:
         raise RuntimeError(
-            f"Secrets '{sec_key}' nao configurado. Em Settings > Secrets adicione:\n"
+            f"Secrets '{sec_key}' não configurado. Vá em Manage app → Settings → Secrets e adicione:\n"
             f"[{sec_key}]\nclient_id=\"...\"\nclient_secret=\"...\"\nrefresh_token=\"...\""
         )
     s = st.secrets[sec_key]
@@ -87,7 +117,7 @@ def _tiny_v3_refresh_from_secrets(emp: str) -> str:
     data = r.json()
     access_token = data.get("access_token")
     if not access_token:
-        raise RuntimeError("Tiny nao retornou access_token.")
+        raise RuntimeError("Tiny não retornou access_token.")
     _tiny_v3_save_access_token(emp, access_token, data.get("expires_in"))
     return access_token
 
@@ -106,16 +136,16 @@ def _tiny_v3_req(token: str, method: str, path: str, params=None):
             time.sleep(1.2 * (attempt + 1))
             continue
         if r.status_code == 401:
-            raise RuntimeError("401 Unauthorized (access_token invalido/expirado).")
+            raise RuntimeError("401 Unauthorized (access_token inválido/expirado).")
         if not r.ok:
             raise RuntimeError(f"HTTP {r.status_code} em {path}: {r.text[:300]}")
         try:
             return r.json()
         except Exception:
-            raise RuntimeError(f"Resposta nao-JSON em {path}: {r.text[:300]}")
+            raise RuntimeError(f"Resposta não-JSON em {path}: {r.text[:300]}")
     raise RuntimeError(f"Falha repetida em {path}")
 
-# ——— Utilitarios para SKU / preco ———
+# ----------- Utilitários p/ achar Variação + Preço -----------
 def _node_get_code(node) -> Optional[str]:
     if isinstance(node, dict):
         for k in ('codigo','sku','codigo_sku','codigo_item','codigo_interno'):
@@ -131,7 +161,7 @@ def _node_get_id(node) -> Optional[int]:
             if v not in (None, "", []):
                 try:
                     return int(v)
-                except Exception:
+                except:
                     pass
     return None
 
@@ -144,7 +174,7 @@ def br_to_float(x):
     s = s.replace("\u00a0", " ").replace("R$", "").replace(" ", "").replace(".", "").replace(",", ".")
     try:
         return float(s)
-    except Exception:
+    except:
         return np.nan
 
 def _search_price_in_node(node) -> Optional[float]:
@@ -176,7 +206,7 @@ def _scan_find_sku(node, skuU: str, result: dict):
         if code == skuU:
             if 'id' not in result or result['id'] is None:
                 result['id'] = _node_get_id(node)
-            if 'ean' not in result or not result.get('ean'):
+            if 'ean' not in result or not result['ean']:
                 e = node.get('ean') or node.get('gtin')
                 result['ean'] = str(e) if e not in (None,"") else ""
             result['price_node'] = node
@@ -249,22 +279,23 @@ def _tiny_v3_get_estoque_geral(token: str, produto_ou_variacao_id: int) -> dict 
     disponivel = int(pref.get("disponivel") or (saldo - reservado))
     return {"deposito_nome": pref.get("nome") or "", "saldo": saldo, "reservado": reservado, "disponivel": disponivel}
 
-def _carregar_skus_base(emp: str) -> List[str]:
-    # tenta do catalogo atual em memoria (se ja carregado)
+def _carregar_skus_base(emp: str) -> list[str]:
     try:
         dfc = st.session_state.get("catalogo_df")
-        if isinstance(dfc, pd.DataFrame) and not dfc.empty:
+        if dfc is not None and isinstance(dfc, pd.DataFrame) and not dfc.empty:
+            col = None
             for c in ("sku", "component_sku", "codigo", "codigo_sku"):
                 if c in dfc.columns:
-                    skus = (
-                        dfc[c].dropna().astype(str).str.strip().str.upper().unique().tolist()
-                    )
-                    if skus:
-                        return skus
+                    col = c; break
+            if col:
+                skus = (
+                    dfc[col].dropna().astype(str).str.strip().str.upper().unique().tolist()
+                )
+                if skus:
+                    return skus
     except Exception:
         pass
 
-    # senao tenta do disco .uploads
     base = os.path.join(".uploads", emp.upper())
     if os.path.isdir(base):
         for root, _, files in os.walk(base):
@@ -292,11 +323,11 @@ def _carregar_skus_base(emp: str) -> List[str]:
                     pass
     return []
 
-def sincronizar_estoque_tiny(emp: str, skus: List[str]) -> pd.DataFrame:
+def sincronizar_estoque_tiny(emp: str, skus: list[str]) -> pd.DataFrame:
     token = _tiny_v3_get_bearer(emp)
     linhas = []
     total = len(skus)
-    prog = st.progress(0, text=f"Sincronizando {total} SKUs no Tiny ({emp})...")
+    prog = st.progress(0, text=f"Sincronizando {total} SKUs no Tiny ({emp})…")
     for i, sku in enumerate(skus, start=1):
         skuU = (sku or "").strip().upper()
         try:
@@ -308,10 +339,11 @@ def sincronizar_estoque_tiny(emp: str, skus: List[str]) -> pd.DataFrame:
                     pai_id, var_id, ean, preco = _tiny_v3_resolve_variacao_por_sku(token, skuU)
                 else:
                     raise
+
             if not pai_id:
-                linhas.append({"SKU": skuU, "Estoque_Fisico": 0, "Preco": 0.0, "status": "SKU nao encontrado"})
+                linhas.append({"SKU": skuU, "Estoque_Fisico": 0, "Preco": 0.0, "status": "SKU não encontrado"})
             elif not var_id:
-                linhas.append({"SKU": skuU, "Estoque_Fisico": 0, "Preco": float(preco or 0.0), "status": "SKU do PAI (sem variacao)"})
+                linhas.append({"SKU": skuU, "Estoque_Fisico": 0, "Preco": float(preco or 0.0), "status": "SKU do PAI (sem variação)"})
             else:
                 try:
                     est = _tiny_v3_get_estoque_geral(token, var_id)
@@ -332,7 +364,7 @@ def sincronizar_estoque_tiny(emp: str, skus: List[str]) -> pd.DataFrame:
         except Exception as e:
             linhas.append({"SKU": skuU, "Estoque_Fisico": 0, "Preco": 0.0, "status": f"ERRO: {e}"})
         if total:
-            prog.progress(min(i/total, 1.0), text=f"Sincronizando {i}/{total}...")
+            prog.progress(min(i/total, 1.0), text=f"Sincronizando {i}/{total}…")
     prog.empty()
     cols = ["SKU","Estoque_Fisico","Preco","status"]
     df = pd.DataFrame(linhas)[cols]
@@ -341,8 +373,16 @@ def sincronizar_estoque_tiny(emp: str, skus: List[str]) -> pd.DataFrame:
     return df
 
 # =========================
-#  Utilitarios App
+#  App base
 # =========================
+
+st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
+
+DEFAULT_SHEET_LINK = (
+    "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/edit"
+)
+DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"
+
 def _requests_session() -> requests.Session:
     s = requests.Session()
     retries = Retry(total=3, backoff_factor=0.6, status_forcelist=[429, 500, 502, 503, 504], allowed_methods=frozenset(["GET"]))
@@ -352,6 +392,12 @@ def _requests_session() -> requests.Session:
 
 def gs_export_xlsx_url(sheet_id: str) -> str:
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+
+def extract_sheet_id_from_url(url: str) -> Optional[str]:
+    if not url:
+        return None
+    m = re.search(r"/d/([a-zA-Z0-9\-_]+)/", url)
+    return m.group(1) if m else None
 
 def baixar_xlsx_do_sheets(sheet_id: str) -> bytes:
     s = _requests_session()
@@ -378,7 +424,7 @@ def norm_sku(x: str) -> str:
         return ""
     return unidecode(str(x)).strip().upper()
 
-# Persistencia de uploads
+# ---------- Persistência de uploads ----------
 BASE_UPLOAD_DIR = ".uploads"
 
 def _disk_dir(emp: str, kind: str) -> str:
@@ -431,9 +477,22 @@ def _store_get(emp: str, kind: str):
         return it
     return None
 
-def badge_ok(label: str, filename: str) -> str:
-    return f"<span style='background:#198754; color:#fff; padding:6px 10px; border-radius:10px; font-size:12px;'>OK {label}: <b>{filename}</b></span>"
+def _store_clear(emp: str):
+    store = _file_store()
+    store[emp] = {"FULL": None, "VENDAS": None, "ESTOQUE": None}
+    p = os.path.join(BASE_UPLOAD_DIR, emp)
+    if os.path.isdir(p):
+        for root, _, files in os.walk(p):
+            for fn in files:
+                try:
+                    os.remove(os.path.join(root, fn))
+                except:
+                    pass
 
+def badge_ok(label: str, filename: str) -> str:
+    return f"<span style='background:#198754; color:#fff; padding:6px 10px; border-radius:10px; font-size:12px;'>✅ {label}: <b>{filename}</b></span>"
+
+# ---------- Estado ----------
 def _ensure_state():
     st.session_state.setdefault("catalogo_df", None)
     st.session_state.setdefault("kits_df", None)
@@ -450,9 +509,9 @@ def _ensure_state():
                 it = _store_get(emp, kind)
                 if it:
                     st.session_state[emp][kind] = it
-
 _ensure_state()
 
+# ---------- Leitura arquivos ----------
 def load_any_table_from_bytes(file_name: str, blob: bytes) -> pd.DataFrame:
     bio = io.BytesIO(blob)
     name = (file_name or "").lower()
@@ -462,7 +521,7 @@ def load_any_table_from_bytes(file_name: str, blob: bytes) -> pd.DataFrame:
         else:
             df = pd.read_excel(bio, dtype=str, keep_default_na=False)
     except Exception as e:
-        raise RuntimeError(f"Nao consegui ler '{file_name}': {e}")
+        raise RuntimeError(f"Não consegui ler '{file_name}': {e}")
     df.columns = [norm_header(c) for c in df.columns]
     if not any("sku" in c for c in df.columns):
         try:
@@ -480,6 +539,7 @@ def load_any_table_from_bytes(file_name: str, blob: bytes) -> pd.DataFrame:
         df = df[df[sku_col] != ""]
     return df.reset_index(drop=True)
 
+# ---------- Mapear tipos/colunas ----------
 def mapear_tipo(df: pd.DataFrame) -> str:
     cols = [c.lower() for c in df.columns]
     tem_sku = any("sku" in c for c in cols)
@@ -498,17 +558,22 @@ def mapear_tipo(df: pd.DataFrame) -> str:
     return "DESCONHECIDO"
 
 def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
-    df = df.copy()
     if tipo == "FULL":
-        if "sku" in df.columns: df["SKU"] = df["sku"].map(norm_sku)
-        elif "codigo" in df.columns: df["SKU"] = df["codigo"].map(norm_sku)
-        elif "codigo_sku" in df.columns: df["SKU"] = df["codigo_sku"].map(norm_sku)
-        else: raise RuntimeError("FULL invalido: precisa de SKU/codigo.")
+        if "sku" in df.columns:
+            df["SKU"] = df["sku"].map(norm_sku)
+        elif "codigo" in df.columns:
+            df["SKU"] = df["codigo"].map(norm_sku)
+        elif "codigo_sku" in df.columns:
+            df["SKU"] = df["codigo_sku"].map(norm_sku)
+        else:
+            raise RuntimeError("FULL inválido: precisa de SKU/codigo.")
         c_v = [c for c in df.columns if c in ["vendas_qtd_60d", "vendas_60d", "vendas 60d"] or c.startswith("vendas_60d")]
-        if not c_v: raise RuntimeError("FULL invalido: faltou Vendas_60d.")
+        if not c_v:
+            raise RuntimeError("FULL inválido: faltou Vendas_60d.")
         df["Vendas_Qtd_60d"] = pd.to_numeric(df[c_v[0]].map(br_to_float), errors="coerce").fillna(0).astype(int)
         c_e = [c for c in df.columns if c in ["estoque_full", "estoque_atual"] or ("estoque" in c and "full" in c)]
-        if not c_e: raise RuntimeError("FULL invalido: faltou Estoque_Full.")
+        if not c_e:
+            raise RuntimeError("FULL inválido: faltou Estoque_Full.")
         df["Estoque_Full"] = pd.to_numeric(df[c_e[0]].map(br_to_float), errors="coerce").fillna(0).astype(int)
         c_t = [c for c in df.columns if c in ["em_transito", "em transito", "em_transito_full"] or ("transito" in c)]
         df["Em_Transito"] = pd.to_numeric(df[c_t[0]].map(br_to_float), errors="coerce").fillna(0).astype(int) if c_t else 0
@@ -522,20 +587,24 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
         )
         if sku_series is None:
             cand = next((c for c in df.columns if "sku" in c.lower()), None)
-            if cand is None: raise RuntimeError("FISICO invalido: nao achei SKU.")
+            if cand is None:
+                raise RuntimeError("FÍSICO inválido: não achei SKU.")
             sku_series = df[cand]
         df["SKU"] = sku_series.map(norm_sku)
         c_q = [c for c in df.columns if c in ["estoque_atual", "qtd", "quantidade"] or ("estoque" in c)]
-        if not c_q: raise RuntimeError("FISICO invalido: faltou Estoque.")
+        if not c_q:
+            raise RuntimeError("FÍSICO inválido: faltou Estoque.")
         df["Estoque_Fisico"] = pd.to_numeric(df[c_q[0]].map(br_to_float), errors="coerce").fillna(0).astype(int)
         c_p = [c for c in df.columns if c in ["preco", "preco_compra", "custo", "custo_medio", "preco_medio", "preco_unitario"]]
-        if not c_p: raise RuntimeError("FISICO invalido: faltou Preco/Custo.")
+        if not c_p:
+            raise RuntimeError("FÍSICO inválido: faltou Preço/Custo.")
         df["Preco"] = pd.to_numeric(df[c_p[0]].map(br_to_float), errors="coerce").fillna(0.0)
         return df[["SKU", "Estoque_Fisico", "Preco"]].copy()
 
     if tipo == "VENDAS":
         sku_col = next((c for c in df.columns if "sku" in c.lower()), None)
-        if not sku_col: raise RuntimeError("VENDAS invalido: nao achei SKU.")
+        if not sku_col:
+            raise RuntimeError("VENDAS inválido: não achei SKU.")
         df["SKU"] = df[sku_col].map(norm_sku)
         cand_qty = []
         for c in df.columns:
@@ -547,7 +616,8 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
             if "order" in cl: score += 1
             if score > 0:
                 cand_qty.append((score, c))
-        if not cand_qty: raise RuntimeError("VENDAS invalido: nao achei Quantidade.")
+        if not cand_qty:
+            raise RuntimeError("VENDAS inválido: não achei Quantidade.")
         cand_qty.sort(reverse=True)
         qcol = cand_qty[0][1]
         df["Quantidade"] = pd.to_numeric(df[qcol].map(br_to_float), errors="coerce").fillna(0).astype(int)
@@ -555,7 +625,7 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
 
     raise RuntimeError("Tipo desconhecido.")
 
-# Explosao por KITS
+# ---------- Explosão por KITS ----------
 def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_col: str) -> pd.DataFrame:
     base = df.copy()
     base["kit_sku"] = base[sku_col].map(norm_sku)
@@ -568,13 +638,12 @@ def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_co
     out = out.rename(columns={"component_sku": "SKU", "quantidade_comp": "Quantidade"})
     return out
 
-# Calculo de compra
-def calcular(full_df, fisico_df, vendas_df, cat: Dict[str, pd.DataFrame], h=60, g=0.0, LT=0):
-    # cat = {"catalogo_simples": df, "kits_reais": df}
-    kits = cat["kits_reais"].copy()
+# ---------- Cálculo ----------
+def calcular(full_df, fisico_df, vendas_df, cat: "Catalogo", h=60, g=0.0, LT=0):
+    kits = cat.kits_reais.copy()
     existentes = set(kits["kit_sku"].unique())
     alias = []
-    for s in cat["catalogo_simples"]["component_sku"].unique().tolist():
+    for s in cat.catalogo_simples["component_sku"].unique().tolist():
         s = norm_sku(s)
         if s and s not in existentes:
             alias.append((s, s, 1))
@@ -601,7 +670,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Dict[str, pd.DataFrame], h=60, 
         kits, "kit_sku", "Qtd"
     ).rename(columns={"Quantidade": "Shopee_60d"})
 
-    cat_df = cat["catalogo_simples"][["component_sku", "fornecedor", "status_reposicao"]].rename(columns={"component_sku": "SKU"})
+    cat_df = cat.catalogo_simples[["component_sku", "fornecedor", "status_reposicao"]].rename(columns={"component_sku": "SKU"})
 
     demanda = cat_df.merge(ml_comp, on="SKU", how="left").merge(shopee_comp, on="SKU", how="left")
     demanda[["ML_60d", "Shopee_60d"]] = demanda[["ML_60d", "Shopee_60d"]].apply(pd.to_numeric, errors="coerce").fillna(0).clip(lower=0).astype(int)
@@ -636,6 +705,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Dict[str, pd.DataFrame], h=60, 
     base["Folga_Fisico"] = (base["Estoque_Fisico"] - base["Reserva_30d"]).clip(lower=0).astype(int)
 
     base["Compra_Sugerida"] = (base["Necessidade"] - base["Folga_Fisico"]).clip(lower=0).astype(int)
+
     mask_nao = base["status_reposicao"].str.lower().str.contains("nao_repor", na=False)
     base.loc[mask_nao, "Compra_Sugerida"] = 0
     base = base[~mask_nao]
@@ -666,6 +736,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Dict[str, pd.DataFrame], h=60, 
     painel = {"full_unid": full_unid, "full_valor": full_valor, "fisico_unid": fis_unid, "fisico_valor": fis_valor}
     return df_final, painel
 
+# ---------- Export XLSX ----------
 def sha256_of_csv(df: pd.DataFrame) -> str:
     csv_bytes = df.to_csv(index=False).encode("utf-8")
     return hashlib.sha256(csv_bytes).hexdigest()
@@ -675,20 +746,19 @@ def exportar_xlsx(df_final: pd.DataFrame, h: int, params: dict) -> bytes:
         "Vendas_h_ML", "Vendas_h_Shopee", "Estoque_Fisico", "Compra_Sugerida",
         "Reserva_30d", "Folga_Fisico", "Necessidade", "ML_60d", "Shopee_60d", "TOTAL_60d"
     ]
-    df = df_final.copy()
     for c in int_cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).clip(lower=0).astype(int)
-    df["Valor_Compra_R$"] = (df["Compra_Sugerida"].astype(float) * df["Preco"].astype(float)).round(2)
+        if c in df_final.columns:
+            df_final[c] = pd.to_numeric(df_final[c], errors="coerce").fillna(0).clip(lower=0).astype(int)
+    df_final["Valor_Compra_R$"] = (df_final["Compra_Sugerida"].astype(float) * df_final["Preco"].astype(float)).round(2)
 
-    calc = (df["Compra_Sugerida"] * df["Preco"]).round(2).values
-    if not np.allclose(df["Valor_Compra_R$"].values, calc):
-        raise RuntimeError("Auditoria: Valor_Compra_R$ != Compra_Sugerida x Preco")
+    calc = (df_final["Compra_Sugerida"] * df_final["Preco"]).round(2).values
+    if not np.allclose(df_final["Valor_Compra_R$"].values, calc):
+        raise RuntimeError("Auditoria: 'Valor_Compra_R$' != 'Compra_Sugerida x Preco'.")
 
-    hash_str = sha256_of_csv(df)
+    hash_str = sha256_of_csv(df_final)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as w:
-        lista = df[df["Compra_Sugerida"] > 0].copy()
+        lista = df_final[df_final["Compra_Sugerida"] > 0].copy()
         lista.to_excel(w, sheet_name="Lista_Final", index=False)
         ws = w.sheets["Lista_Final"]
         for i, col in enumerate(lista.columns):
@@ -700,107 +770,32 @@ def exportar_xlsx(df_final: pd.DataFrame, h: int, params: dict) -> bytes:
         ctrl = pd.DataFrame([{
             "data_hora": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "h": h,
-            "linhas_Lista_Final": int((df["Compra_Sugerida"] > 0).sum()),
-            "soma_Compra_Sugerida": int(df["Compra_Sugerida"].sum()),
-            "soma_Valor_Compra_R$": float(df["Valor_Compra_R$"].sum()),
+            "linhas_Lista_Final": int((df_final["Compra_Sugerida"] > 0).sum()),
+            "soma_Compra_Sugerida": int(df_final["Compra_Sugerida"].sum()),
+            "soma_Valor_Compra_R$": float(df_final["Valor_Compra_R$"].sum()),
             "hash_sha256": hash_str,
         } | params])
         ctrl.to_excel(w, sheet_name="Controle", index=False)
     output.seek(0)
     return output.read()
 
-# =========================
-#  UI helpers locais (sem orion)
-# =========================
-def bloco_filtros_e_selecao(df: pd.DataFrame, empresa: str, state_key_prefix: str = "oc"):
-    # Filtros basicos
-    st.markdown("**Filtros**")
-    colf1, colf2, colf3 = st.columns([2,2,1])
-    with colf1:
-        f_sku = st.text_input("SKU contém", key=f"{state_key_prefix}_sku_{empresa}", placeholder="ex.: LUVA, MINI, etc.")
-    with colf2:
-        f_forn = st.text_input("Fornecedor contém", key=f"{state_key_prefix}_forn_{empresa}", placeholder="ex.: HIDROLIGHT")
-    with colf3:
-        min_qtd = st.number_input("Compra Sugerida >= ", min_value=0, value=0, step=1, key=f"{state_key_prefix}_min_{empresa}")
-
-    view = df.copy()
-    if f_sku:
-        view = view[view["SKU"].astype(str).str.upper().str.contains(f_sku.strip().upper(), na=False)]
-    if f_forn:
-        if "fornecedor" in view.columns:
-            view = view[view["fornecedor"].astype(str).str.upper().str.contains(f_forn.strip().upper(), na=False)]
-    if min_qtd > 0:
-        view = view[pd.to_numeric(view["Compra_Sugerida"], errors="coerce").fillna(0).astype(int) >= int(min_qtd)]
-
-    # Selecao persistente
-    sel_key = f"oc_sel_set_{empresa}"
-    if sel_key not in st.session_state:
-        st.session_state[sel_key] = set()
-    sel_set = st.session_state[sel_key]
-
-    st.markdown("---")
-    st.markdown("**Selecao**")
-    csel1, csel2, csel3, csel4 = st.columns([1,1,1,1])
-    with csel1:
-        if st.button("Selecionar tudo (filtrado)", key=f"{state_key_prefix}_sel_all_{empresa}"):
-            for sku in view["SKU"].dropna().astype(str).tolist():
-                sel_set.add(sku)
-    with csel2:
-        if st.button("Limpar selecao (todos)", key=f"{state_key_prefix}_clear_{empresa}"):
-            sel_set.clear()
-    with csel3:
-        if st.button("Selecionar apenas Compra>0", key=f"{state_key_prefix}_sel_pos_{empresa}"):
-            for sku in view.loc[view["Compra_Sugerida"].astype(float) > 0, "SKU"].astype(str).tolist():
-                sel_set.add(sku)
-    with csel4:
-        if st.button("Remover Compra=0", key=f"{state_key_prefix}_rm_zero_{empresa}"):
-            for sku in view.loc[view["Compra_Sugerida"].astype(float) == 0, "SKU"].astype(str).tolist():
-                if sku in sel_set:
-                    sel_set.remove(sku)
-
-    st.caption(f"Selecionados ({len(sel_set)}): " + (", ".join(list(sel_set)[:10]) + ("..." if len(sel_set) > 10 else "")))
-
-    st.dataframe(view, use_container_width=True)
-    return view, sel_set
-
-def preparar_df_para_oc(df: pd.DataFrame) -> pd.DataFrame:
-    base = df.copy()
-    if "Descricao" not in base.columns:
-        base["Descricao"] = base["SKU"]
-    base["Qtd"] = pd.to_numeric(base.get("Compra_Sugerida", 0), errors="coerce").fillna(0).astype(float)
-    base["PrecoUnit"] = pd.to_numeric(base.get("Preco", 0.0), errors="coerce").fillna(0.0).astype(float)
-    keep = ["SKU", "Descricao", "Qtd", "PrecoUnit"]
-    if "fornecedor" in base.columns:
-        keep.append("fornecedor")
-    base = base[keep].copy()
-    base = base[base["Qtd"] > 0]
-    base["SKU"] = base["SKU"].astype(str).str.strip().str.upper()
-    base["Descricao"] = base["Descricao"].astype(str).str.strip()
-    return base.reset_index(drop=True)
-
-# =========================
-#  APP
-# =========================
-st.set_page_config(page_title="Reposicao Logistica — Alivvia", layout="wide")
-st.title("Reposicao Logistica — Alivvia")
-st.caption(f"Versao: {VERSION}")
-st.markdown(f"<div style='text-align:right;color:#999'>Versao {VERSION}</div>", unsafe_allow_html=True)
-
-# Sidebar parametros
+# ================== Sidebar ==================
 with st.sidebar:
-    st.subheader("Parametros")
+    st.subheader("Parâmetros")
     h = st.selectbox("Horizonte (dias)", [30, 60, 90], index=1)
-    g = st.number_input("Crescimento % ao mes", value=0.0, step=1.0)
+    g = st.number_input("Crescimento % ao mês", value=0.0, step=1.0)
     LT = st.number_input("Lead time (dias)", value=0, step=1, min_value=0)
+
 with st.sidebar:
     st.markdown("---")
-    st.subheader("Estoque Fisico via Tiny v3")
+    st.subheader("Estoque Físico via Tiny v3")
     emp_sel = st.radio("Empresa", ["ALIVVIA", "JCA"], horizontal=True, key="emp_tiny_sel")
-    if st.button("Sincronizar Estoque (Tiny v3)", use_container_width=True, key="btn_sync_tiny"):
+
+    if st.button("🔄 Sincronizar Estoque (Tiny v3)", use_container_width=True, key="btn_sync_tiny"):
         try:
             skus = _carregar_skus_base(emp_sel)
             if not skus:
-                st.error(f"Nao achei SKUs. Carregue o Padrao (KITS/CAT) e/ou arquivos em .uploads/{emp_sel}/.")
+                st.error(f"Não achei SKUs. Carregue o Padrão (KITS/CAT) e/ou arquivos em .uploads/{emp_sel}/.")
             else:
                 df_tiny = sincronizar_estoque_tiny(emp_sel, skus)
                 st.session_state["estoque_tiny_por_emp"][emp_sel] = df_tiny
@@ -814,40 +809,17 @@ with st.sidebar:
             st.error(f"Falha ao sincronizar Tiny: {e}")
 
     st.markdown("---")
-    st.subheader("Padrao (KITS/CAT) — Google Sheets")
+    st.subheader("Padrão (KITS/CAT) — Google Sheets")
     colA, colB = st.columns([1, 1])
     with colA:
-        if st.button("Carregar padrao agora", use_container_width=True):
+        if st.button("Carregar padrão agora", use_container_width=True):
             try:
                 content = baixar_xlsx_do_sheets(DEFAULT_SHEET_ID)
-                # KITS/CAT esperados: sheets com colunas (exemplo)
-                # catalogo_simples: component_sku, fornecedor, status_reposicao
-                # kits_reais: kit_sku, component_sku, qty
-                xl = pd.ExcelFile(io.BytesIO(content))
-                # tentativas de nomes de abas:
-                poss_cat = [s for s in xl.sheet_names if "cat" in unidecode(s).lower() or "catalog" in unidecode(s).lower()]
-                poss_kits = [s for s in xl.sheet_names if "kit" in unidecode(s).lower()]
-                if not poss_cat or not poss_kits:
-                    raise RuntimeError("Planilha padrao sem abas esperadas (CAT e KITS).")
-                catalogo_df = pd.read_excel(xl, poss_cat[0], dtype=str, keep_default_na=False)
-                kits_df = pd.read_excel(xl, poss_kits[0], dtype=str, keep_default_na=False)
-                catalogo_df.columns = [norm_header(c) for c in catalogo_df.columns]
-                kits_df.columns = [norm_header(c) for c in kits_df.columns]
-                # normaliza colunas essenciais
-                for col in ("component_sku","fornecedor","status_reposicao"):
-                    if col not in catalogo_df.columns:
-                        catalogo_df[col] = ""
-                for col in ("kit_sku","component_sku","qty"):
-                    if col not in kits_df.columns:
-                        kits_df[col] = ""
-                catalogo_df["component_sku"] = catalogo_df["component_sku"].map(norm_sku)
-                kits_df["kit_sku"] = kits_df["kit_sku"].map(norm_sku)
-                kits_df["component_sku"] = kits_df["component_sku"].map(norm_sku)
-                kits_df["qty"] = pd.to_numeric(kits_df["qty"], errors="coerce").fillna(0).astype(int)
-                st.session_state.catalogo_df = catalogo_df.rename(columns={"component_sku":"sku"})  # para outras partes do app
-                st.session_state.kits_df = kits_df
+                cat = _carregar_padrao_de_content(content)
+                st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku": "sku"})
+                st.session_state.kits_df = cat.kits_reais
                 st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                st.success("Padrao carregado.")
+                st.success("Padrão carregado.")
             except Exception as e:
                 st.session_state.catalogo_df = None
                 st.session_state.kits_df = None
@@ -855,14 +827,19 @@ with st.sidebar:
     with colB:
         st.link_button("Abrir no Drive (editar)", DEFAULT_SHEET_LINK, use_container_width=True)
 
+# ================== Título ==================
+st.title("Reposição Logística — Alivvia")
+st.caption(f"Versão: {VERSION}")
+st.markdown(f"<div style='text-align:right;color:#999'>Versão {VERSION}</div>", unsafe_allow_html=True)
+
 if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
-    st.warning("Carregue o Padrao (KITS/CAT) no sidebar antes de usar as abas.")
+    st.warning("► Carregue o Padrão (KITS/CAT) no sidebar antes de usar as abas.")
 
-tab1, tab2, tab3 = st.tabs(["📊 Dados das Empresas", "🛒 Compra Automatica", "🔀 Alocacao de Compra"])
+tab1, tab2, tab3 = st.tabs(["📂 Dados das Empresas", "🧮 Compra Automática", "📦 Alocação de Compra"])
 
-# ================== TAB 1 ==================
+# ================== TAB 1: Dados ==================
 with tab1:
-    st.subheader("Uploads fixos por empresa (salvam no disco e permanecem apos F5)")
+    st.subheader("Uploads fixos por empresa (salvos; permanecem após F5)")
 
     def bloco_empresa(emp: str):
         st.markdown(f"### {emp}")
@@ -893,7 +870,7 @@ with tab1:
                 st.markdown(badge_ok("Vendas salvo", it["name"]), unsafe_allow_html=True)
 
         # ESTOQUE
-        st.markdown("**Estoque Fisico — (opcional ou via Tiny)**")
+        st.markdown("**Estoque Físico — (opcional ou via Tiny)**")
         up = st.file_uploader("CSV/XLSX/XLS", type=["csv", "xlsx", "xls"], key=f"up_est_{emp}")
         if up is not None:
             blob = up.read()
@@ -907,12 +884,127 @@ with tab1:
     bloco_empresa("ALIVVIA")
     bloco_empresa("JCA")
 
-# ================== TAB 2 ==================
+# ================== TAB 2: Compra Automática ==================
 with tab2:
-    st.subheader("Gerar Compra (por empresa) - filtros e selecao para OC")
+    st.subheader("Gerar Compra (por empresa)")
+
+# =============== Orion P1 � Comparador novo com filtros (ALIVVIA x JCA) ===============
+with st.expander("?? Comparador (novo � com filtros Orion)", expanded=False):
+    try:
+        resA = st.session_state.get("resultado_compra", {}).get("ALIVVIA")
+        resJ = st.session_state.get("resultado_compra", {}).get("JCA")
+        if not (resA and resJ):
+            st.info("Gere a compra em **ALIVVIA** e **JCA** nesta aba para habilitar o comparador com filtros.")
+        else:
+            dfA = resA["df"].copy()
+            dfJ = resJ["df"].copy()
+
+            try:
+                from orion.ui.components import bloco_filtros_e_selecao, preparar_df_para_oc
+                df_viewA, _ = bloco_filtros_e_selecao(dfA, "ALIVVIA", state_key_prefix="cmp")
+                df_viewJ, _ = bloco_filtros_e_selecao(dfJ, "JCA",     state_key_prefix="cmpJ")
+            except Exception as _e:
+                st.warning("N�o encontrei o m�dulo de UI Orion; exibindo sem filtros avan�ados. " + str(_e))
+                df_viewA, df_viewJ = dfA, dfJ
+
+            sku_suggestions = df_viewA["SKU"].dropna().astype(str).unique().tolist()[:100]
+            sku_query = st.text_input(
+                "SKU exato do componente (n�o kit)", key="cmp_sku_query",
+                placeholder=(sku_suggestions[0] if sku_suggestions else "Ex.: LUVA-NEOPRENE-PRETA-G")
+            )
+
+            colK1, colK2 = st.columns([1,1])
+            with colK1: st.caption("Vendas 60d = FULL (kits explodidos) + Shopee (kits explodidos).")
+            with colK2: st.caption("Estoque F�sico conforme arquivo/Tiny salvo por empresa.")
+
+            if st.button("Comparar ALIVVIA x JCA (com filtros)", key="btn_cmp_orion"):
+                alvo = (sku_query or "").strip().upper()
+                if not alvo:
+                    st.warning("Informe um SKU componente.")
+                else:
+                    def pick_metrics(df):
+                        r = df[df["SKU"] == alvo]
+                        if r.empty:
+                            return 0, 0, 0, 0.0, "SKU n�o encontrado no resultado"
+                        r0 = r.iloc[0]
+                        vendas60 = int(r0.get("TOTAL_60d", int(r0.get("ML_60d",0)) + int(r0.get("Shopee_60d",0))))
+                        est_fis  = int(r0.get("Estoque_Fisico", 0))
+                        comp_sug = int(r0.get("Compra_Sugerida", 0))
+                        preco    = float(r0.get("Preco", 0.0))
+                        valor    = float(comp_sug * preco)
+                        return vendas60, est_fis, comp_sug, valor, ""
+
+                    vA, eA, cA, valA, obsA = pick_metrics(df_viewA)
+                    vJ, eJ, cJ, valJ, obsJ = pick_metrics(df_viewJ)
+
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("ALIVVIA � Vendas 60d", f"{vA:,}".replace(",", "."))
+                    m2.metric("ALIVVIA � Estoque F�sico", f"{eA:,}".replace(",", "."))
+                    m3.metric("ALIVVIA � Compra Sugerida", f"{cA:,}".replace(",", "."))
+                    m4.metric("ALIVVIA � Valor Compra (R$)", f"R$ {valA:,.2f}")
+
+                    n1, n2, n3, n4 = st.columns(4)
+                    n1.metric("JCA � Vendas 60d", f"{vJ:,}".replace(",", "."))
+                    n2.metric("JCA � Estoque F�sico", f"{eJ:,}".replace(",", "."))
+                    n3.metric("JCA � Compra Sugerida", f"{cJ:,}".replace(",", "."))
+                    n4.metric("JCA � Valor Compra (R$)", f"R$ {valJ:,.2f}")
+
+                    rows = [
+                        {"Empresa": "ALIVVIA", "SKU": alvo, "Compra_Sugerida": cA, "Preco": (valA/cA if cA else 0.0), "Valor_Compra_R$": valA, "Obs": obsA},
+                        {"Empresa": "JCA",     "SKU": alvo, "Compra_Sugerida": cJ, "Preco": (valJ/cJ if cJ else 0.0), "Valor_Compra_R$": valJ, "Obs": obsJ},
+                    ]
+                    cmp_df = pd.DataFrame(rows)
+                    st.dataframe(cmp_df, use_container_width=True, hide_index=True)
+                    st.download_button(
+                        "Baixar compara��o (.csv)",
+                        data=cmp_df.to_csv(index=False).encode("utf-8"),
+                        file_name=f"Comparacao_ALIVVIA_JCA_{alvo}.csv",
+                        mime="text/csv",
+                        key="dl_cmp_orion"
+                    )
+    except Exception as e:
+        st.error("Falha no comparador com filtros: " + str(e))
+# =============== /Orion P1 � fim do comparador com filtros ===============
+ — filtros e seleção para OC")
+
+    # Helpers da aba
+    def _filtro_texto_inteligente(df: pd.DataFrame, texto: str, colunas_busca: list[str]) -> pd.DataFrame:
+        if not texto:
+            return df
+        termos = [t.strip() for t in str(texto).split() if t.strip()]
+        if not termos:
+            return df
+        base = df.copy()
+        for col in colunas_busca:
+            if col not in base.columns:
+                base[col] = ""
+            base[col] = base[col].astype(str)
+        mask_total = np.ones(len(base), dtype=bool)
+        for termo in termos:
+            termo_up = termo.upper()
+            mask_termo = np.zeros(len(base), dtype=bool)
+            for col in colunas_busca:
+                mask_termo = mask_termo | base[col].str.upper().str.contains(termo_up, na=False)
+            mask_total = mask_total & mask_termo
+        return base[mask_total]
+
+    def _preparar_df_compra(base: pd.DataFrame) -> pd.DataFrame:
+        df = base.copy()
+        if "Descricao" not in df.columns:
+            df["Descricao"] = df["SKU"]
+        df["Qtd"] = pd.to_numeric(df.get("Compra_Sugerida", 0), errors="coerce").fillna(0).astype(float)
+        df["PrecoUnit"] = pd.to_numeric(df.get("Preco", 0.0), errors="coerce").fillna(0.0).astype(float)
+        keep = ["SKU", "Descricao", "Qtd", "PrecoUnit"]
+        if "fornecedor" in df.columns:
+            keep.append("fornecedor")
+        df = df[keep].copy()
+        df = df[df["Qtd"] > 0]
+        df["SKU"] = df["SKU"].astype(str).str.strip().str.upper()
+        df["Descricao"] = df["Descricao"].astype(str).str.strip()
+        return df.reset_index(drop=True)
 
     if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
-        st.info("Carregue o Padrao (KITS/CAT) no sidebar.")
+        st.info("Carregue o Padrão (KITS/CAT) no sidebar.")
     else:
         empresa = st.radio("Empresa ativa", ["ALIVVIA", "JCA"], horizontal=True, key="empresa_ca")
         dados = st.session_state[empresa]
@@ -926,7 +1018,7 @@ with tab2:
             try:
                 for k, rot in [("FULL", "FULL"), ("VENDAS", "Shopee/MT"), ("ESTOQUE", "Estoque")]:
                     if not (dados[k]["name"] and dados[k]["bytes"]):
-                        raise RuntimeError(f"Arquivo '{rot}' nao foi salvo para {empresa}. Use a aba Dados das Empresas.")
+                        raise RuntimeError(f"Arquivo '{rot}' não foi salvo para {empresa}. Use a aba Dados das Empresas.")
 
                 full_raw = load_any_table_from_bytes(dados["FULL"]["name"], dados["FULL"]["bytes"])
                 vendas_raw = load_any_table_from_bytes(dados["VENDAS"]["name"], dados["VENDAS"]["bytes"])
@@ -935,73 +1027,77 @@ with tab2:
                 t_full = mapear_tipo(full_raw)
                 t_v = mapear_tipo(vendas_raw)
                 t_f = mapear_tipo(fisico_raw)
-                if t_full != "FULL":   raise RuntimeError("FULL invalido.")
-                if t_v != "VENDAS":    raise RuntimeError("Vendas invalido.")
-                if t_f != "FISICO":    raise RuntimeError("Estoque invalido.")
+                if t_full != "FULL":   raise RuntimeError("FULL inválido.")
+                if t_v != "VENDAS":    raise RuntimeError("Vendas inválido.")
+                if t_f != "FISICO":    raise RuntimeError("Estoque inválido.")
 
                 full_df = mapear_colunas(full_raw, t_full)
                 vendas_df = mapear_colunas(vendas_raw, t_v)
                 fisico_df = mapear_colunas(fisico_raw, t_f)
 
-                cat = {
-                    "catalogo_simples": st.session_state.catalogo_df.rename(columns={"sku": "component_sku"}),
-                    "kits_reais": st.session_state.kits_df
-                }
+                cat = Catalogo(
+                    catalogo_simples=st.session_state.catalogo_df.rename(columns={"sku": "component_sku"}),
+                    kits_reais=st.session_state.kits_df
+                )
                 df_final, painel = calcular(full_df, fisico_df, vendas_df, cat, h=h, g=g, LT=LT)
 
                 st.session_state["resultado_compra"][empresa] = {"df": df_final, "painel": painel}
-                st.session_state["oc_selection"][empresa] = set()
-                st.success("Calculo concluido e salvo. Aplique filtros e selecione os itens.")
+                st.session_state["oc_selection"][empresa] = set()  # zera seleção desta empresa
+                st.success("Cálculo concluído e salvo. Aplique filtros e selecione os itens.")
             except Exception as e:
                 st.error(str(e))
 
-        # Exibicao do resultado desta EMPRESA
+        # Exibição do resultado desta EMPRESA
         if empresa in st.session_state.get("resultado_compra", {}):
             pkg = st.session_state["resultado_compra"][empresa]
             df_final = pkg["df"].copy()
             painel = pkg["painel"]
 
+            # Métricas gerais
             cA, cB, cC, cD = st.columns(4)
             cA.metric("Full (un)", f"{painel['full_unid']:,}".replace(",", "."))
             cB.metric("Full (R$)", f"R$ {painel['full_valor']:,.2f}")
-            cC.metric("Fisico (un)", f"{painel['fisico_unid']:,}".replace(",", "."))
-            cD.metric("Fisico (R$)", f"R$ {painel['fisico_valor']:,.2f}")
+            cC.metric("Físico (un)", f"{painel['fisico_unid']:,}".replace(",", "."))
+            cD.metric("Físico (R$)", f"R$ {painel['fisico_valor']:,.2f}")
 
+            # ——— ORION/ATHENAS: filtros inteligentes + seleção persistente ———
             df_view, sel_set = bloco_filtros_e_selecao(df_final, empresa, state_key_prefix="oc")
 
+            # —— Botões de envio para a Ordem de Compra ——
             col_send1, col_send2, col_send3 = st.columns([1,1,1])
+
             with col_send1:
-                if st.button("Enviar SELECIONADOS para Ordem de Compra", use_container_width=True, key=f"oc_send_sel_{empresa}"):
+                if st.button("➡️ Enviar **SELECIONADOS** para a Ordem de Compra", use_container_width=True, key=f"oc_send_sel_{empresa}"):
                     if not sel_set:
-                        st.warning("Nenhum SKU selecionado.")
+                        st.warning("Nenhum SKU selecionado. Marque ou use os botões de seleção rápida.")
                     else:
                         base_sel = df_final[df_final["SKU"].astype(str).isin(list(sel_set))]
                         df_export = preparar_df_para_oc(base_sel)
                         if df_export.empty:
-                            st.warning("Os selecionados nao tem Compra_Sugerida > 0.")
+                            st.warning("Os selecionados não têm Compra_Sugerida > 0.")
                         else:
                             st.session_state["df_compra"] = df_export
-                            st.success(f"{len(df_export)} itens enviados para a pagina Ordem de Compra.")
+                            st.success(f"{len(df_export)} itens selecionados enviados para a página 🧾 Ordem de Compra.")
 
             with col_send2:
-                if st.button("Enviar ITENS FILTRADOS para Ordem de Compra", use_container_width=True, key=f"oc_send_filtrado_{empresa}"):
+                if st.button("➡️ Enviar ITENS **FILTRADOS** para a Ordem de Compra", use_container_width=True, key=f"oc_send_filtrado_{empresa}"):
                     df_export = preparar_df_para_oc(df_view)
                     if df_export.empty:
                         st.warning("Nada para enviar: ajuste os filtros ou gere a compra novamente.")
                     else:
                         st.session_state["df_compra"] = df_export
-                        st.success(f"{len(df_export)} itens (filtrados) enviados para a pagina Ordem de Compra.")
+                        st.success(f"{len(df_export)} itens (filtrados) enviados para a página 🧾 Ordem de Compra.")
 
             with col_send3:
-                if st.button("Enviar TODA a compra para Ordem de Compra", use_container_width=True, key=f"oc_send_tudo_{empresa}"):
+                if st.button("➡️ Enviar **TODA** a compra (sem filtro) para a Ordem de Compra", use_container_width=True, key=f"oc_send_tudo_{empresa}"):
                     df_export = preparar_df_para_oc(df_final)
                     if df_export.empty:
                         st.warning("Nada para enviar: gere a compra novamente.")
                     else:
                         st.session_state["df_compra"] = df_export
-                        st.success(f"{len(df_export)} itens (todos) enviados para a pagina Ordem de Compra.")
+                        st.success(f"{len(df_export)} itens (todos) enviados para a página 🧾 Ordem de Compra.")
 
-            # Downloads
+            # Downloads (opcional)
             colx1, colx2 = st.columns([1, 1])
             with colx1:
                 try:
@@ -1026,10 +1122,14 @@ with tab2:
                 except Exception as e:
                     st.error(f"Falha ao gerar XLSX filtrado: {e}")
 
-            # Comparador por SKU entre as duas contas
+            # Comparador ALIVVIA x JCA por SKU (opcional)
             with st.expander("🔎 Buscar SKU e comparar compra sugerida nas duas contas", expanded=False):
-                sku_query = st.text_input("SKU exato do componente (nao kit)", key=f"cmp_sku_query_{empresa}", placeholder="Ex.: LUVA-NEOPRENE-PRETA-G")
-                st.caption("Dica: gere a compra nas duas empresas para a comparacao funcionar.")
+                sku_query = st.text_input(
+                    "SKU exato do componente (não kit)",
+                    key=f"cmp_sku_query_{empresa}",
+                    placeholder="Ex.: LUVA-NEOPRENE-PRETA-G"
+                )
+                st.caption("Dica: gere a compra nas duas empresas para a comparação funcionar.")
                 if st.button("Comparar ALIVVIA x JCA", key=f"btn_cmp_duas_contas_{empresa}"):
                     try:
                         alvo = norm_sku(sku_query)
@@ -1045,7 +1145,7 @@ with tab2:
                                 df_emp = res_emp["df"]
                                 r = df_emp[df_emp["SKU"] == alvo]
                                 if r.empty:
-                                    rows.append({"Empresa": emp_cmp, "SKU": alvo, "Compra_Sugerida": 0, "Preco": None, "Valor_Compra_R$": None, "Obs": "SKU nao encontrado"})
+                                    rows.append({"Empresa": emp_cmp, "SKU": alvo, "Compra_Sugerida": 0, "Preco": None, "Valor_Compra_R$": None, "Obs": "SKU não encontrado no resultado"})
                                 else:
                                     r0 = r.iloc[0]
                                     rows.append({
@@ -1059,60 +1159,65 @@ with tab2:
                             cmp_df = pd.DataFrame(rows)
                             st.dataframe(cmp_df, use_container_width=True, hide_index=True)
                             st.download_button(
-                                "Baixar comparacao (.csv)",
+                                "Baixar comparação (.csv)",
                                 data=cmp_df.to_csv(index=False).encode("utf-8"),
                                 file_name=f"Comparacao_ALIVVIA_JCA_{alvo}.csv",
                                 mime="text/csv",
                                 key=f"dl_cmp_duas_contas_{empresa}"
                             )
                     except Exception as e:
-                        st.error(f"Falha na comparacao: {e}")
+                        st.error(f"Falha na comparação: {e}")
         else:
-            st.info("Clique Gerar Compra para calcular e entao aplicar filtros.")
+            st.info("Clique Gerar Compra para calcular e então aplicar filtros.")
 
-    # Seletor estavel (multiselect simples)
-    with st.expander("🧩 Selecionar SKUs (modo estavel — sem perder selecao)", expanded=False):
-        try:
-            resA = st.session_state.get("resultado_compra", {}).get("ALIVVIA")
-            resJ = st.session_state.get("resultado_compra", {}).get("JCA")
-            if not (resA or resJ):
-                st.info("Gere a compra em **ALIVVIA** e/ou **JCA** para habilitar.")
-            else:
-                if resA:
-                    dfA = resA["df"].copy()
-                    optionsA = dfA["SKU"].dropna().astype(str).unique().tolist()
-                    selA = st.multiselect("SKUs (ALIVVIA)", optionsA, default=st.session_state.get("selA", []), key="selA")
-                    if selA:
-                        st.caption(f"ALIVVIA — {len(selA)} selecionados")
-                        st.dataframe(dfA[dfA["SKU"].isin(selA)], use_container_width=True, hide_index=True)
-                if resJ:
-                    dfJ = resJ["df"].copy()
-                    optionsJ = dfJ["SKU"].dropna().astype(str).unique().tolist()
-                    selJ = st.multiselect("SKUs (JCA)", optionsJ, default=st.session_state.get("selJ", []), key="selJ")
-                    if selJ:
-                        st.caption(f"JCA — {len(selJ)} selecionados")
-                        st.dataframe(dfJ[dfJ["SKU"].isin(selJ)], use_container_width=True, hide_index=True)
-                if (resA and st.session_state.get("selA")) or (resJ and st.session_state.get("selJ")):
-                    out = []
-                    if resA and st.session_state.get("selA"): out.append(resA["df"][resA["df"]["SKU"].isin(st.session_state["selA"])])
-                    if resJ and st.session_state.get("selJ"): out.append(resJ["df"][resJ["df"]["SKU"].isin(st.session_state["selJ"])])
-                    out_df = pd.concat(out, ignore_index=True) if out else pd.DataFrame()
-                    st.download_button(
-                        "Baixar selecao (.csv)",
-                        data=(out_df.to_csv(index=False).encode("utf-8") if not out_df.empty else "".encode("utf-8")),
-                        file_name="Selecao_SKUs.csv",
-                        mime="text/csv",
-                        disabled=out_df.empty,
-                        key="dl_sel"
-                    )
-        except Exception as e:
-            st.error("Falha no seletor de SKUs: " + str(e))
 
-# ================== TAB 3 ==================
+
+# =============== Orion P1 � Seletor Est�vel de SKUs (multiselect) ===============
+with st.expander("? Selecionar SKUs (modo est�vel � sem perder sele��o)", expanded=False):
+    try:
+        resA = st.session_state.get("resultado_compra", {}).get("ALIVVIA")
+        resJ = st.session_state.get("resultado_compra", {}).get("JCA")
+        if not (resA and resJ):
+            st.info("Gere a compra em **ALIVVIA** e/ou **JCA** nesta aba para habilitar o seletor est�vel.")
+        else:
+            dfA = resA["df"].copy()
+            dfJ = resJ["df"].copy()
+
+            optionsA = dfA["SKU"].dropna().astype(str).unique().tolist()
+            optionsJ = dfJ["SKU"].dropna().astype(str).unique().tolist()
+
+            selA = st.multiselect("SKUs (ALIVVIA)", optionsA, default=st.session_state.get("selA", []), key="selA")
+            selJ = st.multiselect("SKUs (JCA)",     optionsJ, default=st.session_state.get("selJ", []), key="selJ")
+
+            if selA:
+                st.caption(f"ALIVVIA � {len(selA)} selecionados")
+                st.dataframe(dfA[dfA["SKU"].isin(selA)], use_container_width=True, hide_index=True)
+            if selJ:
+                st.caption(f"JCA � {len(selJ)} selecionados")
+                st.dataframe(dfJ[dfJ["SKU"].isin(selJ)], use_container_width=True, hide_index=True)
+
+            # Export simples
+            if selA or selJ:
+                out = []
+                if selA: out.append(dfA[dfA["SKU"].isin(selA)])
+                if selJ: out.append(dfJ[dfJ["SKU"].isin(selJ)])
+                out_df = pd.concat(out, ignore_index=True) if out else pd.DataFrame()
+                st.download_button(
+                    "Baixar sele��o (.csv)",
+                    data=(out_df.to_csv(index=False).encode("utf-8") if not out_df.empty else "".encode("utf-8")),
+                    file_name="Selecao_SKUs_Orion.csv",
+                    mime="text/csv",
+                    disabled=out_df.empty,
+                    key="dl_sel_orion"
+                )
+    except Exception as e:
+        st.error("Falha no seletor est�vel de SKUs: " + str(e))
+# =============== /Orion P1 � Seletor Est�vel de SKUs ===============
+# ================== TAB 3: Alocação de Compra ==================
 with tab3:
-    st.subheader("Distribuir quantidade entre empresas — proporcional as vendas (FULL + Shopee)")
+    st.subheader("Distribuir quantidade entre empresas — proporcional às vendas (FULL + Shopee)")
     if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
-        st.info("Carregue o Padrao (KITS/CAT) no sidebar.")
+        st.info("Carregue o Padrão (KITS/CAT) no sidebar.")
     else:
         CATALOGO = st.session_state.catalogo_df
         sku_opcoes = CATALOGO["sku"].dropna().astype(str).sort_values().unique().tolist()
@@ -1121,7 +1226,7 @@ with tab3:
 
         st.caption("Necessita FULL e Shopee/MT salvos para ALIVVIA e JCA na aba Dados.")
 
-        if st.button("Calcular alocacao proporcional", type="primary"):
+        if st.button("Calcular alocação proporcional", type="primary"):
             try:
                 if sku_escolhido in ("", "(selecione)"):
                     raise RuntimeError("Escolha um SKU para alocar.")
@@ -1140,21 +1245,21 @@ with tab3:
                     sa = load_any_table_from_bytes(st.session_state[emp]["VENDAS"]["name"], st.session_state[emp]["VENDAS"]["bytes"])
                     tfa = mapear_tipo(fa); tsa = mapear_tipo(sa)
                     if tfa != "FULL":
-                        raise RuntimeError(f"FULL invalido ({emp}).")
+                        raise RuntimeError(f"FULL inválido ({emp}).")
                     if tsa != "VENDAS":
-                        raise RuntimeError(f"Vendas invalido ({emp}).")
+                        raise RuntimeError(f"Vendas inválido ({emp}).")
                     return mapear_colunas(fa, tfa), mapear_colunas(sa, tsa)
 
                 full_A, shp_A = read_pair("ALIVVIA")
                 full_J, shp_J = read_pair("JCA")
 
-                cat = {
-                    "catalogo_simples": CATALOGO.rename(columns={"sku": "component_sku"}),
-                    "kits_reais": st.session_state.kits_df
-                }
+                cat = Catalogo(
+                    catalogo_simples=CATALOGO.rename(columns={"sku": "component_sku"}),
+                    kits_reais=st.session_state.kits_df
+                )
 
                 def vendas_componente(full_df, shp_df) -> pd.DataFrame:
-                    kits = cat["kits_reais"]
+                    kits = cat.kits_reais
                     a = explodir_por_kits(
                         full_df[["SKU", "Vendas_Qtd_60d"]].rename(columns={"SKU": "kit_sku", "Vendas_Qtd_60d": "Qtd"}),
                         kits, "kit_sku", "Qtd"
@@ -1175,31 +1280,44 @@ with tab3:
                 dJ = int(demJ.loc[demJ["SKU"] == sku_norm, "Demanda_60d"].sum())
                 total = dA + dJ
 
-                if total > 0:
-                    propA = dA / total
-                    propJ = dJ / total
-                    alocA = int(round(qtd_lote * propA))
-                    alocJ = int(qtd_lote - alocA)
-                else:
-                    st.warning("Sem vendas detectadas nas duas contas; aplicacao 50/50 por falta de historico.")
-                    alocA = int(qtd_lote // 2)
-                    alocJ = int(qtd_lote - alocA)
-                    propA = 0.5
-                    propJ = 0.5
+if total > 0:
+    propA = dA / total
+    propJ = dJ / total
+    # arredondamento half-up para A; J recebe o resto para fechar o lote
+    alocA = int(round(qtd_lote * propA))
+    alocJ = int(qtd_lote - alocA)
+else:
+    st.warning("Sem vendas detectadas nas duas contas; aplica��o 50/50 por falta de hist�rico.")
+    alocA = int(qtd_lote // 2)
+    alocJ = int(qtd_lote - alocA)
+else:
+    st.warning("Sem vendas detectadas nas duas contas; aplica��o 50/50 por falta de hist�rico.")
+    alocA = int(qtd_lote // 2)
+    alocJ = int(qtd_lote - alocA)
 
                 res = pd.DataFrame([
                     {"Empresa": "ALIVVIA", "SKU": sku_norm, "Demanda_60d": dA, "Proporcao": round(propA, 4), "Alocacao_Sugerida": alocA},
-                    {"Empresa": "JCA",     "SKU": sku_norm, "Demanda_60d": dJ, "Proporcao": round(propJ, 4), "Alocacao_Sugerida": alocJ},
+                    {"Empresa": "JCA", "SKU": sku_norm, "Demanda_60d": dJ, "Proporcao": round(propJ, 4), "Alocacao_Sugerida": alocJ},
                 ])
                 st.dataframe(res, use_container_width=True)
                 st.success(f"Total alocado: {qtd_lote} un (ALIVVIA {alocA} | JCA {alocJ})")
                 st.download_button(
-                    "Baixar alocacao (.csv)",
+                    "Baixar alocação (.csv)",
                     data=res.to_csv(index=False).encode("utf-8"),
                     file_name=f"Alocacao_{sku_norm}_{qtd_lote}.csv",
                     mime="text/csv"
                 )
             except Exception as e:
-                st.error(f"Falha na alocacao: {e}")
+                st.error(f"Falha na alocação: {e}")
 
+# ---------- Rodapé ----------
 st.caption(f"© Alivvia — {VERSION}")
+
+
+
+
+
+
+
+
+
