@@ -1,5 +1,5 @@
 ﻿# ordem_compra.py
-# Alivvia Reposição & OC — módulo de Ordem de Compra (OC)
+# Alivvia Reposi��o & OC - m�dulo de Ordem de Compra (OC)
 
 import os
 import json
@@ -62,14 +62,14 @@ def _ensure_state():
 _ensure_state()
 
 
-# ---------------------- operações básicas ----------------------
+# ---------------------- opera��es b�sicas ----------------------
 def limpar_cesta(emp: str):
     st.session_state["oc_cesta"][emp.upper()] = []
 
 def adicionar_itens_cesta(emp: str, df_itens: pd.DataFrame):
     emp = emp.upper()
     if df_itens is None or df_itens.empty:
-        st.warning("Nenhum item selecionado para enviar à Ordem de Compra.")
+        st.warning("Nenhum item selecionado para enviar � Ordem de Compra.")
         return
 
     def col_ok(d, nome, alts):
@@ -82,7 +82,7 @@ def adicionar_itens_cesta(emp: str, df_itens: pd.DataFrame):
 
     sku_c   = col_ok(df_itens, "SKU", [])
     forn_c  = col_ok(df_itens, "fornecedor", ["Fornecedor"])
-    preco_c = col_ok(df_itens, "Preco", ["Preço", "preco_unit", "preco_unitario"])
+    preco_c = col_ok(df_itens, "Preco", ["Pre�o", "preco_unit", "preco_unitario"])
     compra_c = col_ok(df_itens, "Compra_Sugerida",
                       ["Compra ALIVVIA","Compra JCA","Compra_Total","Compra"])
     valor_c  = col_ok(df_itens, "Valor_Compra_R$", ["Total (R$)","Valor_Total","Valor"])
@@ -117,7 +117,7 @@ def adicionar_itens_cesta(emp: str, df_itens: pd.DataFrame):
         return
 
     st.session_state["oc_cesta"][emp] = st.session_state["oc_cesta"][emp] + itens
-    st.success(f"{len(itens)} item(ns) adicionados à cesta da {emp}.")
+    st.success(f"{len(itens)} item(ns) adicionados � cesta da {emp}.")
 
 def salvar_oc_json(oc: Dict) -> str:
     oc_id = oc.get("oc_id") or gerar_oc_id(oc.get("empresa", "ALIVVIA"))
@@ -183,7 +183,7 @@ def listar_ocs(emp: str = None, status: List[str] = None) -> List[Dict]:
     return out
 
 
-# ---------------------- impressão / export ----------------------
+# ---------------------- impress�o / export ----------------------
 def _css_impressao():
     return """
     <style>
@@ -232,17 +232,17 @@ def render_html_oc(oc: Dict, logo_url: str = None) -> str:
         {'<img class="oc-logo" src="'+logo_url+'" />' if logo_url else '<div class="oc-logo"></div>'}
         <div>
           <div class='oc-title'>ORDEM DE COMPRA</div>
-          <div class='oc-sub'>Nº {oc_id} • Empresa: {empresa} • Fornecedor: {fornecedor} • Data: {criado_em}</div>
-          <div class='oc-sub'>Endereço de entrega: {endereco}</div>
-          <div class='oc-sub'>Condições: {condicoes}</div>
+          <div class='oc-sub'>N� {oc_id} . Empresa: {empresa} . Fornecedor: {fornecedor} . Data: {criado_em}</div>
+          <div class='oc-sub'>Endere�o de entrega: {endereco}</div>
+          <div class='oc-sub'>Condi��es: {condicoes}</div>
         </div>
       </div>
       <table class='oc'>
         <thead>
           <tr>
             <th>SKU</th>
-            <th>Descrição</th>
-            <th>Preço (R$)</th>
+            <th>Descri��o</th>
+            <th>Pre�o (R$)</th>
             <th>Qtd Comprada</th>
             <th>Qtd Recebida</th>
             <th>NF (S/N)</th>
@@ -260,7 +260,7 @@ def render_html_oc(oc: Dict, logo_url: str = None) -> str:
         <div>Recebido por</div>
         <div>Data/Hora</div>
       </div>
-      <div class='rodape'>Aviso: conferir recebimento. Se sem NF, marcar e registrar observação.</div>
+      <div class='rodape'>Aviso: conferir recebimento. Se sem NF, marcar e registrar observa��o.</div>
     </div>
     """
     return _css_impressao() + html
@@ -284,15 +284,15 @@ def _export_xlsx_oc(oc: Dict):
 
 # ---------------------- UI principal (aba) ----------------------
 def render_tab():
-    st.header("🧾 Ordem de Compra")
-    st.caption("Selecione itens nas outras telas e clique “➕ Enviar para Ordem de Compra” para popular a cesta.")
+    st.header("?? Ordem de Compra")
+    st.caption("Selecione itens nas outras telas e clique "? Enviar para Ordem de Compra" para popular a cesta.")
 
     # Cesta (por empresa)
     colA, colB = st.columns([3,1])
     with colA:
         emp = st.radio("Empresa da cesta", ["ALIVVIA","JCA"], horizontal=True, key="oc_emp")
     with colB:
-        if st.button("🧺 Limpar cesta", use_container_width=True):
+        if st.button("?? Limpar cesta", use_container_width=True):
             limpar_cesta(emp)
             st.info(f"Cesta da {emp} limpa.")
 
@@ -305,21 +305,21 @@ def render_tab():
     # Dados da OC
     with st.expander("Dados da Ordem de Compra", expanded=True):
         fornecedor = st.text_input("Nome do fornecedor", key="oc_fornec")
-        condicoes  = st.text_area("Condições de pagamento / observações (opcional)", key="oc_cond")
-        endereco   = st.text_input("Endereço de entrega (opcional)", key="oc_end")
-        logo_url   = st.text_input("URL do logo (apenas na impressão, opcional)", key="oc_logo")
+        condicoes  = st.text_area("Condi��es de pagamento / observa��es (opcional)", key="oc_cond")
+        endereco   = st.text_input("Endere�o de entrega (opcional)", key="oc_end")
+        logo_url   = st.text_input("URL do logo (apenas na impress�o, opcional)", key="oc_logo")
 
         colx, coly, colz = st.columns([1,1,1])
         with colx:
-            finaliza = st.checkbox("Finalizar agora (pronto para impressão)", value=True)
+            finaliza = st.checkbox("Finalizar agora (pronto para impress�o)", value=True)
         with coly:
-            gerar_por_fornecedor = st.checkbox("Gerar 1 OC por fornecedor (se houver vários na cesta)", value=True)
+            gerar_por_fornecedor = st.checkbox("Gerar 1 OC por fornecedor (se houver v�rios na cesta)", value=True)
         with colz:
             permitir_edicao_posterior = st.checkbox("Permitir reabrir/editar depois", value=True)
 
-        if st.button("💾 Gerar e salvar OC(s)", type="primary"):
+        if st.button("?? Gerar e salvar OC(s)", type="primary"):
             if df_cesta.shape[0] == 0:
-                st.warning("A cesta está vazia.")
+                st.warning("A cesta est� vazia.")
             elif not fornecedor and not gerar_por_fornecedor:
                 st.warning("Informe o fornecedor ou ative '1 OC por fornecedor'.")
             else:
@@ -360,7 +360,7 @@ def render_tab():
                 limpar_cesta(emp)
 
     st.markdown("---")
-    st.subheader("Ordens de Compra — Gerenciador")
+    st.subheader("Ordens de Compra - Gerenciador")
 
     c1, c2, c3 = st.columns([1,1,1])
     with c1:
@@ -369,7 +369,7 @@ def render_tab():
         status_opts = ["(Todos)","Rascunho","Finalizada","Recebida Parcial","Recebida Total","Cancelada"]
         status_f = st.selectbox("Status", status_opts, index=0)
     with c3:
-        if st.button("🔄 Atualizar lista", use_container_width=True):
+        if st.button("?? Atualizar lista", use_container_width=True):
             pass
 
     emp_arg  = None if emp_f == "(Todas)" else emp_f
@@ -390,7 +390,7 @@ def render_tab():
             or ""
         ).strip()
         if not ocid:
-            # último fallback: cria um ID para exibir (não sobrepõe arquivo)
+            # �ltimo fallback: cria um ID para exibir (n�o sobrep�e arquivo)
             ocid = dt.datetime.now().strftime("OC-%Y%m%d-%H%M%S")
         d["oc_id"] = ocid
         safe_ocs.append(d)
@@ -416,7 +416,7 @@ def render_tab():
         oc_sel = next((d for d in safe_ocs if d.get("oc_id") == sel_id), None)
 
         if sel_id != "(Selecione)" and oc_sel:
-            st.write(f"**OC {sel_id}** — {oc_sel.get('empresa')} / {oc_sel.get('fornecedor')} — status: **{oc_sel.get('status')}**")
+            st.write(f"**OC {sel_id}** - {oc_sel.get('empresa')} / {oc_sel.get('fornecedor')} - status: **{oc_sel.get('status')}**")
 
             itens = pd.DataFrame(oc_sel.get("itens",[]))
             if not itens.empty:
@@ -432,7 +432,7 @@ def render_tab():
                     column_config={
                         "SKU": st.column_config.TextColumn("SKU", disabled=True),
                         "fornecedor": st.column_config.TextColumn("Fornecedor", disabled=True),
-                        "preco": st.column_config.NumberColumn("Preço (R$)", format="%.2f", disabled=True),
+                        "preco": st.column_config.NumberColumn("Pre�o (R$)", format="%.2f", disabled=True),
                         "qtd_comprada": st.column_config.NumberColumn("Qtd Comprada", format="%d", disabled=True),
                         "valor_total": st.column_config.NumberColumn("Total (R$)", format="%.2f", disabled=True),
                         "nf_entregue": st.column_config.CheckboxColumn("NF entregue?"),
@@ -443,7 +443,7 @@ def render_tab():
 
                 colb1, colb2, colb3, colb4 = st.columns([1,1,1,1])
                 with colb1:
-                    if st.button("💾 Salvar alterações", use_container_width=True):
+                    if st.button("?? Salvar altera��es", use_container_width=True):
                         oc_sel["itens"] = itens_edit.to_dict(orient="records")
                         oc_sel["historico"] = oc_sel.get("historico", []) + [
                             {"evento":"editado", "quando": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
@@ -451,35 +451,36 @@ def render_tab():
                         salvar_oc_json(oc_sel)
                         st.success("OC salva.")
                 with colb2:
-                    if st.button("✅ Dar Baixa (Total)", use_container_width=True):
+                    if st.button("? Dar Baixa (Total)", use_container_width=True):
                         oc_sel["status"] = "Recebida Total"
                         salvar_oc_json(oc_sel)
                         st.success("OC marcada como Recebida Total.")
                 with colb3:
-                    if st.button("⏬ Baixa Parcial", use_container_width=True):
+                    if st.button("? Baixa Parcial", use_container_width=True):
                         oc_sel["status"] = "Recebida Parcial"
                         salvar_oc_json(oc_sel)
                         st.success("OC marcada como Recebida Parcial.")
                 with colb4:
-                    if st.button("🛑 Cancelar OC", use_container_width=True):
+                    if st.button("?? Cancelar OC", use_container_width=True):
                         oc_sel["status"] = "Cancelada"
                         salvar_oc_json(oc_sel)
                         st.warning("OC cancelada.")
 
     st.markdown("---")
-    st.subheader("Imprimir (A4 monocromático)")
+    st.subheader("Imprimir (A4 monocrom�tico)")
 
     if sel_id != "(Selecione)" and oc_sel:
         html = render_html_oc(oc_sel, logo_url=st.session_state.get("oc_logo",""))
         st.components.v1.html(html, height=700, scrolling=True)
 
-        # botão de download do XLSX dos itens
+        # bot�o de download do XLSX dos itens
         bio = _export_xlsx_oc(oc_sel)
         st.download_button(
-            "⬇️ Baixar itens da OC (XLSX)",
+            "?? Baixar itens da OC (XLSX)",
             data=bio.getvalue(),
             file_name=f"{sel_id}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
+
 
