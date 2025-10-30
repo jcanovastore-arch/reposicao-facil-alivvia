@@ -4,7 +4,7 @@ Reposição Logística —" Alivvia (Streamlit)
 Arquivo completo, revisado e em UTF-8 sem BOM.
 - Mantém TODA a lógica original
 - Corrige acentuação que estava quebrada
-- Adiciona a 4ª aba: �Y�� Ordem de Compra (renderiza via módulo externo `ordem_compra.py`)
+- Adiciona a 4ª aba: Y Ordem de Compra (renderiza via módulo externo `ordem_compra.py`)
 - Ajusta a seção "Lista combinada" para evitar NameError de xlsx2
 - Inclui seleção/enviar itens para OC a partir da Lista combinada
 """
@@ -40,7 +40,7 @@ DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"
 
 # ================ UI helpers =================
 def badge_ok(label: str, filename: str) -> str:
-    return f"<span style='background:#198754; color:#fff; padding:6px 10px; border-radius:10px; font-size:12px;'>�o. {label}: <b>{filename}</b></span>"
+    return f"<span style='background:#198754; color:#fff; padding:6px 10px; border-radius:10px; font-size:12px;'>o. {label}: <b>{filename}</b></span>"
 
 # ============ Persistência em DISCO (.uploads/) ============
 BASE_UPLOAD_DIR = ".uploads"
@@ -152,7 +152,7 @@ def _ensure_state():
 
 _ensure_state()
 
-# ===== OC: estado m�nimo (previne KeyError na aba "Ordem de Compra") =====
+# ===== OC: estado mnimo (previne KeyError na aba "Ordem de Compra") =====
 st.session_state.setdefault("oc_cesta", {"ALIVVIA": [], "JCA": []})
 st.session_state.setdefault("oc_meta", {})
 st.session_state.setdefault("oc_seq", 1)
@@ -670,10 +670,10 @@ with c2:
     st.markdown(f"<div style='text-align:right; font-size:12px; color:#888;'>Versão: <b>{VERSION}</b></div>", unsafe_allow_html=True)
 
 if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
-    st.warning("�-� Carregue o Padrão (KITS/CAT) no sidebar antes de usar as abas.")
+    st.warning("- Carregue o Padrão (KITS/CAT) no sidebar antes de usar as abas.")
 
-# 4 abas, incluindo a nova "�Y�� Ordem de Compra"
-tab1, tab2, tab3, tab4 = st.tabs(["�Y", Dados das Empresas", "�Y�� Compra Automática", "�Y"� Alocação de Compra", "�Y�� Ordem de Compra"])
+# 4 abas, incluindo a nova "Y Ordem de Compra"
+tab1, tab2, tab3, tab4 = st.tabs(["Dados das Empresas", "Compra Automática", "Alocação de Compra", "Ordem de Compra"])
 
 # ================== TAB 1: Dados ==================
 with tab1:
@@ -817,7 +817,7 @@ with tab2:
                 sel_fornec = st.multiselect("Fornecedor", options=fornecedores, default=[], key=f"filtro_fornec_{empresa}")
 
                 sku_all = sorted(df_final["SKU"].dropna().astype(str).unique().tolist())
-                txt = st.text_input("Pesquisar SKU (digite parte do código)", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO—�")
+                txt = st.text_input("Pesquisar SKU (digite parte do código)", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO—")
                 if txt:
                     sku_filtrado = [s for s in sku_all if txt.upper() in s.upper()]
                 else:
@@ -863,10 +863,10 @@ with tab2:
 
             # Botão para enviar selecionados à OC
             sel_rows = df_edit[df_edit["Selecionar"] == True].drop(columns=["Selecionar"], errors="ignore").copy()
-            if st.button("�z. Enviar itens selecionados para Ordem de Compra", use_container_width=True):
+            if st.button("z. Enviar itens selecionados para Ordem de Compra", use_container_width=True):
                 try:
                     oc.adicionar_itens_cesta(empresa, sel_rows)
-                    st.success(f"{len(sel_rows)} item(ns) enviados para a aba '�Y�� Ordem de Compra'.")
+                    st.success(f"{len(sel_rows)} item(ns) enviados para a aba 'Y Ordem de Compra'.")
                 except Exception as _e:
                     st.error(f"Falha ao enviar itens: {_e}")
 
@@ -890,7 +890,7 @@ with tab2:
 
             # =============== CONSOLIDADO POR SKU (ALIVVIA + JCA) ===============
             st.markdown("---")
-            with st.expander("�Y"Z Consolidado por SKU —" ver ALIVVIA e JCA juntos", expanded=False):
+            with st.expander("Y"Z Consolidado por SKU —" ver ALIVVIA e JCA juntos", expanded=False):
                 tem_A = "ALIVVIA" in st.session_state["resultado_compra"]
                 tem_J = "JCA"     in st.session_state["resultado_compra"]
                 if not (tem_A and tem_J):
@@ -941,7 +941,7 @@ with tab2:
 
             # =============== LISTA COMBINADA (ALIVVIA + JCA) ===============
             st.markdown("---")
-            with st.expander("�Y"< Lista combinada —" ver compras das 2 contas lado a lado", expanded=False):
+            with st.expander("Y"< Lista combinada —" ver compras das 2 contas lado a lado", expanded=False):
                 tem_A = "ALIVVIA" in st.session_state["resultado_compra"]
                 tem_J = "JCA"     in st.session_state["resultado_compra"]
 
@@ -982,7 +982,7 @@ with tab2:
                     with colf2:
                         only_pos = st.checkbox("Somente compra > 0", value=True)
                     with colf3:
-                        busca_sku2 = st.text_input("Pesquisar SKU (comb.)", placeholder="parte do SKU—�")
+                        busca_sku2 = st.text_input("Pesquisar SKU (comb.)", placeholder="parte do SKU—")
 
                     dfV = dfC.copy()
                     if f_sel:
@@ -1095,7 +1095,7 @@ with tab2:
                         sel_comb = dfV_edit[dfV_edit["Selecionar"] == True].drop(columns=["Selecionar"], errors="ignore")
                         col_btn1, col_btn2 = st.columns([1,1])
                         with col_btn1:
-                            if st.button("�z. Enviar p/ OC — Alivvia", use_container_width=True):
+                            if st.button("z. Enviar p/ OC — Alivvia", use_container_width=True):
                                 base = sel_comb.rename(columns={
                                     "Compra_ALIVVIA":"Compra_Sugerida",
                                     "Valor_ALIVVIA":"Valor_Compra_R$",
@@ -1103,7 +1103,7 @@ with tab2:
                                 })
                                 oc.adicionar_itens_cesta("ALIVVIA", base[["SKU","fornecedor","Preco","Compra_Sugerida","Valor_Compra_R$"]].copy())
                         with col_btn2:
-                            if st.button("�z. Enviar p/ OC —" JCA", use_container_width=True):
+                            if st.button("z. Enviar p/ OC —" JCA", use_container_width=True):
                                 base = sel_comb.rename(columns={
                                     "Compra_JCA":"Compra_Sugerida",
                                     "Valor_JCA":"Valor_Compra_R$",
