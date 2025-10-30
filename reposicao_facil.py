@@ -31,7 +31,7 @@ import streamlit as st
 import requests
 from requests.adapters import HTTPAdapter, Retry
 
-`r`nimport ordem_compra as oc  # NOVO: módulo de Ordem de Compra`r`nVERSION = "v3.3.0 - 2025-10-21"
+import ordem_compra as oc  # módulo de Ordem de Compra
 
 st.set_page_config(page_title="Reposicao Logistica - Alivvia", layout="wide")
 
@@ -671,7 +671,7 @@ with c2:
 if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
     st.warning("â–º Carregue o PadrÃ£o (KITS/CAT) no sidebar antes de usar as abas.")
 
-tab1, tab2, tab3, tab4 = tab1, tab2, tab3, tab4 = st.tabs(["Dados das Empresas", "Compra Automatica", "Alocacao de Compra", "Ordem de Compra"])
+tab1, tab2, tab3, tab4 = st.tabs(["Dados das Empresas", "Compra Automatica", "Alocacao de Compra", "Ordem de Compra"])
 
 # ================== TAB 1: Dados ==================
 with tab1:
@@ -1080,7 +1080,7 @@ try:
                 "Valor_ALIVVIA":"Valor_Compra_R$",
                 "Preco_ALIVVIA":"Preco",
             })
-            import ordem_compra as oc
+import ordem_compra as oc  # módulo de Ordem de Compra
             oc.adicionar_itens_cesta("ALIVVIA", base[["SKU","fornecedor","Preco","Compra_Sugerida","Valor_Compra_R$"]].copy())
     with col_btn2:
         if st.button("➕ Enviar p/ OC — JCA", use_container_width=True):
@@ -1089,7 +1089,7 @@ try:
                 "Valor_JCA":"Valor_Compra_R$",
                 "Preco_JCA":"Preco",
             })
-            import ordem_compra as oc
+import ordem_compra as oc  # módulo de Ordem de Compra
             oc.adicionar_itens_cesta("JCA", base[["SKU","fornecedor","Preco","Compra_Sugerida","Valor_Compra_R$"]].copy())
 except Exception as _e2:
     st.info("Seleção combinada para OC aparece após gerar as compras das duas empresas.")
@@ -1190,6 +1190,7 @@ with tab3:
 
 # ================== RodapÃ© ==================
 st.caption(f"Â© Alivvia â€” {VERSION}")
+
 
 
 
