@@ -32,6 +32,8 @@ import requests
 from requests.adapters import HTTPAdapter, Retry
 
 import ordem_compra as oc  # módulo de Ordem de Compra
+
+VERSION = "v3.3.0 - 2025-10-21"
 st.set_page_config(page_title="Reposicao Logistica - Alivvia", layout="wide")
 
 DEFAULT_SHEET_LINK = (
@@ -665,7 +667,7 @@ with st.sidebar:
 st.title("Reposicao Logistica - Alivvia")
 c1, c2 = st.columns([4, 1])
 with c2:
-    st.markdown(f"<div style='text-align:right; font-size:12px; color:#888;'>VersÃ£o: <b>{VERSION}</b></div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='text-align:right; font-size:12px; color:#888;'>Versao: <b>{VERSION}</b></div>", unsafe_allow_html=True)
 
 if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
     st.warning("â–º Carregue o PadrÃ£o (KITS/CAT) no sidebar antes de usar as abas.")
@@ -1189,5 +1191,6 @@ with tab3:
 
 # ================== RodapÃ© ==================
 st.caption(f"Â© Alivvia â€” {VERSION}")
+
 
 
