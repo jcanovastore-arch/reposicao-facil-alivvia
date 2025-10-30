@@ -1,6 +1,6 @@
 ﻿# -*- coding: utf-8 -*-
 """
-Reposição Logística �?" Alivvia (Streamlit)
+Reposição Logística —" Alivvia (Streamlit)
 Arquivo completo, revisado e em UTF-8 sem BOM.
 - Mantém TODA a lógica original
 - Corrige acentuação que estava quebrada
@@ -645,7 +645,7 @@ with st.sidebar:
     LT = st.number_input("Lead time (dias)", value=0, step=1, min_value=0)
 
     st.markdown("---")
-    st.subheader("Padrão (KITS/CAT) �?" Google Sheets")
+    st.subheader("Padrão (KITS/CAT) — Google Sheets")
     colA, colB = st.columns([1, 1])
     with colA:
         if st.button("Carregar padrão agora", use_container_width=True):
@@ -664,7 +664,7 @@ with st.sidebar:
         st.link_button("Abrir no Drive (editar)", DEFAULT_SHEET_LINK, use_container_width=True)
 
 # ================== Título ==================
-st.title("Reposição Logística �?" Alivvia")
+st.title("Reposição Logística —" Alivvia")
 c1, c2 = st.columns([4, 1])
 with c2:
     st.markdown(f"<div style='text-align:right; font-size:12px; color:#888;'>Versão: <b>{VERSION}</b></div>", unsafe_allow_html=True)
@@ -684,7 +684,7 @@ with tab1:
         c1, c2 = st.columns(2)
         # FULL
         with c1:
-            st.markdown(f"**FULL �?" {emp}**")
+            st.markdown(f"**FULL —" {emp}**")
             up = st.file_uploader("CSV/XLSX/XLS", type=["csv", "xlsx", "xls"], key=f"up_full_{emp}")
             if up is not None:
                 blob = up.read()
@@ -699,7 +699,7 @@ with tab1:
                     st.info("FULL removido.")
         # VENDAS
         with c2:
-            st.markdown(f"**Shopee/MT �?" {emp}**")
+            st.markdown(f"**Shopee/MT —" {emp}**")
             up = st.file_uploader("CSV/XLSX/XLS", type=["csv", "xlsx", "xls"], key=f"up_vendas_{emp}")
             if up is not None:
                 blob = up.read()
@@ -714,7 +714,7 @@ with tab1:
                     st.info("Vendas removido.")
 
         # ESTOQUE
-        st.markdown("**Estoque Físico �?" opcional**")
+        st.markdown("**Estoque Físico —" opcional**")
         up = st.file_uploader("CSV/XLSX/XLS", type=["csv", "xlsx", "xls"], key=f"up_est_{emp}")
         if up is not None:
             blob = up.read()
@@ -751,7 +751,7 @@ with tab1:
 
 # ================== TAB 2: Compra Automática ==================
 with tab2:
-    st.subheader("Gerar Compra (por empresa) �?" lógica original")
+    st.subheader("Gerar Compra (por empresa) —" lógica original")
 
     if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
         st.info("Carregue o Padrão (KITS/CAT) no sidebar.")
@@ -760,11 +760,11 @@ with tab2:
         dados = st.session_state[empresa]
 
         col = st.columns(3)
-        col[0].info(f"FULL: {dados['FULL']['name'] or '�?"'}")
-        col[1].info(f"Shopee/MT: {dados['VENDAS']['name'] or '�?"'}")
-        col[2].info(f"Estoque: {dados['ESTOQUE']['name'] or '�?"'}")
+        col[0].info(f"FULL: {dados['FULL']['name'] or '—"'}")
+        col[1].info(f"Shopee/MT: {dados['VENDAS']['name'] or '—"'}")
+        col[2].info(f"Estoque: {dados['ESTOQUE']['name'] or '—"'}")
 
-        if st.button(f"Gerar Compra �?" {empresa}", type="primary", key=f"btn_calc_{empresa}"):
+        if st.button(f"Gerar Compra —" {empresa}", type="primary", key=f"btn_calc_{empresa}"):
             try:
                 for k, rot in [("FULL", "FULL"), ("VENDAS", "Shopee/MT"), ("ESTOQUE", "Estoque")]:
                     if not (dados[k]["name"] and dados[k]["bytes"]):
@@ -812,12 +812,12 @@ with tab2:
             cD.metric("Físico (R$)", f"R$ {painel['fisico_valor']:,.2f}")
 
             # >>> Filtros e seleção
-            with st.expander("Filtros (após geração) �?" sem recálculo", expanded=True):
+            with st.expander("Filtros (após geração) —" sem recálculo", expanded=True):
                 fornecedores = sorted([f for f in df_final["fornecedor"].dropna().astype(str).unique().tolist() if f != ""])
                 sel_fornec = st.multiselect("Fornecedor", options=fornecedores, default=[], key=f"filtro_fornec_{empresa}")
 
                 sku_all = sorted(df_final["SKU"].dropna().astype(str).unique().tolist())
-                txt = st.text_input("Pesquisar SKU (digite parte do código)", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO�?�")
+                txt = st.text_input("Pesquisar SKU (digite parte do código)", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO—�")
                 if txt:
                     sku_filtrado = [s for s in sku_all if txt.upper() in s.upper()]
                 else:
@@ -890,7 +890,7 @@ with tab2:
 
             # =============== CONSOLIDADO POR SKU (ALIVVIA + JCA) ===============
             st.markdown("---")
-            with st.expander("�Y"Z Consolidado por SKU �?" ver ALIVVIA e JCA juntos", expanded=False):
+            with st.expander("�Y"Z Consolidado por SKU —" ver ALIVVIA e JCA juntos", expanded=False):
                 tem_A = "ALIVVIA" in st.session_state["resultado_compra"]
                 tem_J = "JCA"     in st.session_state["resultado_compra"]
                 if not (tem_A and tem_J):
@@ -936,12 +936,12 @@ with tab2:
                             },
                         )
                         st.success(
-                            f"Consolidado para **{sku_sel}** �?' ALIVVIA: {rA['Compra_Sugerida']} un | JCA: {rJ['Compra_Sugerida']} un"
+                            f"Consolidado para **{sku_sel}** —' ALIVVIA: {rA['Compra_Sugerida']} un | JCA: {rJ['Compra_Sugerida']} un"
                         )
 
             # =============== LISTA COMBINADA (ALIVVIA + JCA) ===============
             st.markdown("---")
-            with st.expander("�Y"< Lista combinada �?" ver compras das 2 contas lado a lado", expanded=False):
+            with st.expander("�Y"< Lista combinada —" ver compras das 2 contas lado a lado", expanded=False):
                 tem_A = "ALIVVIA" in st.session_state["resultado_compra"]
                 tem_J = "JCA"     in st.session_state["resultado_compra"]
 
@@ -982,7 +982,7 @@ with tab2:
                     with colf2:
                         only_pos = st.checkbox("Somente compra > 0", value=True)
                     with colf3:
-                        busca_sku2 = st.text_input("Pesquisar SKU (comb.)", placeholder="parte do SKU�?�")
+                        busca_sku2 = st.text_input("Pesquisar SKU (comb.)", placeholder="parte do SKU—�")
 
                     dfV = dfC.copy()
                     if f_sel:
@@ -1095,7 +1095,7 @@ with tab2:
                         sel_comb = dfV_edit[dfV_edit["Selecionar"] == True].drop(columns=["Selecionar"], errors="ignore")
                         col_btn1, col_btn2 = st.columns([1,1])
                         with col_btn1:
-                            if st.button("�z. Enviar p/ OC �?" ALIVVIA", use_container_width=True):
+                            if st.button("�z. Enviar p/ OC —" ALIVVIA", use_container_width=True):
                                 base = sel_comb.rename(columns={
                                     "Compra_ALIVVIA":"Compra_Sugerida",
                                     "Valor_ALIVVIA":"Valor_Compra_R$",
@@ -1103,7 +1103,7 @@ with tab2:
                                 })
                                 oc.adicionar_itens_cesta("ALIVVIA", base[["SKU","fornecedor","Preco","Compra_Sugerida","Valor_Compra_R$"]].copy())
                         with col_btn2:
-                            if st.button("�z. Enviar p/ OC �?" JCA", use_container_width=True):
+                            if st.button("�z. Enviar p/ OC —" JCA", use_container_width=True):
                                 base = sel_comb.rename(columns={
                                     "Compra_JCA":"Compra_Sugerida",
                                     "Valor_JCA":"Valor_Compra_R$",
@@ -1119,7 +1119,7 @@ with tab2:
 
 # ================== TAB 3: Alocação de Compra ==================
 with tab3:
-    st.subheader("Distribuir quantidade entre empresas �?" proporcional às vendas (FULL + Shopee)")
+    st.subheader("Distribuir quantidade entre empresas —" proporcional às vendas (FULL + Shopee)")
 
     if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
         st.info("Carregue o Padrão (KITS/CAT) no sidebar.")
@@ -1213,7 +1213,7 @@ with tab4:
     oc.render_tab()
 
 # ================== Rodapé ==================
-st.caption(f"© Alivvia �?" {VERSION}")
+st.caption(f"© Alivvia —" {VERSION}")
 
 
 
