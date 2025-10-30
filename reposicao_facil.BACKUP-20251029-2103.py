@@ -26,34 +26,7 @@ from orion.dominio.padrao import Catalogo, _carregar_padrao_de_content, carregar
 # =========================
 #  VersÃ£o do App
 # =========================
-VERSION = "v3.4.4"
-# ===== DIAGNÓSTICO ORION =====
-try:
-    import os, sys, time, subprocess
-    import streamlit as st
-    _branch = ""
-    try:
-        _branch = subprocess.check_output(["git","rev-parse","--abbrev-ref","HEAD"], text=True).strip()
-    except Exception as _e:
-        _branch = f"n/a ({_e})"
-
-    st.sidebar.markdown("### 🔧 Diagnóstico de Execução")
-    st.sidebar.write({
-        "VERSION": VERSION,
-        "__file__": __file__,
-        "cwd": os.getcwd(),
-        "python": sys.executable,
-        "git_branch": _branch
-    })
-    try:
-        _mtime = time.ctime(os.path.getmtime(__file__))
-        st.sidebar.write({"file_mtime": _mtime})
-    except Exception as _:
-        pass
-    st.caption(f"🧩 BUILD {VERSION} — branch: {_branch}")
-except Exception as _e:
-    pass
-# ===== /DIAGNÓSTICO ORION =====
+VERSION = "v3.4.3"
 
 # =========================
 #  TINY v3 â€” Helpers
@@ -1312,7 +1285,6 @@ else:
 
 # ---------- RodapÃ© ----------
 st.caption(f"Â© Alivvia â€” {VERSION}")
-
 
 
 
