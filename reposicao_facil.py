@@ -1092,7 +1092,8 @@ st.download_button(
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         use_container_width=True
                     )
-        else:
+        
+                         else:
             st.info("Clique Gerar Compra para calcular e entÃ£o aplicar filtros.")
 
 # ================== TAB 3: AlocaÃ§Ã£o de Compra ==================
