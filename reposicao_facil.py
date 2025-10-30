@@ -156,8 +156,7 @@ _ensure_state()
 st.session_state.setdefault("oc_cesta", {"ALIVVIA": [], "JCA": []})
 st.session_state.setdefault("oc_meta", {})
 st.session_state.setdefault("oc_seq", 1)
-# ========================================================================
-# ============ HTTP Google Sheets ============
+# ========================================================================# ============ HTTP Google Sheets ============
 def _requests_session() -> requests.Session:
     s = requests.Session()
     retries = Retry(total=3, backoff_factor=0.6, status_forcelist=[429, 500, 502, 503, 504], allowed_methods=["GET"])
@@ -1215,4 +1214,5 @@ with tab4:
 
 # ================== RodapÃ© ==================
 st.caption(f"Â© Alivvia â€” {VERSION}")
+
 
