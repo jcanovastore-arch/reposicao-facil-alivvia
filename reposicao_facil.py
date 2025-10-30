@@ -32,7 +32,6 @@ import requests
 from requests.adapters import HTTPAdapter, Retry
 
 import ordem_compra as oc  # módulo de Ordem de Compra
-
 st.set_page_config(page_title="Reposicao Logistica - Alivvia", layout="wide")
 
 DEFAULT_SHEET_LINK = (
@@ -1080,7 +1079,7 @@ try:
                 "Valor_ALIVVIA":"Valor_Compra_R$",
                 "Preco_ALIVVIA":"Preco",
             })
-import ordem_compra as oc  # módulo de Ordem de Compra
+
             oc.adicionar_itens_cesta("ALIVVIA", base[["SKU","fornecedor","Preco","Compra_Sugerida","Valor_Compra_R$"]].copy())
     with col_btn2:
         if st.button("➕ Enviar p/ OC — JCA", use_container_width=True):
@@ -1089,7 +1088,7 @@ import ordem_compra as oc  # módulo de Ordem de Compra
                 "Valor_JCA":"Valor_Compra_R$",
                 "Preco_JCA":"Preco",
             })
-import ordem_compra as oc  # módulo de Ordem de Compra
+
             oc.adicionar_itens_cesta("JCA", base[["SKU","fornecedor","Preco","Compra_Sugerida","Valor_Compra_R$"]].copy())
 except Exception as _e2:
     st.info("Seleção combinada para OC aparece após gerar as compras das duas empresas.")
@@ -1190,11 +1189,5 @@ with tab3:
 
 # ================== RodapÃ© ==================
 st.caption(f"Â© Alivvia â€” {VERSION}")
-
-
-
-
-
-
 
 
