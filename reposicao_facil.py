@@ -152,6 +152,24 @@ def _ensure_state():
 
 _ensure_state()
 
+# ===== OC: estado mínimo (previne KeyError na aba "Ordem de Compra") =====
+st.session_state.setdefault("oc_cesta", {"ALIVVIA": [], "JCA": []})
+st.session_state.setdefault("oc_meta", {})
+st.session_state.setdefault("oc_seq", 1)
+# ========================================================================
+
+
+    for emp in ["ALIVVIA", "JCA"]:
+        st.session_state.setdefault(emp, {})
+        for kind in ["FULL", "VENDAS", "ESTOQUE"]:
+            st.session_state[emp].setdefault(kind, {"name": None, "bytes": None})
+            if st.session_state[emp][kind]["name"] is None:
+                it = _store_get(emp, kind)
+                if it:
+                    st.session_state[emp][kind] = it
+
+_ensure_state()
+
 # ============ HTTP Google Sheets ============
 def _requests_session() -> requests.Session:
     s = requests.Session()
