@@ -1,0 +1,21 @@
+{
+  "cabecalho": {
+    "numero_oc": "OC-ALIVVIA-20251028-0001",
+    "empresa": "ALIVVIA",
+    "fornecedor": "Thor",
+    "data_emissao": "2025-10-28 23:42:20",
+    "com_nf": false,
+    "frete": 0.0,
+    "criado_por": "",
+    "observacoes": "",
+    "status": "ABERTA"
+  },
+  "itens": [
+    {
+      "SKU": "BLOCO YOGA",
+      "Descricao": "",
+      "Qtd": 20.0,
+      "PrecoUnit": 0.0
+    }
+  ]
+}
