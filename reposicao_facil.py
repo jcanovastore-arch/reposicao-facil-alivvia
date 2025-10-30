@@ -928,7 +928,7 @@ with tab2:
 
             # =============== LISTA COMBINADA (ALIVVIA + JCA) ===============
             st.markdown("---")
-            with st.expander("Lista combinada - ver compras das 2 contas lado a lado", expanded=False):
+            with st.expander("Lista combinada (ALIVVIA + JCA)", expanded=False):
                 tem_A = "ALIVVIA" in st.session_state["resultado_compra"]
                 tem_J = "JCA"     in st.session_state["resultado_compra"]
 
@@ -990,13 +990,7 @@ with tab2:
                     dfV = dfV[[c for c in cols_show2 if c in dfV.columns]]
 
                     st.caption(f"Linhas apÃ³s filtros: {len(dfV)}")
-                    st.dataframe(
-                        dfV,
-                        use_container_width=True,
-                        hide_index=True,
-                        height=500,
-                        column_config={
-                            "fornecedor": st.column_config.TextColumn("Fornecedor"),
+                    ,
                             "SKU": st.column_config.TextColumn("SKU"),
                             "Estoque_ALIVVIA": st.column_config.NumberColumn("Estoque ALIVVIA", format="%d"),
                             "Estoque_JCA": st.column_config.NumberColumn("Estoque JCA", format="%d"),
@@ -1191,6 +1185,7 @@ with tab3:
 
 # ================== RodapÃ© ==================
 st.caption(f"Â© Alivvia â€” {VERSION}")
+
 
 
 
