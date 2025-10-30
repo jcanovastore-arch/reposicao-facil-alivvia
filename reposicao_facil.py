@@ -814,15 +814,25 @@ with tab2:
             with st.expander("Filtros (sem recálculo)", expanded=True):
                 fornecedores = sorted([f for f in df_final["fornecedor"].dropna().astype(str).unique().tolist() if f != ""])
                 sel_fornec = st.multiselect("Fornecedor", options=fornecedores, default=[], key=f"filtro_fornec_{empresa}")
+sku_all = sorted(df_final["SKU"].dropna().astype(str).unique().tolist())
+txt = st.text_input(
+    "Buscar SKU (parte do codigo)",
+    key=f"busca_sku_{empresa}",
+    placeholder="ex.: YOGA, 123, PRETO"
+)
+if txt:
+    sku_filtrado = [s for s in sku_all if txt.upper() in s.upper()]
+else:
+    sku_filtrado = sku_all
 
-                sku_all = sorted(df_final["SKU"].dropna().astype(str).unique().tolist())
-                txt = st.text_input("Buscar SKU (parte do codigo)", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO")", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO")", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO")", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO...")
-                if txt:
-                    sku_filtrado = [s for s in sku_all if txt.upper() in s.upper()]
-                else:
-                    sku_filtrado = sku_all
+sel_skus = st.multiselect(
+    "Selecione SKUs",
+    options=sku_filtrado,
+    default=[],
+    key=f"filtro_sku_{empresa}"
+)
 
-                sel_skus = st.multiselect("Selecione SKUs", options=sku_filtrado, default=[], key=f"filtro_sku_{empresa}")
+sel_skus = st.multiselect("Selecione SKUs", options=sku_filtrado, default=[], key=f"filtro_sku_{empresa}")
 
             df_view = df_final.copy()
             if sel_fornec:
@@ -1185,6 +1195,7 @@ with tab3:
 
 # ================== RodapÃ© ==================
 st.caption(f"Â© Alivvia â€” {VERSION}")
+
 
 
 
