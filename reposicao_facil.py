@@ -30,7 +30,7 @@ import ordem_compra as oc
 
 VERSION = "v3.3.0 - 2025-10-21"
 
-st.set_page_config(page_title="Reposição Logística �?" Alivvia", layout="wide")
+st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
 DEFAULT_SHEET_LINK = (
     "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/"
@@ -1214,6 +1214,7 @@ with tab4:
 
 # ================== Rodapé ==================
 st.caption(f"© Alivvia �?" {VERSION}")
+
 
 
 
