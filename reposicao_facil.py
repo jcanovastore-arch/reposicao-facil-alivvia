@@ -1017,7 +1017,7 @@ with tab2:
 
     emp_arg = None if emp_f == "(Todas)" else emp_f
     stts_arg = None if status_f == "(Todos)" else [status_f]
-    ocs_brutas = listar_ocs(emp_arg, stts_arg)
+    ocs_brutas = oc.listar_ocs(emp_arg, stts_arg)
 
     # Filtra sÃ³ OCs vÃ¡lidas (com oc_id). Evita KeyError.
     ocs = [o for o in ocs_brutas if isinstance(o, dict) and o.get("oc_id")]
@@ -1111,6 +1111,7 @@ with tab2:
 
 # ================== Rodape ==================
 st.caption(f"Alivvia - {VERSION}")
+
 
 
 
