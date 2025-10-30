@@ -854,45 +854,6 @@ with tab2:
                     "Valor_Compra_R$": st.column_config.NumberColumn("Total (R$)", format="R$ %.2f"),
                 },
             )
-# === Selecionar linhas e enviar para OC (empresa ativa) ===
-try:
-    df_edit = df_view_sub.copy()
-    if "Selecionar" not in df_edit.columns:
-        df_edit["Selecionar"] = False
-
-    df_edit = st.data_editor(
-        df_edit,
-        use_container_width=True,
-        hide_index=True,
-        height=380,
-        column_config={
-            "Selecionar": st.column_config.CheckboxColumn("Selecionar")
-        },
-    )
-
-    sel_rows = df_edit[df_edit["Selecionar"] == True].drop(columns=["Selecionar"], errors="ignore")
-
-    if not sel_rows.empty:
-        st.success(f"{len(sel_rows)} linha(s) selecionadas.")
-
-    csel1, csel2 = st.columns([1, 1])
-    with csel1:
-        if st.button("Enviar selecionados p/ OC — " + empresa, use_container_width=True):
-            base = sel_rows.copy()
-            # Garante Total calculado
-            base["Preco"] = pd.to_numeric(base.get("Preco", 0), errors="coerce").fillna(0.0).astype(float)
-            base["Compra_Sugerida"] = pd.to_numeric(base.get("Compra_Sugerida", 0), errors="coerce").fillna(0).astype(int)
-            base["Valor_Compra_R$"] = (base["Preco"] * base["Compra_Sugerida"]).round(2)
-            # Envia apenas colunas necessárias
-            cols_envio = ["SKU","fornecedor","Preco","Compra_Sugerida","Valor_Compra_R$"]
-            falt = [c for c in cols_envio if c not in base.columns]
-            if falt:
-                st.warning("Colunas faltando para enviar à OC: " + ", ".join(falt))
-            else:
-                oc.adicionar_itens_cesta(empresa, base[cols_envio].copy())
-except Exception as _e:
-    st.info("Seleção para OC aparece após gerar e filtrar a tabela.")
-# === FIM seleção ===
 
 
             colx1, colx2 = st.columns([1, 1])
@@ -931,7 +892,47 @@ except Exception as _e:
 
                     # Unir por SKU (preferir fornecedor de A)
                     dfC = pd.merge(dfA, dfJ, on="SKU", how="outer", suffixes=("_A","_J"))
-                    dfC["fornecedor"] = dfC["fornecedor_A"].fillna(dfC["fornecedor_J"])
+                    
+# === Selecionar linhas e enviar para OC (empresa ativa) ===
+try:
+    df_edit = df_view_sub.copy()
+    if "Selecionar" not in df_edit.columns:
+        df_edit["Selecionar"] = False
+
+    df_edit = st.data_editor(
+        df_edit,
+        use_container_width=True,
+        hide_index=True,
+        height=380,
+        column_config={
+            "Selecionar": st.column_config.CheckboxColumn("Selecionar")
+        },
+    )
+
+    sel_rows = df_edit[df_edit["Selecionar"] == True].drop(columns=["Selecionar"], errors="ignore")
+
+    if not sel_rows.empty:
+        st.success(f"{len(sel_rows)} linha(s) selecionadas.")
+
+    csel1, csel2 = st.columns([1, 1])
+    with csel1:
+        if st.button("Enviar selecionados p/ OC — " + empresa, use_container_width=True):
+            base = sel_rows.copy()
+            # Normaliza colunas essenciais
+            base["Preco"] = pd.to_numeric(base.get("Preco", 0), errors="coerce").fillna(0.0).astype(float)
+            base["Compra_Sugerida"] = pd.to_numeric(base.get("Compra_Sugerida", 0), errors="coerce").fillna(0).astype(int)
+            base["Valor_Compra_R$"] = (base["Preco"] * base["Compra_Sugerida"]).round(2)
+
+            cols_envio = ["SKU","fornecedor","Preco","Compra_Sugerida","Valor_Compra_R$"]
+            falt = [c for c in cols_envio if c not in base.columns]
+            if falt:
+                st.warning("Colunas faltando para enviar à OC: " + ", ".join(falt))
+            else:
+                oc.adicionar_itens_cesta(empresa, base[cols_envio].copy())
+except Exception as _e:
+    st.info("Seleção para OC aparece após gerar e filtrar a tabela.")
+# === FIM seleção ===
+dfC["fornecedor"] = dfC["fornecedor_A"].fillna(dfC["fornecedor_J"])
                     dfC = dfC.drop(columns=["fornecedor_A","fornecedor_J"], errors="ignore")
 
                     for c in ["Compra_ALIVVIA","Compra_JCA", "Estoque_ALIVVIA","Estoque_JCA"]:
@@ -1330,4 +1331,5 @@ def render_tab():
 
 # ================== Rodape ==================
 st.caption(f"Alivvia - {VERSION}")
+
 
