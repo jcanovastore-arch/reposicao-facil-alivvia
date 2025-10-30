@@ -33,7 +33,7 @@ from requests.adapters import HTTPAdapter, Retry
 
 `r`nimport ordem_compra as oc  # NOVO: módulo de Ordem de Compra`r`nVERSION = "v3.3.0 - 2025-10-21"
 
-st.set_page_config(page_title="ReposiÃ§Ã£o LogÃ­stica â€” Alivvia", layout="wide")
+st.set_page_config(page_title="Reposicao Logistica - Alivvia", layout="wide")
 
 DEFAULT_SHEET_LINK = (
     "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/"
@@ -663,7 +663,7 @@ with st.sidebar:
         st.link_button("Abrir no Drive (editar)", DEFAULT_SHEET_LINK, use_container_width=True)
 
 # ================== TÃ­tulo ==================
-st.title("ReposiÃ§Ã£o LogÃ­stica â€” Alivvia")
+st.title("Reposicao Logistica - Alivvia")
 c1, c2 = st.columns([4, 1])
 with c2:
     st.markdown(f"<div style='text-align:right; font-size:12px; color:#888;'>VersÃ£o: <b>{VERSION}</b></div>", unsafe_allow_html=True)
@@ -671,7 +671,7 @@ with c2:
 if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
     st.warning("â–º Carregue o PadrÃ£o (KITS/CAT) no sidebar antes de usar as abas.")
 
-tab1, tab2, tab3, tab4 = st.tabs(["📂 Dados das Empresas", "🧮 Compra Automática", "📦 Alocação de Compra", "🧾 Ordem de Compra"])
+tab1, tab2, tab3, tab4 = tab1, tab2, tab3, tab4 = st.tabs(["Dados das Empresas", "Compra Automatica", "Alocacao de Compra", "Ordem de Compra"])
 
 # ================== TAB 1: Dados ==================
 with tab1:
@@ -876,7 +876,7 @@ with tab2:
 
             # =============== CONSOLIDADO POR SKU (ALIVVIA + JCA) ===============
             st.markdown("---")
-            with st.expander("ðŸ”Ž Consolidado por SKU â€” ver ALIVVIA e JCA juntos", expanded=False):
+            with st.expander("Consolidado por SKU - ver ALIVVIA e JCA juntos", expanded=False):
                 tem_A = "ALIVVIA" in st.session_state["resultado_compra"]
                 tem_J = "JCA"     in st.session_state["resultado_compra"]
                 if not (tem_A and tem_J):
@@ -927,7 +927,7 @@ with tab2:
 
             # =============== LISTA COMBINADA (ALIVVIA + JCA) ===============
             st.markdown("---")
-            with st.expander("ðŸ“‹ Lista combinada â€” ver compras das 2 contas lado a lado", expanded=False):
+            with st.expander("Lista combinada - ver compras das 2 contas lado a lado", expanded=False):
                 tem_A = "ALIVVIA" in st.session_state["resultado_compra"]
                 tem_J = "JCA"     in st.session_state["resultado_compra"]
 
@@ -1190,6 +1190,7 @@ with tab3:
 
 # ================== RodapÃ© ==================
 st.caption(f"Â© Alivvia â€” {VERSION}")
+
 
 
 
