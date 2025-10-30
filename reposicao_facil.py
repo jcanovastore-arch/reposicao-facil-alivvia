@@ -816,7 +816,7 @@ with tab2:
                 sel_fornec = st.multiselect("Fornecedor", options=fornecedores, default=[], key=f"filtro_fornec_{empresa}")
 
                 sku_all = sorted(df_final["SKU"].dropna().astype(str).unique().tolist())
-                txt = st.text_input("Buscar SKU (parte do codigo)", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO")", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO")", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO...")
+                txt = st.text_input("Buscar SKU (parte do codigo)", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO")", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO")", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO")", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO...")
                 if txt:
                     sku_filtrado = [s for s in sku_all if txt.upper() in s.upper()]
                 else:
@@ -1185,6 +1185,7 @@ with tab3:
 
 # ================== RodapÃ© ==================
 st.caption(f"Â© Alivvia â€” {VERSION}")
+
 
 
 
