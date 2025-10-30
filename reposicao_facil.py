@@ -44,7 +44,7 @@ DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"
 
 # ================ UI helpers =================
 def badge_ok(label: str, filename: str) -> str:
-    return f"<span style='background:#198754; color:#fff; padding:6px 10px; border-radius:10px; font-size:12px;'>âœ… {label}: <b>{filename}</b></span>"
+    return f"<span style='background:#198754; color:#fff; padding:6px 10px; border-radius:10px; font-size:12px;'>âœ... {label}: <b>{filename}</b></span>"
 
 # ============ PersistÃªncia em DISCO (.uploads/) ============
 BASE_UPLOAD_DIR = ".uploads"
@@ -816,7 +816,7 @@ with tab2:
                 sel_fornec = st.multiselect("Fornecedor", options=fornecedores, default=[], key=f"filtro_fornec_{empresa}")
 
                 sku_all = sorted(df_final["SKU"].dropna().astype(str).unique().tolist())
-                txt = st.text_input("Buscar SKU (parte do código)", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO")", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETOâ€¦")
+                txt = st.text_input("Buscar SKU (parte do codigo)", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO")", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO")", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO...")
                 if txt:
                     sku_filtrado = [s for s in sku_all if txt.upper() in s.upper()]
                 else:
@@ -965,7 +965,7 @@ with tab2:
                     with colf2:
                         only_pos = st.checkbox("Somente compra > 0", value=True)
                     with colf3:
-                        busca_sku2 = st.text_input("Buscar SKU (parte do código)", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO")", placeholder="parte do SKUâ€¦")
+                        busca_sku2 = st.text_input("Buscar SKU (parte do codigo)", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO")", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO")", placeholder="parte do SKU...")
 
                     dfV = dfC.copy()
                     if f_sel:
@@ -1185,6 +1185,7 @@ with tab3:
 
 # ================== RodapÃ© ==================
 st.caption(f"Â© Alivvia â€” {VERSION}")
+
 
 
 
