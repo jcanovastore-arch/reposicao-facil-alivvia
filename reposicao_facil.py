@@ -1024,10 +1024,8 @@ with tab2:
 
     if not ocs_brutas:
         st.info("Nenhuma OC encontrada nos filtros.")
-        return
     if not ocs:
         st.warning("Existem arquivos de OC sem 'oc_id'. Eles foram ignorados.")
-        return
 
     df_ocs = pd.DataFrame([{
         "oc_id": o.get("oc_id",""),
@@ -1048,7 +1046,6 @@ with tab2:
         oc = next((d for d in ocs if d.get("oc_id")==sel_id), None)
         if not oc:
             st.warning("OC nÃ£o encontrada (arquivo pode ter sido movido).")
-            return
 
         st.write(f"**OC {sel_id}** â€” {oc.get('empresa')} / {oc.get('fornecedor')} â€” status: **{oc.get('status')}**")
 
@@ -1114,6 +1111,7 @@ with tab2:
 
 # ================== Rodape ==================
 st.caption(f"Alivvia - {VERSION}")
+
 
 
 
