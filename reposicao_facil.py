@@ -30,9 +30,8 @@ from unidecode import unidecode
 import streamlit as st
 import requests
 from requests.adapters import HTTPAdapter, Retry
-
-`r`nimport ordem_compra as oc  # NOVO: módulo de Ordem de Compra`r`nVERSION = "v3.3.0 - 2025-10-21"
-
+import ordem_compra as oc  # NOVO: módulo de Ordem de Compra
+VERSION = "v3.3.0"
 st.set_page_config(page_title="ReposiÃ§Ã£o LogÃ­stica â€” Alivvia", layout="wide")
 
 DEFAULT_SHEET_LINK = (
@@ -1039,14 +1038,7 @@ with tab2:
                         return bio.read()
 
                     xlsx2 = _xlsx_combinado(dfV)
-                    st.download_button(
-                        "Baixar XLSX (lista combinada)",
-                        data=xlsx2,
-                        file_name="Compra_Duas_Contas.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
-        
+                    
 # ===== NOVO: Selecionar e enviar da Lista Combinada =====
 try:
     dfV_edit = dfV.copy()
@@ -1080,7 +1072,6 @@ try:
                 "Valor_ALIVVIA":"Valor_Compra_R$",
                 "Preco_ALIVVIA":"Preco",
             })
-            import ordem_compra as oc
             oc.adicionar_itens_cesta("ALIVVIA", base[["SKU","fornecedor","Preco","Compra_Sugerida","Valor_Compra_R$"]].copy())
     with col_btn2:
         if st.button("➕ Enviar p/ OC — JCA", use_container_width=True):
@@ -1089,12 +1080,19 @@ try:
                 "Valor_JCA":"Valor_Compra_R$",
                 "Preco_JCA":"Preco",
             })
-            import ordem_compra as oc
             oc.adicionar_itens_cesta("JCA", base[["SKU","fornecedor","Preco","Compra_Sugerida","Valor_Compra_R$"]].copy())
 except Exception as _e2:
     st.info("Seleção combinada para OC aparece após gerar as compras das duas empresas.")
 # ===== FIM NOVO =====
-else:
+
+st.download_button(
+                        "Baixar XLSX (lista combinada)",
+                        data=xlsx2,
+                        file_name="Compra_Duas_Contas.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+        else:
             st.info("Clique Gerar Compra para calcular e entÃ£o aplicar filtros.")
 
 # ================== TAB 3: AlocaÃ§Ã£o de Compra ==================
@@ -1190,6 +1188,11 @@ with tab3:
 
 # ================== RodapÃ© ==================
 st.caption(f"Â© Alivvia â€” {VERSION}")
+
+
+
+
+
 
 
 
