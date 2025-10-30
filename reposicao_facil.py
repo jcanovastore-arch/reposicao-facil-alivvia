@@ -1092,8 +1092,7 @@ st.download_button(
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         use_container_width=True
                     )
-        if empresa not in st.session_state["resultado_compra"]:
-            st.info("Clique Gerar Compra para calcular e então aplicar filtros.")# ================== TAB 3: AlocaÃ§Ã£o de Compra ==================
+# ================== TAB 3: AlocaÃ§Ã£o de Compra ==================
 with tab3:
     st.subheader("Distribuir quantidade entre empresas â€” proporcional Ã s vendas (FULL + Shopee)")
 
@@ -1186,6 +1185,7 @@ with tab3:
 
 # ================== RodapÃ© ==================
 st.caption(f"Â© Alivvia â€” {VERSION}")
+
 
 
 
