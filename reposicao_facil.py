@@ -664,7 +664,7 @@ with st.sidebar:
         st.link_button("Abrir no Drive (editar)", DEFAULT_SHEET_LINK, use_container_width=True)
 
 # ================== Título ==================
-st.title("Reposição Logística —" Alivvia")
+st.title("Reposição Logística — Alivvia")
 c1, c2 = st.columns([4, 1])
 with c2:
     st.markdown(f"<div style='text-align:right; font-size:12px; color:#888;'>Versão: <b>{VERSION}</b></div>", unsafe_allow_html=True)
@@ -1095,7 +1095,7 @@ with tab2:
                         sel_comb = dfV_edit[dfV_edit["Selecionar"] == True].drop(columns=["Selecionar"], errors="ignore")
                         col_btn1, col_btn2 = st.columns([1,1])
                         with col_btn1:
-                            if st.button("�z. Enviar p/ OC —" ALIVVIA", use_container_width=True):
+                            if st.button("�z. Enviar p/ OC — Alivvia", use_container_width=True):
                                 base = sel_comb.rename(columns={
                                     "Compra_ALIVVIA":"Compra_Sugerida",
                                     "Valor_ALIVVIA":"Valor_Compra_R$",
