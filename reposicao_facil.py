@@ -158,7 +158,6 @@ st.session_state.setdefault("oc_meta", {})
 st.session_state.setdefault("oc_seq", 1)
 # ========================================================================
 
-
     for emp in ["ALIVVIA", "JCA"]:
         st.session_state.setdefault(emp, {})
         for kind in ["FULL", "VENDAS", "ESTOQUE"]:
