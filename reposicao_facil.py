@@ -1,5 +1,5 @@
-# reposicao_facil.py
-# Reposicao Logistica — Alivvia (Streamlit)
+﻿# reposicao_facil.py
+# Reposicao Logistica â€” Alivvia (Streamlit)
 # UI limpa (sem emojis), Compra Automatica sem duplicacoes, Lista Combinada unica com "Selecionar" + Enviar p/ OC.
 # Logica de calculo preservada.
 
@@ -854,6 +854,46 @@ with tab2:
                     "Valor_Compra_R$": st.column_config.NumberColumn("Total (R$)", format="R$ %.2f"),
                 },
             )
+# === Selecionar linhas e enviar para OC (empresa ativa) ===
+try:
+    df_edit = df_view_sub.copy()
+    if "Selecionar" not in df_edit.columns:
+        df_edit["Selecionar"] = False
+
+    df_edit = st.data_editor(
+        df_edit,
+        use_container_width=True,
+        hide_index=True,
+        height=380,
+        column_config={
+            "Selecionar": st.column_config.CheckboxColumn("Selecionar")
+        },
+    )
+
+    sel_rows = df_edit[df_edit["Selecionar"] == True].drop(columns=["Selecionar"], errors="ignore")
+
+    if not sel_rows.empty:
+        st.success(f"{len(sel_rows)} linha(s) selecionadas.")
+
+    csel1, csel2 = st.columns([1, 1])
+    with csel1:
+        if st.button("Enviar selecionados p/ OC — " + empresa, use_container_width=True):
+            base = sel_rows.copy()
+            # Garante Total calculado
+            base["Preco"] = pd.to_numeric(base.get("Preco", 0), errors="coerce").fillna(0.0).astype(float)
+            base["Compra_Sugerida"] = pd.to_numeric(base.get("Compra_Sugerida", 0), errors="coerce").fillna(0).astype(int)
+            base["Valor_Compra_R$"] = (base["Preco"] * base["Compra_Sugerida"]).round(2)
+            # Envia apenas colunas necessárias
+            cols_envio = ["SKU","fornecedor","Preco","Compra_Sugerida","Valor_Compra_R$"]
+            falt = [c for c in cols_envio if c not in base.columns]
+            if falt:
+                st.warning("Colunas faltando para enviar à OC: " + ", ".join(falt))
+            else:
+                oc.adicionar_itens_cesta(empresa, base[cols_envio].copy())
+except Exception as _e:
+    st.info("Seleção para OC aparece após gerar e filtrar a tabela.")
+# === FIM seleção ===
+
 
             colx1, colx2 = st.columns([1, 1])
             with colx1:
@@ -1106,8 +1146,188 @@ with tab3:
                 st.error(str(e))
 
 # ================== TAB 4: Ordem de Compra ==================
-with tab4:
-    oc.render_tab()
+def render_tab():
+    st.header("ðŸ§¾ Ordem de Compra")
+    st.caption("Selecione itens nas outras telas e clique â€œâž• Enviar para Ordem de Compraâ€ para popular a cesta.")
+
+    # â€” Cesta
+    colA, colB = st.columns([3,1])
+    with colA:
+        emp = st.radio("Empresa da cesta", ["ALIVVIA","JCA"], horizontal=True, key="oc_emp")
+    with colB:
+        if st.button("ðŸ§º Limpar cesta", use_container_width=True):
+            limpar_cesta(emp)
+            st.info(f"Cesta da {emp} limpa.")
+
+    cesta = st.session_state.get("oc_cesta", {}).get(emp, [])
+    df_cesta = pd.DataFrame(cesta) if cesta else pd.DataFrame(columns=["SKU","fornecedor","preco","qtd_comprada","valor_total"])
+    st.subheader("Itens na Cesta")
+    st.dataframe(df_cesta, use_container_width=True, hide_index=True)
+
+    # â€” Dados da OC
+    with st.expander("Dados da Ordem de Compra", expanded=True):
+        fornecedor = st.text_input("Nome do fornecedor", key="oc_fornec")
+        condicoes = st.text_area("CondiÃ§Ãµes de pagamento / observaÃ§Ãµes (opcional)", key="oc_cond")
+        endereco = st.text_input("EndereÃ§o de entrega (opcional)", key="oc_end")
+        logo_url = st.text_input("URL do logo (apenas na impressÃ£o, opcional)", key="oc_logo")
+
+        colx, coly, colz = st.columns([1,1,1])
+        with colx:
+            finaliza = st.checkbox("Finalizar agora (pronto para impressÃ£o)", value=True)
+        with coly:
+            gerar_por_fornecedor = st.checkbox("Gerar 1 OC por fornecedor (se houver vÃ¡rios na cesta)", value=True)
+        with colz:
+            permitir_edicao_posterior = st.checkbox("Permitir reabrir/editar depois", value=True)
+
+        if st.button("ðŸ’¾ Gerar e salvar OC(s)", type="primary"):
+            if df_cesta.empty:
+                st.warning("A cesta estÃ¡ vazia.")
+            elif not fornecedor and not gerar_por_fornecedor:
+                st.warning("Informe o fornecedor ou ative '1 OC por fornecedor'.")
+            else:
+                grupos = []
+                if gerar_por_fornecedor:
+                    for f in sorted(df_cesta["fornecedor"].fillna("").astype(str).unique().tolist()):
+                        sub = df_cesta[df_cesta["fornecedor"]==f] if f else df_cesta[df_cesta["fornecedor"].isna() | (df_cesta["fornecedor"]=="")]
+                        if sub.shape[0]:
+                            grupos.append((f or fornecedor or "", sub))
+                else:
+                    grupos.append((fornecedor, df_cesta))
+
+                criadas = []
+                for forn_nome, df_sub in grupos:
+                    itens = df_sub.to_dict(orient="records")
+                    for it in itens:
+                        it["descricao"] = it.get("descricao","")
+                    oc = {
+                        "oc_id": None,
+                        "empresa": emp,
+                        "fornecedor": forn_nome or "",
+                        "status": "Finalizada" if finaliza else "Rascunho",
+                        "finalizada": bool(finaliza),
+                        "itens": itens,
+                        "condicoes": condicoes,
+                        "endereco_entrega": endereco,
+                        "permitir_edicao": permitir_edicao_posterior,
+                        "historico": [{"evento": "criada", "quando": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}],
+                    }
+                    oc_id = salvar_oc_json(oc)
+                    criadas.append(oc_id)
+
+                st.success(f"OC(s) criada(s): {', '.join(criadas)}")
+                limpar_cesta(emp)
+
+    st.markdown("---")
+
+    # â€” Gerenciador
+    st.subheader("Ordens de Compra â€” Gerenciador")
+    c1, c2, c3 = st.columns([1,1,1])
+    with c1:
+        emp_f = st.selectbox("Empresa", ["(Todas)","ALIVVIA","JCA"], index=0)
+    with c2:
+        status_opts = ["(Todos)","Rascunho","Finalizada","Recebida Parcial","Recebida Total","Cancelada"]
+        status_f = st.selectbox("Status", status_opts, index=0)
+    with c3:
+        if st.button("ðŸ”„ Atualizar lista", use_container_width=True):
+            pass
+
+    emp_arg = None if emp_f == "(Todas)" else emp_f
+    stts_arg = None if status_f == "(Todos)" else [status_f]
+    ocs_brutas = listar_ocs(emp_arg, stts_arg)
+
+    # Filtra sÃ³ OCs vÃ¡lidas (com oc_id). Evita KeyError.
+    ocs = [o for o in ocs_brutas if isinstance(o, dict) and o.get("oc_id")]
+
+    if not ocs_brutas:
+        st.info("Nenhuma OC encontrada nos filtros.")
+        return
+    if not ocs:
+        st.warning("Existem arquivos de OC sem 'oc_id'. Eles foram ignorados.")
+        return
+
+    df_ocs = pd.DataFrame([{
+        "oc_id": o.get("oc_id",""),
+        "empresa": o.get("empresa",""),
+        "fornecedor": o.get("fornecedor",""),
+        "status": o.get("status",""),
+        "itens": len(o.get("itens",[])),
+        "criado_em": o.get("criado_em",""),
+        "atualizado_em": o.get("atualizado_em",""),
+    } for o in ocs])
+
+    st.dataframe(df_ocs, use_container_width=True, hide_index=True, height=280)
+
+    opcoes_ids = ["(Selecione)"] + [d.get("oc_id","") for d in ocs]
+    sel_id = st.selectbox("Abrir/Editar OC", options=opcoes_ids, index=0)
+
+    if sel_id != "(Selecione)":
+        oc = next((d for d in ocs if d.get("oc_id")==sel_id), None)
+        if not oc:
+            st.warning("OC nÃ£o encontrada (arquivo pode ter sido movido).")
+            return
+
+        st.write(f"**OC {sel_id}** â€” {oc.get('empresa')} / {oc.get('fornecedor')} â€” status: **{oc.get('status')}**")
+
+        itens = pd.DataFrame(oc.get("itens",[]))
+        if not itens.empty:
+            itens["nf_entregue"] = itens["nf_entregue"].astype(object)
+            itens["qtd_recebida"] = itens["qtd_recebida"].astype(object)
+            itens["obs_receb"] = itens["obs_receb"].astype(str)
+
+            st.markdown("**Itens** (edite NF e Qtde Recebida):")
+            itens_edit = st.data_editor(
+                itens,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "SKU": st.column_config.TextColumn("SKU", disabled=True),
+                    "fornecedor": st.column_config.TextColumn("Fornecedor", disabled=True),
+                    "preco": st.column_config.NumberColumn("PreÃ§o (R$)", format="%.2f", disabled=True),
+                    "qtd_comprada": st.column_config.NumberColumn("Qtd Comprada", format="%d", disabled=True),
+                    "valor_total": st.column_config.NumberColumn("Total (R$)", format="%.2f", disabled=True),
+                    "nf_entregue": st.column_config.CheckboxColumn("NF entregue?"),
+                    "qtd_recebida": st.column_config.NumberColumn("Qtd Recebida", min_value=0),
+                    "obs_receb": st.column_config.TextColumn("Obs. recebimento"),
+                }
+            )
+
+            colb1, colb2, colb3, colb4 = st.columns([1,1,1,1])
+            with colb1:
+                if st.button("ðŸ’¾ Salvar alteraÃ§Ãµes", use_container_width=True):
+                    oc["itens"] = itens_edit.to_dict(orient="records")
+                    oc["historico"] = oc.get("historico", []) + [{"evento":"editado", "quando": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}]
+                    salvar_oc_json(oc)
+                    st.success("OC salva.")
+            with colb2:
+                if st.button("âœ… Dar Baixa (Total)", use_container_width=True):
+                    oc["status"] = "Recebida Total"
+                    salvar_oc_json(oc)
+                    st.success("OC marcada como Recebida Total.")
+            with colb3:
+                if st.button("â¬ Baixa Parcial", use_container_width=True):
+                    oc["status"] = "Recebida Parcial"
+                    salvar_oc_json(oc)
+                    st.success("OC marcada como Recebida Parcial.")
+            with colb4:
+                if st.button("ðŸ›‘ Cancelar OC", use_container_width=True):
+                    oc["status"] = "Cancelada"
+                    salvar_oc_json(oc)
+                    st.warning("OC cancelada.")
+
+        st.markdown("---")
+        st.subheader("Imprimir (A4 monocromÃ¡tico)")
+        html = render_html_oc(oc, logo_url=st.session_state.get("oc_logo",""))
+        st.components.v1.html(html, height=700, scrolling=True)
+        if st.button("â¬‡ï¸ Baixar itens da OC (XLSX)"):
+            bio = _export_xlsx_oc(oc)
+            st.download_button(
+                "Download XLSX",
+                data=bio.getvalue(),
+                file_name=f"{sel_id}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
 
 # ================== Rodape ==================
 st.caption(f"Alivvia - {VERSION}")
+
