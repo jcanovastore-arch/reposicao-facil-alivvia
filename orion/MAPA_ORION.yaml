@@ -1,0 +1,71 @@
+﻿# MAPA_ORION — planejamento de desmembramento do reposicao_facil.py
+# (Nenhuma mudança de comportamento nesta etapa)
+
+versao: 1
+data: 2025-10-29 17:53
+arquivo_base: reposicao_facil.py
+
+secoes:
+  - id: tiny_helpers
+    titulo: "TINY v3 — Helpers"
+    ancora: "#  TINY v3 — Helpers"
+    destino: "orion/integracoes/tiny_v3.py"
+    status: "pending"
+
+  - id: storage_uploads
+    titulo: "Persistência de uploads (.uploads + cache)"
+    ancora: "Persistência de uploads"
+    destino: "orion/io/storage.py"
+    status: "pending"
+
+  - id: padrao_kits_cat
+    titulo: "Padrão (KITS/CAT) + dataclass Catalogo"
+    ancora: "Padrão KITS/CAT"
+    destino: "orion/dominio/padrao.py"
+    status: "pending"
+
+  - id: mapeadores_colunas
+    titulo: "Mapear tipos/colunas (FULL/FISICO/VENDAS)"
+    ancora: "Mapear tipos/colunas"
+    destino: "orion/etl/mapeadores.py"
+    status: "pending"
+
+  - id: calculo_compra
+    titulo: "Cálculo (explodir kits, demanda, compra sugerida)"
+    ancora: "Cálculo"
+    destino: "orion/core/calculo.py"
+    status: "pending"
+
+  - id: exportacao_xlsx
+    titulo: "Export XLSX (Lista_Final + Controle)"
+    ancora: "Export XLSX"
+    destino: "orion/export/xlsx.py"
+    status: "pending"
+
+  - id: ui_abas_dados
+    titulo: "UI — Aba 1 (Dados das Empresas)"
+    ancora: "TAB 1: Dados"
+    destino: "orion/ui/tab_dados.py"
+    status: "pending"
+
+  - id: ui_abas_compra
+    titulo: "UI — Aba 2 (Compra Automática)"
+    ancora: "TAB 2: Compra Automática"
+    destino: "orion/ui/tab_compra.py"
+    status: "pending"
+
+  - id: ui_abas_alocacao
+    titulo: "UI — Aba 3 (Alocação de Compra)"
+    ancora: "TAB 3: Alocação de Compra"
+    destino: "orion/ui/tab_alocacao.py"
+    status: "pending"
+
+  - id: oc_fluxo_envio
+    titulo: "Fluxo de envio p/ Ordem de Compra"
+    ancora: "Enviar **SELECIONADOS** para a Ordem de Compra"
+    destino: "orion/oc/ordem_compra.py"
+    status: "pending"
+
+observacoes:
+  - "Este arquivo apenas DOCUMENTA o plano. Nada é movido ainda."
+  - "As pastas destino (integracoes, io, dominio, etl, core, export, ui) serão criadas no Passo 4."

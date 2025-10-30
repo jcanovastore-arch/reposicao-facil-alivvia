@@ -26,34 +26,7 @@ from orion.dominio.padrao import Catalogo, _carregar_padrao_de_content, carregar
 # =========================
 #  VersÃ£o do App
 # =========================
-VERSION = "v3.4.4"
-# ===== DIAGNÓSTICO ORION =====
-try:
-    import os, sys, time, subprocess
-    import streamlit as st
-    _branch = ""
-    try:
-        _branch = subprocess.check_output(["git","rev-parse","--abbrev-ref","HEAD"], text=True).strip()
-    except Exception as _e:
-        _branch = f"n/a ({_e})"
-
-    st.sidebar.markdown("### 🔧 Diagnóstico de Execução")
-    st.sidebar.write({
-        "VERSION": VERSION,
-        "__file__": __file__,
-        "cwd": os.getcwd(),
-        "python": sys.executable,
-        "git_branch": _branch
-    })
-    try:
-        _mtime = time.ctime(os.path.getmtime(__file__))
-        st.sidebar.write({"file_mtime": _mtime})
-    except Exception as _:
-        pass
-    st.caption(f"🧩 BUILD {VERSION} — branch: {_branch}")
-except Exception as _e:
-    pass
-# ===== /DIAGNÓSTICO ORION =====
+VERSION = "v3.4.2"
 
 # =========================
 #  TINY v3 â€” Helpers
@@ -1170,49 +1143,6 @@ with st.expander("🔎 Comparador (novo — com filtros Orion)", expanded=False)
         else:
             st.info("Clique Gerar Compra para calcular e entÃ£o aplicar filtros.")
 
-
-
-# =============== Orion P1 — Seletor Estável de SKUs (multiselect) ===============
-with st.expander("✅ Selecionar SKUs (modo estável — sem perder seleção)", expanded=False):
-    try:
-        resA = st.session_state.get("resultado_compra", {}).get("ALIVVIA")
-        resJ = st.session_state.get("resultado_compra", {}).get("JCA")
-        if not (resA and resJ):
-            st.info("Gere a compra em **ALIVVIA** e/ou **JCA** nesta aba para habilitar o seletor estável.")
-        else:
-            dfA = resA["df"].copy()
-            dfJ = resJ["df"].copy()
-
-            optionsA = dfA["SKU"].dropna().astype(str).unique().tolist()
-            optionsJ = dfJ["SKU"].dropna().astype(str).unique().tolist()
-
-            selA = st.multiselect("SKUs (ALIVVIA)", optionsA, default=st.session_state.get("selA", []), key="selA")
-            selJ = st.multiselect("SKUs (JCA)",     optionsJ, default=st.session_state.get("selJ", []), key="selJ")
-
-            if selA:
-                st.caption(f"ALIVVIA — {len(selA)} selecionados")
-                st.dataframe(dfA[dfA["SKU"].isin(selA)], use_container_width=True, hide_index=True)
-            if selJ:
-                st.caption(f"JCA — {len(selJ)} selecionados")
-                st.dataframe(dfJ[dfJ["SKU"].isin(selJ)], use_container_width=True, hide_index=True)
-
-            # Export simples
-            if selA or selJ:
-                out = []
-                if selA: out.append(dfA[dfA["SKU"].isin(selA)])
-                if selJ: out.append(dfJ[dfJ["SKU"].isin(selJ)])
-                out_df = pd.concat(out, ignore_index=True) if out else pd.DataFrame()
-                st.download_button(
-                    "Baixar seleção (.csv)",
-                    data=(out_df.to_csv(index=False).encode("utf-8") if not out_df.empty else "".encode("utf-8")),
-                    file_name="Selecao_SKUs_Orion.csv",
-                    mime="text/csv",
-                    disabled=out_df.empty,
-                    key="dl_sel_orion"
-                )
-    except Exception as e:
-        st.error("Falha no seletor estável de SKUs: " + str(e))
-# =============== /Orion P1 — Seletor Estável de SKUs ===============
 # ================== TAB 3: AlocaÃ§Ã£o de Compra ==================
 with tab3:
     st.subheader("Distribuir quantidade entre empresas â€” proporcional Ã s vendas (FULL + Shopee)")
@@ -1290,10 +1220,6 @@ else:
     st.warning("Sem vendas detectadas nas duas contas; aplicação 50/50 por falta de histórico.")
     alocA = int(qtd_lote // 2)
     alocJ = int(qtd_lote - alocA)
-else:
-    st.warning("Sem vendas detectadas nas duas contas; aplicação 50/50 por falta de histórico.")
-    alocA = int(qtd_lote // 2)
-    alocJ = int(qtd_lote - alocA)
 
                 res = pd.DataFrame([
                     {"Empresa": "ALIVVIA", "SKU": sku_norm, "Demanda_60d": dA, "Proporcao": round(propA, 4), "Alocacao_Sugerida": alocA},
@@ -1312,8 +1238,6 @@ else:
 
 # ---------- RodapÃ© ----------
 st.caption(f"Â© Alivvia â€” {VERSION}")
-
-
 
 
 
