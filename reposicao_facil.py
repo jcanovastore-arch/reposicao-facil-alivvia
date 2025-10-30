@@ -806,9 +806,9 @@ with tab2:
 
             cA, cB, cC, cD = st.columns(4)
             cA.metric("Full (un)", f"{painel['full_unid']:,}".replace(",", "."))
-            cB.metric("Full (R$)", f"R$ {painel['full_valor']:,.2f}"), f"R$ {painel['full_valor']:,.2f}")
+            cB.metric("Full (R$)", f"R$ {painel['full_valor']:,.2f}")
             cC.metric("Físico (un)", f"{painel['fisico_unid']:,}".replace(",", "."))
-            cD.metric("Físico (R$)", f"R$ {painel['fisico_valor']:,.2f}"), f"R$ {painel['fisico_valor']:,.2f}")
+            cD.metric("Físico (R$)", f"R$ {painel['fisico_valor']:,.2f}")
 
             # >>> NOVO: filtros com busca de SKU por substring
             with st.expander("Filtros (sem recálculo)", expanded=True):
@@ -1185,6 +1185,7 @@ with tab3:
 
 # ================== RodapÃ© ==================
 st.caption(f"Â© Alivvia â€” {VERSION}")
+
 
 
 
