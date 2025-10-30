@@ -750,7 +750,7 @@ with tab1:
 
 # ================== TAB 2: Compra AutomÃ¡tica ==================
 with tab2:
-    st.subheader("Gerar Compra (por empresa) â€” lÃ³gica original")
+    st.subheader("Gerar compra por empresa")
 
     if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
         st.info("Carregue o PadrÃ£o (KITS/CAT) no sidebar.")
@@ -763,7 +763,7 @@ with tab2:
         col[1].info(f"Shopee/MT: {dados['VENDAS']['name'] or 'â€”'}")
         col[2].info(f"Estoque: {dados['ESTOQUE']['name'] or 'â€”'}")
 
-        if st.button(f"Gerar Compra â€” {empresa}", type="primary", key=f"btn_calc_{empresa}"):
+        if st.button(f"Gerar compra — {empresa}", type="primary", key=f"btn_calc_{empresa}"):
             try:
                 for k, rot in [("FULL", "FULL"), ("VENDAS", "Shopee/MT"), ("ESTOQUE", "Estoque")]:
                     if not (dados[k]["name"] and dados[k]["bytes"]):
@@ -806,17 +806,17 @@ with tab2:
 
             cA, cB, cC, cD = st.columns(4)
             cA.metric("Full (un)", f"{painel['full_unid']:,}".replace(",", "."))
-            cB.metric("Full (R$)", f"R$ {painel['full_valor']:,.2f}")
-            cC.metric("FÃ­sico (un)", f"{painel['fisico_unid']:,}".replace(",", "."))
-            cD.metric("FÃ­sico (R$)", f"R$ {painel['fisico_valor']:,.2f}")
+            cB.metric("Full (R$)", f"R$ {painel['full_valor']:,.2f}"), f"R$ {painel['full_valor']:,.2f}")
+            cC.metric("Físico (un)", f"{painel['fisico_unid']:,}".replace(",", "."))
+            cD.metric("Físico (R$)", f"R$ {painel['fisico_valor']:,.2f}"), f"R$ {painel['fisico_valor']:,.2f}")
 
             # >>> NOVO: filtros com busca de SKU por substring
-            with st.expander("Filtros (apÃ³s geraÃ§Ã£o) â€” sem recÃ¡lculo", expanded=True):
+            with st.expander("Filtros (sem recálculo)", expanded=True):
                 fornecedores = sorted([f for f in df_final["fornecedor"].dropna().astype(str).unique().tolist() if f != ""])
                 sel_fornec = st.multiselect("Fornecedor", options=fornecedores, default=[], key=f"filtro_fornec_{empresa}")
 
                 sku_all = sorted(df_final["SKU"].dropna().astype(str).unique().tolist())
-                txt = st.text_input("Pesquisar SKU (digite parte do cÃ³digo)", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETOâ€¦")
+                txt = st.text_input("Buscar SKU (parte do código)", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO")", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETOâ€¦")
                 if txt:
                     sku_filtrado = [s for s in sku_all if txt.upper() in s.upper()]
                 else:
@@ -965,7 +965,7 @@ with tab2:
                     with colf2:
                         only_pos = st.checkbox("Somente compra > 0", value=True)
                     with colf3:
-                        busca_sku2 = st.text_input("Pesquisar SKU (comb.)", placeholder="parte do SKUâ€¦")
+                        busca_sku2 = st.text_input("Buscar SKU (parte do código)", key=f"busca_sku_{empresa}", placeholder="ex.: YOGA, 123, PRETO")", placeholder="parte do SKUâ€¦")
 
                     dfV = dfC.copy()
                     if f_sel:
@@ -1191,6 +1191,7 @@ with tab3:
 
 # ================== RodapÃ© ==================
 st.caption(f"Â© Alivvia â€” {VERSION}")
+
 
 
 
