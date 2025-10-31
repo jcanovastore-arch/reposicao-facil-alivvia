@@ -19,6 +19,18 @@ from requests.adapters import HTTPAdapter, Retry
 import ordem_compra 
 import gerenciador_oc 
 
+# reposicao_facil.py (ADICIONE ESTE BLOCO NO INÍCIO)
+
+# ================ UI helpers =================
+def badge_ok(label: str, filename: str) -> str:
+    """Função para exibir o status de arquivo salvo com um ícone verde."""
+    return f"<span style='background:#198754; color:#fff; padding:6px 10px; border-radius:10px; font-size:12px;'>✅ {label}: <b>{filename}</b></span>"
+
+def badge_error(label: str, message: str) -> str:
+    """Função para exibir um status de erro."""
+    return f"<span style='background:#dc3545; color:#fff; padding:6px 10px; border-radius:10px; font-size:12px;'>❌ {label}: <b>{message}</b></span>"
+
+# (Deixe as suas outras funções como norm_sku, norm_header e br_to_float logo após este bloco, se não estiverem)
 VERSION = "v4.1.0 - PRODUÇÃO (Cálculo Restaurado)"
 
 st.set_page_config(page_title="Alivvia Reposição Pro", layout="wide")
