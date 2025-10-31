@@ -37,11 +37,16 @@ def norm_header(s: str) -> str:
     while "__" in s: s = s.replace("__", "_"); return s.strip("_")
 def norm_sku(x: str) -> str:
     if pd.isna(x): return ""; return unidecode(str(x)).strip().upper()
+# reposicao_facil.py (Substitua a função br_to_float)
+
 def br_to_float(x):
     if pd.isna(x): return np.nan
     if isinstance(x, (int, float, np.integer, np.floating)): return float(x)
     s = str(x).strip().replace("\u00a0", " ").replace("R$", "").replace(" ", "").replace(".", "").replace(",", ".")
-    try: return float(s); except: return np.nan
+    try: 
+        return float(s)
+    except: 
+        return np.nan
 def badge_ok(label: str, filename: str) -> str:
     """Função para exibir o status de arquivo salvo com um ícone verde (Corrige NameError)."""
     return f"<span style='background:#198754; color:#fff; padding:6px 10px; border-radius:10px; font-size:12px;'>✅ {label}: <b>{filename}</b></span>"
