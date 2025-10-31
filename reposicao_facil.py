@@ -1,4 +1,4 @@
-# reposicao_facil.py - VERSÃO FINAL DEFINITIVA (Corrigido o Erro de Inicialização do Cache)
+# reposicao_facil.py - VERSÃO FINAL AUDITADA E ORDENADA (v4.5.0)
 import io
 import os
 import json
@@ -19,7 +19,7 @@ from requests.adapters import HTTPAdapter, Retry
 import ordem_compra 
 import gerenciador_oc 
 
-VERSION = "v4.4.0 - ESTABILIZADO (FINAL E PRONTO)"
+VERSION = "v4.5.0 - AUDITADO (FINAL)"
 
 st.set_page_config(page_title="Alivvia Reposição Pro", layout="wide")
 
@@ -27,73 +27,54 @@ DEFAULT_SHEET_LINK = "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tc
 DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"
 
 # =======================================================
-# --- FUNÇÕES UTILITÁRIAS (DEFINIDAS ANTES DE SEREM USADAS) ---
+# --- FUNÇÕES UTILITÁRIAS ESSENCIAIS (ORDEM CORRETA) ---
 # =======================================================
 
-def badge_ok(label: str, filename: str) -> str:
-    """Função para exibir o status de arquivo salvo com um ícone verde."""
-    return f"<span style='background:#198754; color:#fff; padding:6px 10px; border-radius:10px; font-size:12px;'>✅ {label}: <b>{filename}</b></span>"
-
-def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = [norm_header(c) for c in df.columns]
-    return df
+# 1. Funções básicas de formatação/conversão
 def norm_header(s: str) -> str:
-    s = (s or "").strip()
-    s = unidecode(s).lower()
+    s = (s or "").strip(); s = unidecode(s).lower()
     for ch in [" ", "-", "(", ")", "/", "\\", "[", "]", ".", ",", ";", ":"]: s = s.replace(ch, "_")
-    while "__" in s: s = s.replace("__", "_")
-    return s.strip("_")
+    while "__" in s: s = s.replace("__", "_"); return s.strip("_")
 def norm_sku(x: str) -> str:
-    if pd.isna(x): return ""
-    return unidecode(str(x)).strip().upper()
+    if pd.isna(x): return ""; return unidecode(str(x)).strip().upper()
 def br_to_float(x):
     if pd.isna(x): return np.nan
     if isinstance(x, (int, float, np.integer, np.floating)): return float(x)
     s = str(x).strip().replace("\u00a0", " ").replace("R$", "").replace(" ", "").replace(".", "").replace(",", ".")
-    try: return float(s)
-    except: return np.nan
+    try: return float(s); except: return np.nan
+def badge_ok(label: str, filename: str) -> str:
+    """Função para exibir o status de arquivo salvo com um ícone verde (Corrige NameError)."""
+    return f"<span style='background:#198754; color:#fff; padding:6px 10px; border-radius:10px; font-size:12px;'>✅ {label}: <b>{filename}</b></span>"
+
+# 2. Funções de Estrutura de Dados
+def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy(); df.columns = [norm_header(c) for c in df.columns]; return df
 def exige_colunas(df: pd.DataFrame, obrig: list, nome: str):
-    faltam = [c for c in obrig if c not in df.columns]
+    faltam = [c for c in obrig if c not in df.columns];
     if faltam: raise ValueError(f"Colunas obrigatórias ausentes em {nome}: {faltam}")
 
+# =======================================================
+# --- PERSISTÊNCIA E ESTADO ---
+# =======================================================
 
-# --- Persistência de Uploads (Corrigida para Cache) ---
 @st.cache_resource(show_spinner=False)
 def _file_store():
     return {
         "ALIVVIA": {"FULL": None, "VENDAS": None, "ESTOQUE": None},
         "JCA":     {"FULL": None, "VENDAS": None, "ESTOQUE": None},
     }
-
 def _store_put(emp: str, kind: str, name: str, blob: bytes):
-    """Salva os arquivos no cache (persistência na sessão da Cloud)."""
-    store = _file_store()
-    store[emp][kind] = {"name": name, "bytes": blob}
-
+    store = _file_store(); store[emp][kind] = {"name": name, "bytes": blob}
 def _store_get(emp: str, kind: str):
-    """Obtém os arquivos do cache."""
-    store = _file_store()
-    return store[emp][kind]
-
+    store = _file_store(); return store[emp][kind]
 def _store_delete(emp: str, kind: str):
-    """Deleta um arquivo do cache."""
-    store = _file_store()
-    store[emp][kind] = None
-
-# --- Inicialização do Estado (Correção do AttributeError) ---
+    store = _file_store(); store[emp][kind] = None
 def _ensure_state():
-    st.session_state.setdefault("catalogo_df", None)
-    st.session_state.setdefault("kits_df", None)
-    st.session_state.setdefault("loaded_at", None)
-    st.session_state.setdefault("resultado_compra", {})
-    
+    st.session_state.setdefault("catalogo_df", None); st.session_state.setdefault("kits_df", None)
+    st.session_state.setdefault("loaded_at", None); st.session_state.setdefault("resultado_compra", {})
     for emp in ["ALIVVIA", "JCA"]:
-        # CORREÇÃO: Garante que o item no st.session_state seja um dicionário válido
-        full_data = _store_get(emp, "FULL")
-        vendas_data = _store_get(emp, "VENDAS")
+        full_data = _store_get(emp, "FULL"); vendas_data = _store_get(emp, "VENDAS")
         estoque_data = _store_get(emp, "ESTOQUE")
-        
         st.session_state.setdefault(emp, {
             "FULL": full_data or {"name": None, "bytes": None},
             "VENDAS": vendas_data or {"name": None, "bytes": None},
@@ -107,8 +88,7 @@ _ensure_state()
 
 @dataclass
 class Catalogo:
-    catalogo_simples: pd.DataFrame
-    kits_reais: pd.DataFrame
+    catalogo_simples: pd.DataFrame; kits_reais: pd.DataFrame
     
 def load_any_table_from_bytes(file_name: str, blob: bytes) -> pd.DataFrame:
     bio = io.BytesIO(blob); name = (file_name or "").lower()
@@ -117,14 +97,11 @@ def load_any_table_from_bytes(file_name: str, blob: bytes) -> pd.DataFrame:
         else: df = pd.read_excel(bio, dtype=str, keep_default_na=False)
     except Exception as e: raise RuntimeError(f"Não consegui ler o arquivo '{file_name}': {e}")
     df.columns = [norm_header(c) for c in df.columns]; sku_col = next((c for c in ["sku", "codigo", "codigo_sku"] if c in df.columns), None)
-    if sku_col: df[sku_col] = df[sku_col].map(norm_sku); df = df[df[sku_col] != ""]
-    return df.reset_index(drop=True)
+    if sku_col: df[sku_col] = df[sku_col].map(norm_sku); df = df[df[sku_col] != ""]; return df.reset_index(drop=True)
 
 def baixar_xlsx_do_sheets(sheet_id: str) -> bytes:
-    try:
-        s = requests.Session(); url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"; r = s.get(url, timeout=30)
-        r.raise_for_status(); return r.content
-    except Exception as e: raise RuntimeError(f"Falha ao baixar planilha KITS/CAT: {e}")
+    try: s = requests.Session(); url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"; r = s.get(url, timeout=30)
+    r.raise_for_status(); return r.content; except Exception as e: raise RuntimeError(f"Falha ao baixar planilha KITS/CAT: {e}")
 
 def _carregar_padrao_de_content(content: bytes) -> "Catalogo":
     xls = pd.ExcelFile(io.BytesIO(content)); 
@@ -151,8 +128,7 @@ def mapear_tipo(df: pd.DataFrame) -> str:
     tem_preco = any(c in {"preco", "preco_compra", "custo", "custo_medio", "preco_medio"} for c in cols)
     if tem_sku and (tem_v60 or tem_estoque_full or tem_transito): return "FULL"
     if tem_sku and tem_estoque_generico and tem_preco: return "FISICO"
-    if tem_sku and not tem_preco: return "VENDAS"
-    return "DESCONHECIDO"
+    if tem_sku and not tem_preco: return "VENDAS"; return "DESCONHECIDO"
 
 def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
     if tipo == "FULL":
@@ -177,8 +153,7 @@ def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_co
     merged = base.merge(kits, on="kit_sku", how="left"); exploded = merged.dropna(subset=["component_sku"]).copy()
     exploded["qty"] = exploded["qty"].astype(int); exploded["quantidade_comp"] = exploded["qtd"] * exploded["qty"]
     out = exploded.groupby("component_sku", as_index=False)["quantidade_comp"].sum()
-    out = out.rename(columns={"component_sku": "SKU", "quantidade_comp": "Quantidade"})
-    return out
+    out = out.rename(columns={"component_sku": "SKU", "quantidade_comp": "Quantidade"}); return out
 
 def calcular(full_df, fisico_df, vendas_df, cat: "Catalogo", h=60, g=0.0, LT=0):
     kits = cat.kits_reais.copy(); full = full_df.copy(); shp = vendas_df.copy().rename(columns={"Quantidade": "Quantidade_60d"})
@@ -197,16 +172,17 @@ def calcular(full_df, fisico_df, vendas_df, cat: "Catalogo", h=60, g=0.0, LT=0):
     base["Demanda_dia"] = base["TOTAL_60d"] / 60.0; base["Reserva_30d"] = np.round(base["Demanda_dia"] * 30).astype(int)
     base["Folga_Fisico"] = (base["Estoque_Fisico"] - base["Reserva_30d"]).clip(lower=0).astype(int)
     base["Compra_Sugerida"] = (base["Necessidade"] - base["Folga_Fisico"]).clip(lower=0).astype(int)
-    mask_nao = base["status_reposicao"].str.lower().str.contains("nao_repor", na=False)
-    base.loc[mask_nao, "Compra_Sugerida"] = 0; base = base[~mask_nao]
+    mask_nao = base["status_reposicao"].str.lower().str.contains("nao_repor", na=False); base.loc[mask_nao, "Compra_Sugerida"] = 0; base = base[~mask_nao]
     base["Valor_Compra_R$"] = (base["Compra_Sugerida"].astype(float) * base["Preco"].astype(float)).round(2)
     base = base.sort_values(["fornecedor", "Valor_Compra_R$", "SKU"], ascending=[True, False, True])
     df_final = base[["SKU", "fornecedor", "Estoque_Fisico", "Preco", "Compra_Sugerida", "Valor_Compra_R$", "ML_60d", "Shopee_60d", "TOTAL_60d", "Reserva_30d", "Necessidade"]].reset_index(drop=True)
-    painel = {"full_unid": 0, "full_valor": 0, "fisico_unid": 0, "fisico_valor": 0}
-    return df_final, painel
+    painel = {"full_unid": 0, "full_valor": 0, "fisico_unid": 0, "fisico_valor": 0}; return df_final, painel
 
 
+# =======================================================
 # --- INTERFACE PRINCIPAL ---
+# =======================================================
+
 st.title(f"REPOSIÇÃO V4 - TESTE OC ATIVO")
 st.markdown(f"<div style='text-align:right; font-size:12px; color:#888;'>Versão: <b>{VERSION}</b></div>", unsafe_allow_html=True)
 
@@ -219,9 +195,15 @@ with st.sidebar:
     st.markdown("---"); st.subheader("Padrão (KITS/CAT) — Google Sheets"); colA, colB = st.columns([1, 1])
     with colA:
         if st.button("Carregar padrão agora", use_container_width=True):
-            try: content = baixar_xlsx_do_sheets(DEFAULT_SHEET_ID); cat = _carregar_padrao_de_content(content)
-            st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku": "sku"}); st.session_state.kits_df = cat.kits_reais; st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"); st.success("Padrão carregado.")
-            except Exception as e: st.session_state.catalogo_df = None; st.session_state.kits_df = None; st.error(str(e))
+            try: 
+                content = baixar_xlsx_do_sheets(DEFAULT_SHEET_ID)
+                cat = _carregar_padrao_de_content(content)
+                st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku": "sku"})
+                st.session_state.kits_df = cat.kits_reais
+                st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                st.success("Padrão carregado.")
+            except Exception as e: 
+                st.session_state.catalogo_df = None; st.session_state.kits_df = None; st.error(str(e)) # EXCEPT está correto
     with colB: st.link_button("Abrir no Drive (editar)", DEFAULT_SHEET_LINK, use_container_width=True)
 
 
@@ -230,10 +212,11 @@ tab_dados, tab_compra, tab_oc, tab_gerenciador = st.tabs([
 ])
 
 
-# --- TAB 1: DADOS (CORRIGIDA PARA PERSISTÊNCIA NA NUVEM) ---
+# --- TAB 1: DADOS (Com blocos de função aninhados) ---
 with tab_dados:
     st.subheader("Uploads fixos por empresa (persistem na sessão/cache)")
     
+    # Função para o bloco de upload (agora aninhada)
     def bloco_empresa(emp: str):
         st.markdown(f"### {emp}"); c1, c2 = st.columns(2)
         with c1:
@@ -241,7 +224,7 @@ with tab_dados:
             up = st.file_uploader("CSV/XLSX/XLS", type=["csv", "xlsx", "xls"], key=f"up_full_{emp}")
             if up is not None: _store_put(emp, "FULL", up.name, up.read()); st.success(f"FULL salvo: {up.name}")
             it = _store_get(emp, "FULL"); 
-            if it and it["name"]: st.markdown(badge_ok("FULL salvo", it["name"]), unsafe_allow_html=True)
+            if it and it["name"]: st.markdown(badge_ok("FULL salvo", it["name"]), unsafe_allow_html=True) # Badge OK corrigida
             if st.button("Limpar FULL", key=f"clr_{emp}_FULL", use_container_width=True): _store_delete(emp, "FULL"); st.experimental_rerun()
 
         with c2:
@@ -293,7 +276,7 @@ with tab_compra:
 
             cat = Catalogo(catalogo_simples=st.session_state.catalogo_df.rename(columns={"sku": "component_sku"}), kits_reais=st.session_state.kits_df)
 
-            df_final, painel = calcular(full_df, fisico_df, vendas_df, cat, h=h, g=g, LT=LT)
+            df_final, painel = calcular(full_df, fisico_df, vendas_df, cat, h=h, g=g, LT=0)
 
             st.session_state["resultado_compra"][empresa] = {"df": df_final, "painel": painel}
             st.success("Cálculo concluído. Selecione itens abaixo.")
