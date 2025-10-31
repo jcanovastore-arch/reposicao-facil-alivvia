@@ -1,4 +1,4 @@
-# reposicao_facil.py - VERSÃO FINAL AUDITADA E ORDENADA (v4.5.0)
+# reposicao_facil.py - VERSÃO FINAL DEFINITIVA E AUDITADA (v4.6.0)
 import io
 import os
 import json
@@ -19,7 +19,7 @@ from requests.adapters import HTTPAdapter, Retry
 import ordem_compra 
 import gerenciador_oc 
 
-VERSION = "v4.5.0 - AUDITADO (FINAL)"
+VERSION = "v4.6.0 - AUDITADO (FINAL)"
 
 st.set_page_config(page_title="Alivvia Reposição Pro", layout="wide")
 
@@ -27,7 +27,7 @@ DEFAULT_SHEET_LINK = "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tc
 DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"
 
 # =======================================================
-# --- FUNÇÕES UTILITÁRIAS ESSENCIAIS (ORDEM CORRETA) ---
+# --- FUNÇÕES UTILITÁRIAS ESSENCIAIS (ORDEM E SINTAXE CORRIGIDAS) ---
 # =======================================================
 
 # 1. Funções básicas de formatação/conversão
@@ -37,9 +37,8 @@ def norm_header(s: str) -> str:
     while "__" in s: s = s.replace("__", "_"); return s.strip("_")
 def norm_sku(x: str) -> str:
     if pd.isna(x): return ""; return unidecode(str(x)).strip().upper()
-# reposicao_facil.py (Substitua a função br_to_float)
 
-def br_to_float(x):
+def br_to_float(x): # SINTAXE CORRIGIDA
     if pd.isna(x): return np.nan
     if isinstance(x, (int, float, np.integer, np.floating)): return float(x)
     s = str(x).strip().replace("\u00a0", " ").replace("R$", "").replace(" ", "").replace(".", "").replace(",", ".")
@@ -47,8 +46,9 @@ def br_to_float(x):
         return float(s)
     except: 
         return np.nan
+
 def badge_ok(label: str, filename: str) -> str:
-    """Função para exibir o status de arquivo salvo com um ícone verde (Corrige NameError)."""
+    """Função para exibir o status de arquivo salvo com um ícone verde."""
     return f"<span style='background:#198754; color:#fff; padding:6px 10px; border-radius:10px; font-size:12px;'>✅ {label}: <b>{filename}</b></span>"
 
 # 2. Funções de Estrutura de Dados
@@ -88,7 +88,7 @@ def _ensure_state():
 _ensure_state()
 
 # =======================================================
-# --- LÓGICA DE CÁLCULO (RESTAURADA) ---
+# --- LÓGICA DE CÁLCULO (RESTAURADA E AUDITADA) ---
 # =======================================================
 
 @dataclass
@@ -104,25 +104,35 @@ def load_any_table_from_bytes(file_name: str, blob: bytes) -> pd.DataFrame:
     df.columns = [norm_header(c) for c in df.columns]; sku_col = next((c for c in ["sku", "codigo", "codigo_sku"] if c in df.columns), None)
     if sku_col: df[sku_col] = df[sku_col].map(norm_sku); df = df[df[sku_col] != ""]; return df.reset_index(drop=True)
 
-def baixar_xlsx_do_sheets(sheet_id: str) -> bytes:
-    try: s = requests.Session(); url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"; r = s.get(url, timeout=30)
-    r.raise_for_status(); return r.content; except Exception as e: raise RuntimeError(f"Falha ao baixar planilha KITS/CAT: {e}")
+def baixar_xlsx_do_sheets(sheet_id: str) -> bytes: # SINTAXE CORRIGIDA
+    try: 
+        s = requests.Session()
+        url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+        r = s.get(url, timeout=30)
+        r.raise_for_status()
+        return r.content
+    except Exception as e: 
+        raise RuntimeError(f"Falha ao baixar planilha KITS/CAT: {e}")
 
-def _carregar_padrao_de_content(content: bytes) -> "Catalogo":
+def _carregar_padrao_de_content(content: bytes) -> "Catalogo": # SINTAXE CORRIGIDA
     xls = pd.ExcelFile(io.BytesIO(content)); 
     def load_sheet(opts):
         for n in opts:
-            if n in xls.sheet_names: return pd.read_excel(xls, n, dtype=str, keep_default_na=False)
+            if n in xls.sheet_names: 
+                return pd.read_excel(xls, n, dtype=str, keep_default_na=False)
         raise RuntimeError(f"Aba não encontrada. Esperado uma de {opts}.")
-    df_kits = normalize_cols(load_sheet(["KITS", "KITS_REAIS", "kits", "kits_reais"])).copy()
-    df_cat = normalize_cols(load_sheet(["CATALOGO_SIMPLES", "CATALOGO", "catalogo_simples", "catalogo"])).copy()
-    df_kits["kit_sku"] = df_kits[next(c for c in df_kits.columns if 'kit' in c)].map(norm_sku)
-    df_kits["component_sku"] = df_kits[next(c for c in df_kits.columns if 'component' in c)].map(norm_sku)
-    df_kits["qty"] = df_kits[next(c for c in df_kits.columns if 'qty' in c)].map(br_to_float).fillna(0).astype(int)
-    df_cat["component_sku"] = df_cat[next(c for c in df_cat.columns if 'sku' in c)].map(norm_sku)
-    df_cat["fornecedor"] = df_cat[next(c for c in df_cat.columns if 'fornecedor' in c)].fillna("")
-    df_cat["status_reposicao"] = df_cat[next(c for c in df_cat.columns if 'status' in c)].fillna("")
-    return Catalogo(df_cat, df_kits)
+    try:
+        df_kits = normalize_cols(load_sheet(["KITS", "KITS_REAIS", "kits", "kits_reais"])).copy()
+        df_cat = normalize_cols(load_sheet(["CATALOGO_SIMPLES", "CATALOGO", "catalogo_simples", "catalogo"])).copy()
+        df_kits["kit_sku"] = df_kits[next(c for c in df_kits.columns if 'kit' in c)].map(norm_sku)
+        df_kits["component_sku"] = df_kits[next(c for c in df_kits.columns if 'component' in c)].map(norm_sku)
+        df_kits["qty"] = df_kits[next(c for c in df_kits.columns if 'qty' in c)].map(br_to_float).fillna(0).astype(int)
+        df_cat["component_sku"] = df_cat[next(c for c in df_cat.columns if 'sku' in c)].map(norm_sku)
+        df_cat["fornecedor"] = df_cat[next(c for c in df_cat.columns if 'fornecedor' in c)].fillna("")
+        df_cat["status_reposicao"] = df_cat[next(c for c in df_cat.columns if 'status' in c)].fillna("")
+        return Catalogo(df_cat, df_kits)
+    except Exception as e:
+        raise RuntimeError(f"Erro ao processar abas KITS/CAT: {e}")
 
 def mapear_tipo(df: pd.DataFrame) -> str:
     cols = [c.lower() for c in df.columns]; tem_sku = any("sku" in c or "codigo" in c for c in cols)
@@ -208,7 +218,7 @@ with st.sidebar:
                 st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 st.success("Padrão carregado.")
             except Exception as e: 
-                st.session_state.catalogo_df = None; st.session_state.kits_df = None; st.error(str(e)) # EXCEPT está correto
+                st.session_state.catalogo_df = None; st.session_state.kits_df = None; st.error(str(e))
     with colB: st.link_button("Abrir no Drive (editar)", DEFAULT_SHEET_LINK, use_container_width=True)
 
 
@@ -217,11 +227,10 @@ tab_dados, tab_compra, tab_oc, tab_gerenciador = st.tabs([
 ])
 
 
-# --- TAB 1: DADOS (Com blocos de função aninhados) ---
+# --- TAB 1: DADOS ---
 with tab_dados:
     st.subheader("Uploads fixos por empresa (persistem na sessão/cache)")
     
-    # Função para o bloco de upload (agora aninhada)
     def bloco_empresa(emp: str):
         st.markdown(f"### {emp}"); c1, c2 = st.columns(2)
         with c1:
@@ -229,7 +238,7 @@ with tab_dados:
             up = st.file_uploader("CSV/XLSX/XLS", type=["csv", "xlsx", "xls"], key=f"up_full_{emp}")
             if up is not None: _store_put(emp, "FULL", up.name, up.read()); st.success(f"FULL salvo: {up.name}")
             it = _store_get(emp, "FULL"); 
-            if it and it["name"]: st.markdown(badge_ok("FULL salvo", it["name"]), unsafe_allow_html=True) # Badge OK corrigida
+            if it and it["name"]: st.markdown(badge_ok("FULL salvo", it["name"]), unsafe_allow_html=True)
             if st.button("Limpar FULL", key=f"clr_{emp}_FULL", use_container_width=True): _store_delete(emp, "FULL"); st.experimental_rerun()
 
         with c2:
