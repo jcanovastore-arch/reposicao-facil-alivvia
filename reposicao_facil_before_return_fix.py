@@ -131,16 +131,14 @@ def _store_delete(emp: str, kind: str):
     _disk_delete(emp, kind)
 
 # =================== Estado ===================
-def _ensure_state()
-__restore_uploads()
-:
+def _ensure_state():
     st.session_state.setdefault("catalogo_df", None)
     st.session_state.setdefault("kits_df", None)
     st.session_state.setdefault("loaded_at", None)
     st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK)
     st.session_state.setdefault("resultado_compra", {})
 _ensure_state()
-__restore_uploads()
+
 # ============ HTTP Google Sheets ============
 def _requests_session() -> requests.Session:
     s = requests.Session()
@@ -840,65 +838,40 @@ with tab2:
             df_view_sub = df_view[[c for c in cols_show if c in df_view.columns]].copy()
 
             st.caption(f"Linhas apos filtros: {len(df_view_sub)}")
+            st.dataframe(
+                df_view_sub,
+                use_container_width=True,
+                height=500,
+                hide_index=True,
+                column_config={
+                    "fornecedor": st.column_config.TextColumn("Fornecedor"),
+                    "SKU": st.column_config.TextColumn("SKU"),
+                    "Vendas_h_Shopee": st.column_config.NumberColumn("Vendas (Shopee)", format="%d"),
+                    "Vendas_h_ML": st.column_config.NumberColumn("Vendas (FULL)", format="%d"),
+                    "Estoque_Fisico": st.column_config.NumberColumn("Estoque Fisico", format="%d"),
+                    "Preco": st.column_config.NumberColumn("Preco (R$)", format="R$ %.2f"),
+                    "Compra_Sugerida": st.column_config.NumberColumn("Compra Sugerida", format="%d"),
+                    "Valor_Compra_R$": st.column_config.NumberColumn("Total (R$)", format="R$ %.2f"),
+                },
+            )
 
-# === NOVO: tabela editavel com coluna "Selecionar" ===
-df_view_sel = df_view_sub.copy()
-if "Selecionar" not in df_view_sel.columns:
-    df_view_sel["Selecionar"] = False
 
-df_view_edit = st.data_editor(
-    df_view_sel,
-    use_container_width=True,
-    height=500,
-    hide_index=True,
-    column_config={
-        "fornecedor": st.column_config.TextColumn("Fornecedor"),
-        "SKU": st.column_config.TextColumn("SKU"),
-        "Vendas_h_Shopee": st.column_config.NumberColumn("Vendas (Shopee)", format="%d"),
-        "Vendas_h_ML": st.column_config.NumberColumn("Vendas (FULL)", format="%d"),
-        "Estoque_Fisico": st.column_config.NumberColumn("Estoque Fisico", format="%d"),
-        "Preco": st.column_config.NumberColumn("Preco (R$)", format="R$ %.2f"),
-        "Compra_Sugerida": st.column_config.NumberColumn("Compra Sugerida", format="%d"),
-        "Valor_Compra_R$": st.column_config.NumberColumn("Total (R$)", format="R$ %.2f"),
-        "Selecionar": st.column_config.CheckboxColumn("Selecionar"),
-    },
-)
-
-sel_rows = df_view_edit[df_view_edit["Selecionar"] == True].drop(columns=["Selecionar"], errors="ignore")
-
-# === NOVO: botao de envio para OC desta empresa ===
-if st.button(f"Adicionar selecionados na OC - {empresa}", type="primary", use_container_width=True):
-    try:
-        if sel_rows.empty:
-            st.warning("Nenhuma linha selecionada.")
-        else:
-            cols_envio = ["SKU", "fornecedor", "Preco", "Compra_Sugerida", "Valor_Compra_R$"]
-            falt = [c for c in cols_envio if c not in sel_rows.columns]
-            if falt:
-                st.error("Faltam colunas para enviar a OC: " + ", ".join(falt))
-            else:
-                oc.adicionar_itens_cesta(empresa, sel_rows[cols_envio].copy())
-    except Exception as e:
-        st.error(str(e))
-
-# Botoes de download (inalterados)
-colx1, colx2 = st.columns([1, 1])
-with colx1:
-    xlsx = exportar_xlsx(df_final, h=h, params={"g": g, "LT": LT, "empresa": empresa})
-    st.download_button(
-        "Baixar XLSX (completo)", data=xlsx,
-        file_name=f"Compra_Sugerida_{empresa}_{h}d.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key=f"d_all_{empresa}"
-    )
-with colx2:
-    xlsx_filtrado = exportar_xlsx(df_view, h=h, params={"g": g, "LT": LT, "empresa": empresa, "filtro": "on"})
-    st.download_button(
-        "Baixar XLSX (filtrado)", data=xlsx_filtrado,
-        file_name=f"Compra_Sugerida_{empresa}_{h}d_filtrado.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key=f"d_fil_{empresa}"
-    )
+            colx1, colx2 = st.columns([1, 1])
+            with colx1:
+                xlsx = exportar_xlsx(df_final, h=h, params={"g": g, "LT": LT, "empresa": empresa})
+                st.download_button(
+                    "Baixar XLSX (completo)", data=xlsx,
+                    file_name=f"Compra_Sugerida_{empresa}_{h}d.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"d_all_{empresa}"
+                )
+            with colx2:
+                xlsx_filtrado = exportar_xlsx(df_view, h=h, params={"g": g, "LT": LT, "empresa": empresa, "filtro": "on"})
+                st.download_button(
+                    "Baixar XLSX (filtrado)", data=xlsx_filtrado,
+                    file_name=f"Compra_Sugerida_{empresa}_{h}d_filtrado.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"d_fil_{empresa}"
                 )
 
             # =============== LISTA COMBINADA (ALIVVIA + JCA) ===============
@@ -1044,15 +1017,17 @@ with colx2:
 
     emp_arg = None if emp_f == "(Todas)" else emp_f
     stts_arg = None if status_f == "(Todos)" else [status_f]
-    ocs_brutas = oc.listar_ocs(emp_arg, stts_arg)
+    ocs_brutas = listar_ocs(emp_arg, stts_arg)
 
     # Filtra sÃ³ OCs vÃ¡lidas (com oc_id). Evita KeyError.
     ocs = [o for o in ocs_brutas if isinstance(o, dict) and o.get("oc_id")]
 
     if not ocs_brutas:
         st.info("Nenhuma OC encontrada nos filtros.")
+        return
     if not ocs:
         st.warning("Existem arquivos de OC sem 'oc_id'. Eles foram ignorados.")
+        return
 
     df_ocs = pd.DataFrame([{
         "oc_id": o.get("oc_id",""),
@@ -1073,6 +1048,7 @@ with colx2:
         oc = next((d for d in ocs if d.get("oc_id")==sel_id), None)
         if not oc:
             st.warning("OC nÃ£o encontrada (arquivo pode ter sido movido).")
+            return
 
         st.write(f"**OC {sel_id}** â€” {oc.get('empresa')} / {oc.get('fornecedor')} â€” status: **{oc.get('status')}**")
 
@@ -1141,32 +1117,4 @@ st.caption(f"Alivvia - {VERSION}")
 
 
 
-
-
-
-
-
-
-
-def __restore_uploads():
-    """
-    Recarrega arquivos salvos em .uploads/ para st.session_state
-    e garante a estrutura por empresa/kind.
-    """
-    try:
-        for emp in ["ALIVVIA", "JCA"]:
-            st.session_state.setdefault(emp, {
-                "FULL":   {"name": None, "bytes": None},
-                "VENDAS": {"name": None, "bytes": None},
-                "ESTOQUE":{"name": None, "bytes": None},
-            })
-            for kind in ["FULL", "VENDAS", "ESTOQUE"]:
-                curr = st.session_state[emp].get(kind) or {"name": None, "bytes": None}
-                if not curr.get("bytes"):
-                    rec = _disk_get(emp, kind)
-                    if rec:
-                        st.session_state[emp][kind] = rec
-    except Exception:
-        # Não quebra a UI se algo der errado
-        pass
 

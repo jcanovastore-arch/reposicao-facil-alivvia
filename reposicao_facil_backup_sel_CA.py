@@ -1,5 +1,5 @@
-﻿# reposicao_facil.py
-# Reposicao Logistica â€” Alivvia (Streamlit)
+# reposicao_facil.py
+# Reposicao Logistica — Alivvia (Streamlit)
 # UI limpa (sem emojis), Compra Automatica sem duplicacoes, Lista Combinada unica com "Selecionar" + Enviar p/ OC.
 # Logica de calculo preservada.
 
@@ -131,16 +131,14 @@ def _store_delete(emp: str, kind: str):
     _disk_delete(emp, kind)
 
 # =================== Estado ===================
-def _ensure_state()
-__restore_uploads()
-:
+def _ensure_state():
     st.session_state.setdefault("catalogo_df", None)
     st.session_state.setdefault("kits_df", None)
     st.session_state.setdefault("loaded_at", None)
     st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK)
     st.session_state.setdefault("resultado_compra", {})
 _ensure_state()
-__restore_uploads()
+
 # ============ HTTP Google Sheets ============
 def _requests_session() -> requests.Session:
     s = requests.Session()
@@ -840,72 +838,46 @@ with tab2:
             df_view_sub = df_view[[c for c in cols_show if c in df_view.columns]].copy()
 
             st.caption(f"Linhas apos filtros: {len(df_view_sub)}")
+            st.dataframe(
+                df_view_sub,
+                use_container_width=True,
+                height=500,
+                hide_index=True,
+                column_config={
+                    "fornecedor": st.column_config.TextColumn("Fornecedor"),
+                    "SKU": st.column_config.TextColumn("SKU"),
+                    "Vendas_h_Shopee": st.column_config.NumberColumn("Vendas (Shopee)", format="%d"),
+                    "Vendas_h_ML": st.column_config.NumberColumn("Vendas (FULL)", format="%d"),
+                    "Estoque_Fisico": st.column_config.NumberColumn("Estoque Fisico", format="%d"),
+                    "Preco": st.column_config.NumberColumn("Preco (R$)", format="R$ %.2f"),
+                    "Compra_Sugerida": st.column_config.NumberColumn("Compra Sugerida", format="%d"),
+                    "Valor_Compra_R$": st.column_config.NumberColumn("Total (R$)", format="R$ %.2f"),
+                },
+            )
 
-# === NOVO: tabela editavel com coluna "Selecionar" ===
-df_view_sel = df_view_sub.copy()
-if "Selecionar" not in df_view_sel.columns:
-    df_view_sel["Selecionar"] = False
-
-df_view_edit = st.data_editor(
-    df_view_sel,
-    use_container_width=True,
-    height=500,
-    hide_index=True,
-    column_config={
-        "fornecedor": st.column_config.TextColumn("Fornecedor"),
-        "SKU": st.column_config.TextColumn("SKU"),
-        "Vendas_h_Shopee": st.column_config.NumberColumn("Vendas (Shopee)", format="%d"),
-        "Vendas_h_ML": st.column_config.NumberColumn("Vendas (FULL)", format="%d"),
-        "Estoque_Fisico": st.column_config.NumberColumn("Estoque Fisico", format="%d"),
-        "Preco": st.column_config.NumberColumn("Preco (R$)", format="R$ %.2f"),
-        "Compra_Sugerida": st.column_config.NumberColumn("Compra Sugerida", format="%d"),
-        "Valor_Compra_R$": st.column_config.NumberColumn("Total (R$)", format="R$ %.2f"),
-        "Selecionar": st.column_config.CheckboxColumn("Selecionar"),
-    },
-)
-
-sel_rows = df_view_edit[df_view_edit["Selecionar"] == True].drop(columns=["Selecionar"], errors="ignore")
-
-# === NOVO: botao de envio para OC desta empresa ===
-if st.button(f"Adicionar selecionados na OC - {empresa}", type="primary", use_container_width=True):
-    try:
-        if sel_rows.empty:
-            st.warning("Nenhuma linha selecionada.")
-        else:
-            cols_envio = ["SKU", "fornecedor", "Preco", "Compra_Sugerida", "Valor_Compra_R$"]
-            falt = [c for c in cols_envio if c not in sel_rows.columns]
-            if falt:
-                st.error("Faltam colunas para enviar a OC: " + ", ".join(falt))
-            else:
-                oc.adicionar_itens_cesta(empresa, sel_rows[cols_envio].copy())
-    except Exception as e:
-        st.error(str(e))
-
-# Botoes de download (inalterados)
-colx1, colx2 = st.columns([1, 1])
-with colx1:
-    xlsx = exportar_xlsx(df_final, h=h, params={"g": g, "LT": LT, "empresa": empresa})
-    st.download_button(
-        "Baixar XLSX (completo)", data=xlsx,
-        file_name=f"Compra_Sugerida_{empresa}_{h}d.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key=f"d_all_{empresa}"
-    )
-with colx2:
-    xlsx_filtrado = exportar_xlsx(df_view, h=h, params={"g": g, "LT": LT, "empresa": empresa, "filtro": "on"})
-    st.download_button(
-        "Baixar XLSX (filtrado)", data=xlsx_filtrado,
-        file_name=f"Compra_Sugerida_{empresa}_{h}d_filtrado.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key=f"d_fil_{empresa}"
-    )
+            colx1, colx2 = st.columns([1, 1])
+            with colx1:
+                xlsx = exportar_xlsx(df_final, h=h, params={"g": g, "LT": LT, "empresa": empresa})
+                st.download_button(
+                    "Baixar XLSX (completo)", data=xlsx,
+                    file_name=f"Compra_Sugerida_{empresa}_{h}d.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"d_all_{empresa}"
+                )
+            with colx2:
+                xlsx_filtrado = exportar_xlsx(df_view, h=h, params={"g": g, "LT": LT, "empresa": empresa, "filtro": "on"})
+                st.download_button(
+                    "Baixar XLSX (filtrado)", data=xlsx_filtrado,
+                    file_name=f"Compra_Sugerida_{empresa}_{h}d_filtrado.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"d_fil_{empresa}"
                 )
 
             # =============== LISTA COMBINADA (ALIVVIA + JCA) ===============
             st.markdown("---")
             with st.expander("Lista combinada (ALIVVIA + JCA)", expanded=False):
                 tem_A = "ALIVVIA" in st.session_state["resultado_compra"]
-                tem_J = "JCA" in st.session_state["resultado_compra"]
+                tem_J = "JCA"     in st.session_state["resultado_compra"]
 
                 if not (tem_A and tem_J):
                     st.info("Gere a compra para ALIVVIA e JCA para habilitar a lista combinada.")
@@ -922,7 +894,7 @@ with colx2:
                     dfC["fornecedor"] = dfC["fornecedor_A"].fillna(dfC["fornecedor_J"])
                     dfC = dfC.drop(columns=["fornecedor_A","fornecedor_J"], errors="ignore")
 
-                    for c in ["Compra_ALIVVIA","Compra_JCA","Estoque_ALIVVIA","Estoque_JCA"]:
+                    for c in ["Compra_ALIVVIA","Compra_JCA", "Estoque_ALIVVIA","Estoque_JCA"]:
                         if c in dfC.columns:
                             dfC[c] = pd.to_numeric(dfC[c], errors="coerce").fillna(0).astype(int)
                     for c in ["Valor_ALIVVIA","Valor_JCA","Preco_ALIVVIA","Preco_JCA"]:
@@ -940,7 +912,7 @@ with colx2:
                     with colf2:
                         only_pos = st.checkbox("Somente compra > 0", value=True)
                     with colf3:
-                        busca_sku2 = st.text_input("Pesquisar SKU (comb.)", placeholder="parte do SKU...")
+                        busca_sku2 = st.text_input("Buscar SKU (comb.)", placeholder="parte do SKU")
 
                     dfV = dfC.copy()
                     if f_sel:
@@ -952,25 +924,21 @@ with colx2:
                         dfV = dfV[dfV["SKU"].astype(str).str.upper().str.contains(bs)]
 
                     skus_opts = sorted(dfV["SKU"].astype(str).unique().tolist())
-                    skus_sel = st.multiselect("Selecionar SKUs específicos (opcional)", options=skus_opts, default=[])
+                    skus_sel = st.multiselect("Selecionar SKUs (opcional)", options=skus_opts, default=[])
                     if skus_sel:
                         dfV = dfV[dfV["SKU"].isin(skus_sel)]
 
-                    cols_show2 = [
-                        "fornecedor","SKU",
-                        "Estoque_ALIVVIA","Estoque_JCA","Estoque_Fisico_Total",
-                        "Compra_ALIVVIA","Valor_ALIVVIA","Compra_JCA","Valor_JCA",
-                        "Compra_Total","Valor_Total"
-                    ]
-                    dfV = dfV[[c for c in cols_show2 if c in dfV.columns]]
+                    # Tabela UNICA EDITAVEL com coluna "Selecionar"
+                    dfV_edit = dfV.copy()
+                    dfV_edit["Selecionar"] = False
 
-                    st.caption(f"Linhas após filtros: {len(dfV)}")
-                    st.dataframe(
-                        dfV,
+                    dfV_edit = st.data_editor(
+                        dfV_edit,
                         use_container_width=True,
                         hide_index=True,
-                        height=500,
+                        height=480,
                         column_config={
+                            "Selecionar": st.column_config.CheckboxColumn("Selecionar"),
                             "fornecedor": st.column_config.TextColumn("Fornecedor"),
                             "SKU": st.column_config.TextColumn("SKU"),
                             "Estoque_ALIVVIA": st.column_config.NumberColumn("Estoque ALIVVIA", format="%d"),
@@ -985,53 +953,234 @@ with colx2:
                         },
                     )
 
-                    # Selecionar e enviar da Lista Combinada
-                    try:
-                        dfV_edit = dfV.copy()
-                        dfV_edit["Selecionar"] = False
-                        dfV_edit = st.data_editor(
-                            dfV_edit,
-                            use_container_width=True,
-                            hide_index=True,
-                            height=380,
-                            column_config={"Selecionar": st.column_config.CheckboxColumn("Selecionar")},
+                    sel_comb = dfV_edit[dfV_edit["Selecionar"] == True].drop(columns=["Selecionar"], errors="ignore")
+
+                    col_btn1, col_btn2, col_btn3 = st.columns([1,1,1])
+                    with col_btn1:
+                        if st.button("Enviar p/ OC - ALIVVIA", use_container_width=True):
+                            base = sel_comb.rename(columns={
+                                "Compra_ALIVVIA":"Compra_Sugerida",
+                                "Valor_ALIVVIA":"Valor_Compra_R$",
+                                "Preco_ALIVVIA":"Preco",
+                            })
+                            if not base.empty:
+                                oc.adicionar_itens_cesta("ALIVVIA", base[["SKU","fornecedor","Preco","Compra_Sugerida","Valor_Compra_R$"]].copy())
+                            else:
+                                st.info("Selecione itens na tabela para enviar.")
+                    with col_btn2:
+                        if st.button("Enviar p/ OC - JCA", use_container_width=True):
+                            base = sel_comb.rename(columns={
+                                "Compra_JCA":"Compra_Sugerida",
+                                "Valor_JCA":"Valor_Compra_R$",
+                                "Preco_JCA":"Preco",
+                            })
+                            if not base.empty:
+                                oc.adicionar_itens_cesta("JCA", base[["SKU","fornecedor","Preco","Compra_Sugerida","Valor_Compra_R$"]].copy())
+                            else:
+                                st.info("Selecione itens na tabela para enviar.")
+                    with col_btn3:
+                        # Download XLSX da lista combinada atual (filtros aplicados)
+                        def _xlsx_combinado(df):
+                            import io as _io, pandas as _pd
+                            bio = _io.BytesIO()
+                            with _pd.ExcelWriter(bio, engine="xlsxwriter") as w:
+                                df.to_excel(w, sheet_name="Compra_2Contas", index=False)
+                                ws = w.sheets["Compra_2Contas"]
+                                if df.shape[0] == 0:
+                                    for i in range(len(df.columns)):
+                                        ws.set_column(i, i, 14)
+                                    ws.freeze_panes(1, 0)
+                                    ws.autofilter(0, 0, 0, max(0, len(df.columns) - 1))
+                                else:
+                                    for i, col in enumerate(df.columns):
+                                        s = df[col].astype(str).fillna("")
+                                        s = s.replace({"None": "", "nan": "", "NaN": ""})
+                                        max_len = s.map(len).max()
+                                        width = max(12, min(40, int(max_len or 0) + 2))
+                                        ws.set_column(i, i, width)
+                                    ws.freeze_panes(1, 0)
+                                    ws.autofilter(0, 0, len(df), len(df.columns) - 1)
+                            bio.seek(0)
+                            return bio.read()
+
+                        xlsx2 = _xlsx_combinado(dfV)
+                        st.download_button(
+                            "Baixar XLSX (lista combinada)",
+                            data=xlsx2,
+                            file_name="Compra_Duas_Contas.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
                         )
-                        sel_comb = dfV_edit[dfV_edit["Selecionar"] == True].drop(columns=["Selecionar"], errors="ignore")
+        else:
+            st.info("Clique em Gerar compra para calcular e entao aplicar filtros.")
 
-                        col_btn1, col_btn2 = st.columns([1,1])
-                        with col_btn1:
-                            if st.button("➕ Enviar p/ OC — ALIVVIA", use_container_width=True):
-                                base = sel_comb.rename(columns={
-                                    "Compra_ALIVVIA":"Compra_Sugerida",
-                                    "Valor_ALIVVIA":"Valor_Compra_R$",
-                                    "Preco_ALIVVIA":"Preco",
-                                })
-                                cols_envio = ["SKU","fornecedor","Preco","Compra_Sugerida","Valor_Compra_R$"]
-                                falt = [c for c in cols_envio if c not in base.columns]
-                                if falt:
-                                    st.warning("Colunas faltando para enviar à OC: " + ", ".join(falt))
-                                else:
-                                    oc.adicionar_itens_cesta("ALIVVIA", base[cols_envio].copy())
+# ================== TAB 3: Alocacao de Compra ==================
+with tab3:
+    st.subheader("Distribuir quantidade entre empresas (proporcional as vendas)")
 
-                        with col_btn2:
-                            if st.button("➕ Enviar p/ OC — JCA", use_container_width=True):
-                                base = sel_comb.rename(columns={
-                                    "Compra_JCA":"Compra_Sugerida",
-                                    "Valor_JCA":"Valor_Compra_R$",
-                                    "Preco_JCA":"Preco",
-                                })
-                                cols_envio = ["SKU","fornecedor","Preco","Compra_Sugerida","Valor_Compra_R$"]
-                                falt = [c for c in cols_envio if c not in base.columns]
-                                if falt:
-                                    st.warning("Colunas faltando para enviar à OC: " + ", ".join(falt))
-                                else:
-                                    oc.adicionar_itens_cesta("JCA", base[cols_envio].copy())
-                    except Exception as _e2:
-                        st.info("Seleção combinada para OC aparece após gerar as compras das duas empresas.")
+    if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
+        st.info("Carregue o Padrao (KITS/CAT) no menu lateral.")
+    else:
+        CATALOGO = st.session_state.catalogo_df
+        sku_opcoes = CATALOGO["sku"].dropna().astype(str).sort_values().unique().tolist()
+        sku_escolhido = st.selectbox("SKU do componente para alocar", sku_opcoes, key="alloc_sku")
+        qtd_lote = st.number_input("Quantidade total do lote", min_value=1, value=1000, step=50)
 
-            st.markdown("---")
-    # â€” Gerenciador
-    st.subheader("Ordens de Compra â€” Gerenciador")
+        st.caption("Necessita FULL e Shopee/MT salvos para ALIVVIA e JCA na aba Dados.")
+
+        if st.button("Calcular alocacao proporcional", type="primary"):
+            try:
+                missing = []
+                for emp in ["ALIVVIA", "JCA"]:
+                    if not (st.session_state[emp]["FULL"]["name"] and st.session_state[emp]["FULL"]["bytes"]):
+                        missing.append(f"{emp} FULL")
+                    if not (st.session_state[emp]["VENDAS"]["name"] and st.session_state[emp]["VENDAS"]["bytes"]):
+                        missing.append(f"{emp} Shopee/MT")
+                if missing:
+                    raise RuntimeError("Faltam arquivos salvos: " + ", ".join(missing))
+
+                def read_pair(emp: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+                    fa = load_any_table_from_bytes(st.session_state[emp]["FULL"]["name"], st.session_state[emp]["FULL"]["bytes"])
+                    sa = load_any_table_from_bytes(st.session_state[emp]["VENDAS"]["name"], st.session_state[emp]["VENDAS"]["bytes"])
+                    tfa = mapear_tipo(fa)
+                    tsa = mapear_tipo(sa)
+                    if tfa != "FULL":
+                        raise RuntimeError(f"FULL invalido ({emp}).")
+                    if tsa != "VENDAS":
+                        raise RuntimeError(f"Vendas invalido ({emp}).")
+                    return mapear_colunas(fa, tfa), mapear_colunas(sa, tsa)
+
+                full_A, shp_A = read_pair("ALIVVIA")
+                full_J, shp_J = read_pair("JCA")
+
+                cat = Catalogo(
+                    catalogo_simples=CATALOGO.rename(columns={"sku": "component_sku"}),
+                    kits_reais=st.session_state.kits_df
+                )
+                kits = construir_kits_efetivo(cat)
+
+                def vendas_componente(full_df, shp_df) -> pd.DataFrame:
+                    a = explodir_por_kits(
+                        full_df[["SKU", "Vendas_Qtd_60d"]].rename(columns={"SKU": "kit_sku", "Vendas_Qtd_60d": "Qtd"}),
+                        kits, "kit_sku", "Qtd"
+                    ).rename(columns={"Quantidade": "ML_60d"})
+                    b = explodir_por_kits(
+                        shp_df[["SKU", "Quantidade"]].rename(columns={"SKU": "kit_sku", "Quantidade": "Qtd"}),
+                        kits, "kit_sku", "Qtd"
+                    ).rename(columns={"Quantidade": "Shopee_60d"})
+                    out = pd.merge(a, b, on="SKU", how="outer").fillna(0)
+                    out["Demanda_60d"] = out["ML_60d"].astype(int) + out["Shopee_60d"].astype(int)
+                    return out[["SKU", "Demanda_60d"]]
+
+                demA = vendas_componente(full_A, shp_A)
+                demJ = vendas_componente(full_J, shp_J)
+
+                sku_norm = norm_sku(sku_escolhido)
+                dA = int(demA.loc[demA["SKU"] == sku_norm, "Demanda_60d"].sum())
+                dJ = int(demJ.loc[demJ["SKU"] == sku_norm, "Demanda_60d"].sum())
+                total = dA + dJ
+
+                if total == 0:
+                    st.warning("Sem vendas detectadas; alocacao 50/50 por falta de base.")
+                    propA = propJ = 0.5
+                else:
+                    propA = dA / total
+                    propJ = dJ / total
+
+                alocA = int(round(qtd_lote * propA))
+                alocJ = int(qtd_lote - alocA)
+
+                res = pd.DataFrame([
+                    {"Empresa": "ALIVVIA", "SKU": sku_norm, "Demanda_60d": dA, "Proporcao": round(propA, 4), "Alocacao_Sugerida": alocA},
+                    {"Empresa": "JCA", "SKU": sku_norm, "Demanda_60d": dJ, "Proporcao": round(propJ, 4), "Alocacao_Sugerida": alocJ},
+                ])
+                st.dataframe(res, use_container_width=True)
+                st.success(f"Total alocado: {qtd_lote} un (ALIVVIA {alocA} | JCA {alocJ})")
+                st.download_button(
+                    "Baixar alocacao (.csv)",
+                    data=res.to_csv(index=False).encode("utf-8"),
+                    file_name=f"Alocacao_{sku_norm}_{qtd_lote}.csv",
+                    mime="text/csv"
+                )
+            except Exception as e:
+                st.error(str(e))
+
+# ================== TAB 4: Ordem de Compra ==================
+def render_tab():
+    st.header("🧾 Ordem de Compra")
+    st.caption("Selecione itens nas outras telas e clique “➕ Enviar para Ordem de Compra” para popular a cesta.")
+
+    # — Cesta
+    colA, colB = st.columns([3,1])
+    with colA:
+        emp = st.radio("Empresa da cesta", ["ALIVVIA","JCA"], horizontal=True, key="oc_emp")
+    with colB:
+        if st.button("🧺 Limpar cesta", use_container_width=True):
+            limpar_cesta(emp)
+            st.info(f"Cesta da {emp} limpa.")
+
+    cesta = st.session_state.get("oc_cesta", {}).get(emp, [])
+    df_cesta = pd.DataFrame(cesta) if cesta else pd.DataFrame(columns=["SKU","fornecedor","preco","qtd_comprada","valor_total"])
+    st.subheader("Itens na Cesta")
+    st.dataframe(df_cesta, use_container_width=True, hide_index=True)
+
+    # — Dados da OC
+    with st.expander("Dados da Ordem de Compra", expanded=True):
+        fornecedor = st.text_input("Nome do fornecedor", key="oc_fornec")
+        condicoes = st.text_area("Condições de pagamento / observações (opcional)", key="oc_cond")
+        endereco = st.text_input("Endereço de entrega (opcional)", key="oc_end")
+        logo_url = st.text_input("URL do logo (apenas na impressão, opcional)", key="oc_logo")
+
+        colx, coly, colz = st.columns([1,1,1])
+        with colx:
+            finaliza = st.checkbox("Finalizar agora (pronto para impressão)", value=True)
+        with coly:
+            gerar_por_fornecedor = st.checkbox("Gerar 1 OC por fornecedor (se houver vários na cesta)", value=True)
+        with colz:
+            permitir_edicao_posterior = st.checkbox("Permitir reabrir/editar depois", value=True)
+
+        if st.button("💾 Gerar e salvar OC(s)", type="primary"):
+            if df_cesta.empty:
+                st.warning("A cesta está vazia.")
+            elif not fornecedor and not gerar_por_fornecedor:
+                st.warning("Informe o fornecedor ou ative '1 OC por fornecedor'.")
+            else:
+                grupos = []
+                if gerar_por_fornecedor:
+                    for f in sorted(df_cesta["fornecedor"].fillna("").astype(str).unique().tolist()):
+                        sub = df_cesta[df_cesta["fornecedor"]==f] if f else df_cesta[df_cesta["fornecedor"].isna() | (df_cesta["fornecedor"]=="")]
+                        if sub.shape[0]:
+                            grupos.append((f or fornecedor or "", sub))
+                else:
+                    grupos.append((fornecedor, df_cesta))
+
+                criadas = []
+                for forn_nome, df_sub in grupos:
+                    itens = df_sub.to_dict(orient="records")
+                    for it in itens:
+                        it["descricao"] = it.get("descricao","")
+                    oc = {
+                        "oc_id": None,
+                        "empresa": emp,
+                        "fornecedor": forn_nome or "",
+                        "status": "Finalizada" if finaliza else "Rascunho",
+                        "finalizada": bool(finaliza),
+                        "itens": itens,
+                        "condicoes": condicoes,
+                        "endereco_entrega": endereco,
+                        "permitir_edicao": permitir_edicao_posterior,
+                        "historico": [{"evento": "criada", "quando": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}],
+                    }
+                    oc_id = salvar_oc_json(oc)
+                    criadas.append(oc_id)
+
+                st.success(f"OC(s) criada(s): {', '.join(criadas)}")
+                limpar_cesta(emp)
+
+    st.markdown("---")
+
+    # — Gerenciador
+    st.subheader("Ordens de Compra — Gerenciador")
     c1, c2, c3 = st.columns([1,1,1])
     with c1:
         emp_f = st.selectbox("Empresa", ["(Todas)","ALIVVIA","JCA"], index=0)
@@ -1039,20 +1188,22 @@ with colx2:
         status_opts = ["(Todos)","Rascunho","Finalizada","Recebida Parcial","Recebida Total","Cancelada"]
         status_f = st.selectbox("Status", status_opts, index=0)
     with c3:
-        if st.button("ðŸ”„ Atualizar lista", use_container_width=True):
+        if st.button("🔄 Atualizar lista", use_container_width=True):
             pass
 
     emp_arg = None if emp_f == "(Todas)" else emp_f
     stts_arg = None if status_f == "(Todos)" else [status_f]
-    ocs_brutas = oc.listar_ocs(emp_arg, stts_arg)
+    ocs_brutas = listar_ocs(emp_arg, stts_arg)
 
-    # Filtra sÃ³ OCs vÃ¡lidas (com oc_id). Evita KeyError.
+    # Filtra só OCs válidas (com oc_id). Evita KeyError.
     ocs = [o for o in ocs_brutas if isinstance(o, dict) and o.get("oc_id")]
 
     if not ocs_brutas:
         st.info("Nenhuma OC encontrada nos filtros.")
+        return
     if not ocs:
         st.warning("Existem arquivos de OC sem 'oc_id'. Eles foram ignorados.")
+        return
 
     df_ocs = pd.DataFrame([{
         "oc_id": o.get("oc_id",""),
@@ -1072,9 +1223,10 @@ with colx2:
     if sel_id != "(Selecione)":
         oc = next((d for d in ocs if d.get("oc_id")==sel_id), None)
         if not oc:
-            st.warning("OC nÃ£o encontrada (arquivo pode ter sido movido).")
+            st.warning("OC não encontrada (arquivo pode ter sido movido).")
+            return
 
-        st.write(f"**OC {sel_id}** â€” {oc.get('empresa')} / {oc.get('fornecedor')} â€” status: **{oc.get('status')}**")
+        st.write(f"**OC {sel_id}** — {oc.get('empresa')} / {oc.get('fornecedor')} — status: **{oc.get('status')}**")
 
         itens = pd.DataFrame(oc.get("itens",[]))
         if not itens.empty:
@@ -1090,7 +1242,7 @@ with colx2:
                 column_config={
                     "SKU": st.column_config.TextColumn("SKU", disabled=True),
                     "fornecedor": st.column_config.TextColumn("Fornecedor", disabled=True),
-                    "preco": st.column_config.NumberColumn("PreÃ§o (R$)", format="%.2f", disabled=True),
+                    "preco": st.column_config.NumberColumn("Preço (R$)", format="%.2f", disabled=True),
                     "qtd_comprada": st.column_config.NumberColumn("Qtd Comprada", format="%d", disabled=True),
                     "valor_total": st.column_config.NumberColumn("Total (R$)", format="%.2f", disabled=True),
                     "nf_entregue": st.column_config.CheckboxColumn("NF entregue?"),
@@ -1101,32 +1253,32 @@ with colx2:
 
             colb1, colb2, colb3, colb4 = st.columns([1,1,1,1])
             with colb1:
-                if st.button("ðŸ’¾ Salvar alteraÃ§Ãµes", use_container_width=True):
+                if st.button("💾 Salvar alterações", use_container_width=True):
                     oc["itens"] = itens_edit.to_dict(orient="records")
                     oc["historico"] = oc.get("historico", []) + [{"evento":"editado", "quando": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}]
                     salvar_oc_json(oc)
                     st.success("OC salva.")
             with colb2:
-                if st.button("âœ… Dar Baixa (Total)", use_container_width=True):
+                if st.button("✅ Dar Baixa (Total)", use_container_width=True):
                     oc["status"] = "Recebida Total"
                     salvar_oc_json(oc)
                     st.success("OC marcada como Recebida Total.")
             with colb3:
-                if st.button("â¬ Baixa Parcial", use_container_width=True):
+                if st.button("⏬ Baixa Parcial", use_container_width=True):
                     oc["status"] = "Recebida Parcial"
                     salvar_oc_json(oc)
                     st.success("OC marcada como Recebida Parcial.")
             with colb4:
-                if st.button("ðŸ›‘ Cancelar OC", use_container_width=True):
+                if st.button("🛑 Cancelar OC", use_container_width=True):
                     oc["status"] = "Cancelada"
                     salvar_oc_json(oc)
                     st.warning("OC cancelada.")
 
         st.markdown("---")
-        st.subheader("Imprimir (A4 monocromÃ¡tico)")
+        st.subheader("Imprimir (A4 monocromático)")
         html = render_html_oc(oc, logo_url=st.session_state.get("oc_logo",""))
         st.components.v1.html(html, height=700, scrolling=True)
-        if st.button("â¬‡ï¸ Baixar itens da OC (XLSX)"):
+        if st.button("⬇️ Baixar itens da OC (XLSX)"):
             bio = _export_xlsx_oc(oc)
             st.download_button(
                 "Download XLSX",
@@ -1138,35 +1290,3 @@ with colx2:
 
 # ================== Rodape ==================
 st.caption(f"Alivvia - {VERSION}")
-
-
-
-
-
-
-
-
-
-
-def __restore_uploads():
-    """
-    Recarrega arquivos salvos em .uploads/ para st.session_state
-    e garante a estrutura por empresa/kind.
-    """
-    try:
-        for emp in ["ALIVVIA", "JCA"]:
-            st.session_state.setdefault(emp, {
-                "FULL":   {"name": None, "bytes": None},
-                "VENDAS": {"name": None, "bytes": None},
-                "ESTOQUE":{"name": None, "bytes": None},
-            })
-            for kind in ["FULL", "VENDAS", "ESTOQUE"]:
-                curr = st.session_state[emp].get(kind) or {"name": None, "bytes": None}
-                if not curr.get("bytes"):
-                    rec = _disk_get(emp, kind)
-                    if rec:
-                        st.session_state[emp][kind] = rec
-    except Exception:
-        # Não quebra a UI se algo der errado
-        pass
-
