@@ -876,15 +876,14 @@ with tab2:
 
             # =============== CONSOLIDADO POR SKU (ALIVVIA + JCA) ===============
             st.markdown("---")
-            with 
-# >>> NOVO CONSOLIDADO POR SKU (ALIVVIA + JCA)
-try:
+            with st.expander("🔎 Consolidado por SKU — ver ALIVVIA e JCA juntos", expanded=False):
+    try:
     # 'dfs' e 'filtros_contexto' devem existir no escopo onde outros blocos da Compra Automática já usam
     render_consolidado_por_sku_alivvia_jca(dfs, filtros_contexto)
-except Exception as _e:
+    except Exception as _e:
     import streamlit as st
     st.warning(f"Consolidado por SKU (novo) não pôde ser renderizado: {_e}")
-# <<< NOVO CONSOLIDADO POR SKU (ALIVVIA + JCA)
+    # <<< NOVO CONSOLIDADO POR SKU (ALIVVIA + JCA)
                 tem_A = "ALIVVIA" in st.session_state["resultado_compra"]
                 tem_J = "JCA"     in st.session_state["resultado_compra"]
                 if not (tem_A and tem_J):
