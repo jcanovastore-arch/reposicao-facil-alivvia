@@ -17,7 +17,7 @@ from requests.adapters import HTTPAdapter, Retry
 import ordem_compra 
 import gerenciador_oc 
 
-VERSION = "v4.9.1 - AUDITADO E CORRIGIDO"
+VERSION = "v4.9.1 - VERSION = "v4.10.0 - ULTIMA TENTATIVA DE SYNC"
 
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
