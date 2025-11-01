@@ -1,4 +1,4 @@
-# reposicao_facil.py - VERSÃO FINAL DE PRODUÇÃO (Sintaxe 100% Auditada)
+# reposicao_facil.py - VERSÃO FINAL DE PRODUÇÃO (V4.8.0)
 import io
 import os
 import json
@@ -19,15 +19,17 @@ from requests.adapters import HTTPAdapter, Retry
 import ordem_compra 
 import gerenciador_oc 
 
-VERSION = "v4.7.0 - AUDITADO E CORRIGIDO"
+VERSION = "v4.8.0 - DOWNLOAD CORRIGIDO"
 
 st.set_page_config(page_title="Alivvia Reposição Pro", layout="wide")
 
+# ATUALIZADO: Usando o GID da sua planilha para download mais confiável
 DEFAULT_SHEET_LINK = "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/edit"
 DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"
+DEFAULT_GID_KITS_CAT = "1589453187" # GID da aba principal (provavelmente KITS/CAT)
 
 # =======================================================
-# --- FUNÇÕES UTILITÁRIAS ESSENCIAIS (Sintaxe Auditada) ---
+# --- FUNÇÕES UTILITÁRIAS ESSENCIAIS ---
 # =======================================================
 
 def badge_ok(label: str, filename: str) -> str:
@@ -42,7 +44,6 @@ def norm_header(s: str) -> str:
 def norm_sku(x: str) -> str:
     if pd.isna(x): return ""; return unidecode(str(x)).strip().upper()
 
-# SINTAXE DE BR_TO_FLOAT CORRIGIDA
 def br_to_float(x):
     if pd.isna(x): return np.nan
     if isinstance(x, (int, float, np.integer, np.floating)): return float(x)
@@ -85,7 +86,7 @@ def _ensure_state():
 _ensure_state()
 
 # =======================================================
-# --- LÓGICA DE CÁLCULO (Sintaxe Auditada) ---
+# --- LÓGICA DE CÁLCULO ---
 # =======================================================
 
 @dataclass
@@ -101,18 +102,26 @@ def load_any_table_from_bytes(file_name: str, blob: bytes) -> pd.DataFrame:
     df.columns = [norm_header(c) for c in df.columns]; sku_col = next((c for c in ["sku", "codigo", "codigo_sku"] if c in df.columns), None)
     if sku_col: df[sku_col] = df[sku_col].map(norm_sku); df = df[df[sku_col] != ""]; return df.reset_index(drop=True)
 
-# SINTAXE DE TRY/EXCEPT CORRIGIDA
+# CORRIGIDO: Usando o GID na URL e tratamento de erro de status.
 def baixar_xlsx_do_sheets(sheet_id: str) -> bytes:
     try: 
         s = requests.Session()
-        url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+        # Inclui o GID para garantir a exportação da aba correta
+        url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx&gid={DEFAULT_GID_KITS_CAT}"
         r = s.get(url, timeout=30)
-        r.raise_for_status()
+        
+        # Se o status_code for diferente de 200 (OK), lança erro claro
+        if r.status_code != 200:
+            if r.status_code in [401, 403]:
+                raise RuntimeError(f"Erro HTTP {r.status_code} (Permissão negada). A planilha deve ser pública (acesso 'Leitor') para funcionar no Streamlit Cloud.")
+            raise RuntimeError(f"Erro HTTP {r.status_code}. Verifique a URL e a conexão.")
+
         return r.content
+    except requests.exceptions.Timeout:
+        raise RuntimeError("Falha ao baixar planilha KITS/CAT: Tempo limite (Timeout) excedido.")
     except Exception as e: 
         raise RuntimeError(f"Falha ao baixar planilha KITS/CAT: {e}")
 
-# SINTAXE DE TRY/EXCEPT CORRIGIDA
 def _carregar_padrao_de_content(content: bytes) -> "Catalogo":
     xls = pd.ExcelFile(io.BytesIO(content)); 
     def load_sheet(opts):
@@ -131,7 +140,8 @@ def _carregar_padrao_de_content(content: bytes) -> "Catalogo":
         df_cat["status_reposicao"] = df_cat[next(c for c in df_cat.columns if 'status' in c)].fillna("")
         return Catalogo(df_cat, df_kits)
     except Exception as e:
-        raise RuntimeError(f"Erro ao processar abas KITS/CAT: {e}")
+        # Erro mais claro quando a falha é no processamento do Excel (como 'NoneType' não iterável)
+        raise RuntimeError(f"Erro ao processar abas KITS/CAT. Verifique o nome das abas e se o arquivo baixado é um Excel válido. Erro detalhe: {e}")
 
 def mapear_tipo(df: pd.DataFrame) -> str:
     cols = [c.lower() for c in df.columns]; tem_sku = any("sku" in c or "codigo" in c for c in cols)
