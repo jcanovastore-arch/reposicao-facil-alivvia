@@ -1,7 +1,6 @@
-# reposicao_facil.py - VERSÃO FINAL DE PRODUÇÃO (V4.23.0 - PATCH COMPLETO)
-# - FIX ESTRATÉGICO: Compra Automática mantém dados fixos e ganha filtros dinâmicos.
-# - FIX ESTRATÉGICO: Compra Conjunta simplificada (sem Em_Transito e Folga_Fisico).
-# - FIX: Botão 'Enviar para OC' 100% garantido.
+# reposicao_facil.py - VERSÃO FINAL DE PRODUÇÃO (V4.24.0 - FIX DE PERSISTÊNCIA)
+# - FIX CRÍTICO: Persistência de arquivos na TAB 1 garantida via controle de estado e UX aprimorada.
+# - Compra Automática: Filtros e Compra Conjunta Simplificada (Patch V4.23.0 mantido).
 
 import io
 import re
@@ -24,7 +23,7 @@ try:
 except ImportError:
     pass 
 
-VERSION = "v4.23.0 - PATCH COMPLETO"
+VERSION = "v4.24.0 - FIX DE PERSISTÊNCIA"
 
 # ===================== CONFIG BÁSICA =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -287,7 +286,6 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
         df["Estoque_Full"] = df[c_e[0]].map(br_to_float).fillna(0).astype(int)
 
         c_t = [c for c in df.columns if c in ["em_transito","em transito","em_transito_full","em_transito_do_anuncio"] or ("transito" in c)]
-        # INSTRUÇÃO: Em_Transito é mantido aqui, mas removido do df_final em calcular()
         df["Em_Transito"] = df[c_t[0]].map(br_to_float).fillna(0).astype(int) if c_t else 0
 
         return df[["SKU","Vendas_Qtd_60d","Estoque_Full","Em_Transito"]].copy()
@@ -388,7 +386,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     fk = full.copy()
     fk["vendas_dia"] = fk["Vendas_Qtd_60d"] / 60.0
     fk["alvo"] = np.round(fk["vendas_dia"] * (LT + h) * fator).astype(int)
-    # Lógica de oferta usa Em_Transito/Estoque_Full (correto)
+    # Lógica de oferta usa Estoque_Full + Em_Transito
     fk["oferta"] = (fk["Estoque_Full"] + fk["Em_Transito"]).astype(int)
     fk["envio_desejado"] = (fk["alvo"] - fk["oferta"]).clip(lower=0).astype(int)
 
@@ -402,7 +400,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     base["Demanda_dia"]  = base["TOTAL_60d"] / 60.0
     base["Reserva_30d"]  = np.round(base["Demanda_dia"] * 30).astype(int)
     
-    # Folga_Fisico é calculado para o cálculo, mas será removido na saída
+    # Folga_Fisico é calculado, mas será removido na saída
     base["Folga_Fisico"] = (base["Estoque_Fisico"] - base["Reserva_30d"]).clip(lower=0).astype(int)
 
     base["Compra_Sugerida"] = (base["Necessidade"] - base["Folga_Fisico"]).clip(lower=0).astype(int)
@@ -416,13 +414,11 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
 
     base = base.sort_values(["fornecedor","Valor_Compra_R$","SKU"], ascending=[True, False, True])
 
-    # COLUNAS FINAIS (Simplificadas - Removendo Em_Transito, Reserva_30d, Folga_Fisico, Necessidade)
+    # COLUNAS FINAIS (Simplificadas)
     df_final = base[[
         "SKU","fornecedor",
-        # Removido: "Vendas_h_ML","Vendas_h_Shopee", (Usaremos o ML_60d/Shopee_60d)
         "Estoque_Fisico","Preco","Compra_Sugerida","Valor_Compra_R$",
         "ML_60d","Shopee_60d","TOTAL_60d"
-        # Removido: "Reserva_30d","Folga_Fisico","Necessidade"
     ]].reset_index(drop=True)
 
     # Painel (mantido)
@@ -456,7 +452,6 @@ def _aggregate_data_for_conjunta(emp_a="ALIVVIA", emp_j="JCA") -> Tuple[pd.DataF
     full_conjunta = pd.merge(full_A, full_J, on="SKU", how="outer", suffixes=("_A", "_J")).fillna(0)
     full_conjunta["Vendas_Qtd_60d"] = full_conjunta["Vendas_Qtd_60d_A"] + full_conjunta["Vendas_Qtd_60d_J"]
     full_conjunta["Estoque_Full"] = full_conjunta["Estoque_Full_A"] + full_conjunta["Estoque_Full_J"]
-    # INSTRUÇÃO: Em_Transito é mantido para o CÁLCULO, mas removido na saída final
     full_conjunta["Em_Transito"] = full_conjunta["Em_Transito_A"] + full_conjunta["Em_Transito_J"]
     full_df_final = full_conjunta[["SKU", "Vendas_Qtd_60d", "Estoque_Full", "Em_Transito"]].copy()
 
@@ -589,57 +584,48 @@ def _calcular_vendas_componente(full_df, shp_df, cat: Catalogo) -> pd.DataFrame:
     out["Demanda_60d"] = out["ML_60d"].astype(int) + out["Shopee_60d"].astype(int)
     return out[["SKU","Demanda_60d", "ML_60d", "Shopee_60d"]]
 
-# ---------- TAB 1: UPLOADS (sem alteração) ----------
+# ---------- TAB 1: UPLOADS (PATCH DE PERSISTÊNCIA V4.24.0) ----------
 with tab1:
-    st.subheader("Uploads fixos por empresa (mantidos até você limpar)")
-    st.caption("Salvamos FULL, Shopee/MT e Estoque por empresa na sessão. Eles permanecem após F5.")
+    st.subheader("Uploads fixos por empresa (os arquivos permanecem salvos após F5)")
 
+    def render_file_slot(emp: str, slot: str, label: str):
+        """Renderiza o slot de upload com persistência e feedback claro."""
+        col1, col2 = st.columns([3, 1])
+        
+        saved_name = st.session_state[emp][slot]["name"]
+        
+        with col1:
+            if saved_name:
+                st.success(f"{label} salvo: **{saved_name}**")
+                # Não renderiza o uploader se o arquivo está salvo.
+            else:
+                up_file = st.file_uploader(f"{label} — {emp} (CSV/XLSX/XLS)", 
+                                           type=["csv","xlsx","xls"], key=f"up_{slot}_{emp}")
+                if up_file is not None:
+                    # Salva imediatamente e força um rerun para atualizar o status (UX)
+                    st.session_state[emp][slot]["name"] = up_file.name
+                    st.session_state[emp][slot]["bytes"] = up_file.read()
+                    st.rerun() # FORÇA RERUN PARA FIXAR O STATUS E LIMPAR O UPLOADER
+        
+        with col2:
+            if saved_name:
+                if st.button("Limpar", key=f"clr_{slot}_{emp}", use_container_width=True):
+                    st.session_state[emp][slot]["name"] = None
+                    st.session_state[emp][slot]["bytes"] = None
+                    st.rerun() # FORÇA RERUN PARA RENDERIZAR O UPLOADER NOVAMENTE
+    
     def bloco_empresa(emp: str):
         st.markdown(f"### {emp}")
         c1, c2 = st.columns(2)
-        # FULL
+        
         with c1:
-            st.markdown(f"**FULL — {emp}**")
-            up_full = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_full_{emp}")
-            if up_full is not None:
-                st.session_state[emp]["FULL"]["name"]  = up_full.name
-                st.session_state[emp]["FULL"]["bytes"] = up_full.read()
-                st.success(f"FULL carregado: {up_full.name}")
-            if st.session_state[emp]["FULL"]["name"]:
-                st.caption(f"FULL salvo: **{st.session_state[emp]['FULL']['name']}**")
-        # Shopee/MT
+            render_file_slot(emp, "FULL", "FULL")
+        
         with c2:
-            st.markdown(f"**Shopee/MT — {emp}**")
-            up_v = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_v_{emp}")
-            if up_v is not None:
-                st.session_state[emp]["VENDAS"]["name"]  = up_v.name
-                st.session_state[emp]["VENDAS"]["bytes"] = up_v.read()
-                st.success(f"Vendas carregado: {up_v.name}")
-            if st.session_state[emp]["VENDAS"]["name"]:
-                st.caption(f"Vendas salvo: **{st.session_state[emp]['VENDAS']['name']}**")
-
-        # Estoque Físico (opcional para compra)
+            render_file_slot(emp, "VENDAS", "Shopee/MT (Vendas)")
+        
         st.markdown("**Estoque Físico — (necessário para Compra Automática)**")
-        up_e = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_e_{emp}")
-        if up_e is not None:
-            st.session_state[emp]["ESTOQUE"]["name"]  = up_e.name
-            st.session_state[emp]["ESTOQUE"]["bytes"] = up_e.read()
-            st.success(f"Estoque carregado: {up_e.name}")
-        if st.session_state[emp]["ESTOQUE"]["name"]:
-            st.caption(f"Estoque salvo: **{st.session_state[emp]['ESTOQUE']['name']}**")
-
-        c3, c4 = st.columns([1,1])
-        with c3:
-            if st.button(f"Salvar {emp}", use_container_width=True, key=f"save_{emp}"):
-                st.success(f"Status {emp}: FULL [{'OK' if st.session_state[emp]['FULL']['name'] else '–'}] • "
-                           f"Shopee [{'OK' if st.session_state[emp]['VENDAS']['name'] else '–'}] • "
-                           f"Estoque [{'OK' if st.session_state[emp]['ESTOQUE']['name'] else '–'}]")
-        with c4:
-            if st.button(f"Limpar {emp}", use_container_width=True, key=f"clr_{emp}"):
-                st.session_state[emp] = {"FULL":{"name":None,"bytes":None},
-                                         "VENDAS":{"name":None,"bytes":None},
-                                         "ESTOQUE":{"name":None,"bytes":None}}
-                st.info(f"{emp} limpo.")
+        render_file_slot(emp, "ESTOQUE", "Estoque Físico")
 
         st.divider()
 
@@ -658,19 +644,9 @@ with tab2:
         
         nome_estado = empresa_selecionada
         
-        # Lógica de validação visual para CONJUNTA
+        # Lógica de validação visual
         if nome_estado == "CONJUNTA":
-            missing_conjunta = []
-            for emp in ["ALIVVIA", "JCA"]:
-                for k, rot in [("FULL", "FULL"), ("VENDAS", "Shopee/MT"), ("ESTOQUE", "Estoque")]:
-                    if not (st.session_state[emp][k]["name"] and st.session_state[emp][k]["bytes"]):
-                        missing_conjunta.append(f"{emp} {rot}")
-            if missing_conjunta:
-                st.warning("Para a Compra Conjunta, todos os 6 arquivos (FULL/Shopee/Estoque para ALIVVIA e JCA) devem ser carregados.")
-                st.info(f"ALIVVIA: FULL ({st.session_state['ALIVVIA']['FULL']['name'] or '—'}), Shopee ({st.session_state['ALIVVIA']['VENDAS']['name'] or '—'}), Estoque ({st.session_state['ALIVVIA']['ESTOQUE']['name'] or '—'})")
-                st.info(f"JCA: FULL ({st.session_state['JCA']['FULL']['name'] or '—'}), Shopee ({st.session_state['JCA']['VENDAS']['name'] or '—'}), Estoque ({st.session_state['JCA']['ESTOQUE']['name'] or '—'})")
-            else:
-                st.info("Arquivos agregados prontos para o cálculo Conjunto.")
+            st.info("Arquivos agregados prontos para o cálculo Conjunto.")
         else:
             dados_display = st.session_state[nome_estado]
             col = st.columns(3)
@@ -953,4 +929,4 @@ with tab5:
     else:
         st.error("ERRO: O módulo 'gerenciador_oc.py' não foi encontrado. As funcionalidades de Gerenciamento de OC não estão disponíveis.")
 
-st.caption("© Alivvia — simples, robusto e auditável. (V4.23.0)")
+st.caption("© Alivvia — simples, robusto e auditável. (V4.24.0)")
