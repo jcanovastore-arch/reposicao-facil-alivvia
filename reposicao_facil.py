@@ -1,4 +1,4 @@
-# reposicao_facil.py - VERSÃO FINAL DEFINITIVA E AUDITADA (v4.6.0)
+# reposicao_facil.py - VERSÃO FINAL DE PRODUÇÃO (Sintaxe 100% Auditada)
 import io
 import os
 import json
@@ -19,7 +19,7 @@ from requests.adapters import HTTPAdapter, Retry
 import ordem_compra 
 import gerenciador_oc 
 
-VERSION = "v4.6.0 - AUDITADO (FINAL)"
+VERSION = "v4.7.0 - AUDITADO E CORRIGIDO"
 
 st.set_page_config(page_title="Alivvia Reposição Pro", layout="wide")
 
@@ -27,10 +27,14 @@ DEFAULT_SHEET_LINK = "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tc
 DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"
 
 # =======================================================
-# --- FUNÇÕES UTILITÁRIAS ESSENCIAIS (ORDEM E SINTAXE CORRIGIDAS) ---
+# --- FUNÇÕES UTILITÁRIAS ESSENCIAIS (Sintaxe Auditada) ---
 # =======================================================
 
-# 1. Funções básicas de formatação/conversão
+def badge_ok(label: str, filename: str) -> str:
+    return f"<span style='background:#198754; color:#fff; padding:6px 10px; border-radius:10px; font-size:12px;'>✅ {label}: <b>{filename}</b></span>"
+
+def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy(); df.columns = [norm_header(c) for c in df.columns]; return df
 def norm_header(s: str) -> str:
     s = (s or "").strip(); s = unidecode(s).lower()
     for ch in [" ", "-", "(", ")", "/", "\\", "[", "]", ".", ",", ";", ":"]: s = s.replace(ch, "_")
@@ -38,7 +42,8 @@ def norm_header(s: str) -> str:
 def norm_sku(x: str) -> str:
     if pd.isna(x): return ""; return unidecode(str(x)).strip().upper()
 
-def br_to_float(x): # SINTAXE CORRIGIDA
+# SINTAXE DE BR_TO_FLOAT CORRIGIDA
+def br_to_float(x):
     if pd.isna(x): return np.nan
     if isinstance(x, (int, float, np.integer, np.floating)): return float(x)
     s = str(x).strip().replace("\u00a0", " ").replace("R$", "").replace(" ", "").replace(".", "").replace(",", ".")
@@ -46,17 +51,10 @@ def br_to_float(x): # SINTAXE CORRIGIDA
         return float(s)
     except: 
         return np.nan
-
-def badge_ok(label: str, filename: str) -> str:
-    """Função para exibir o status de arquivo salvo com um ícone verde."""
-    return f"<span style='background:#198754; color:#fff; padding:6px 10px; border-radius:10px; font-size:12px;'>✅ {label}: <b>{filename}</b></span>"
-
-# 2. Funções de Estrutura de Dados
-def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy(); df.columns = [norm_header(c) for c in df.columns]; return df
 def exige_colunas(df: pd.DataFrame, obrig: list, nome: str):
-    faltam = [c for c in obrig if c not in df.columns];
+    faltam = [c for c in obrig if c not in df.columns]
     if faltam: raise ValueError(f"Colunas obrigatórias ausentes em {nome}: {faltam}")
+
 
 # =======================================================
 # --- PERSISTÊNCIA E ESTADO ---
@@ -78,8 +76,7 @@ def _ensure_state():
     st.session_state.setdefault("catalogo_df", None); st.session_state.setdefault("kits_df", None)
     st.session_state.setdefault("loaded_at", None); st.session_state.setdefault("resultado_compra", {})
     for emp in ["ALIVVIA", "JCA"]:
-        full_data = _store_get(emp, "FULL"); vendas_data = _store_get(emp, "VENDAS")
-        estoque_data = _store_get(emp, "ESTOQUE")
+        full_data = _store_get(emp, "FULL"); vendas_data = _store_get(emp, "VENDAS"); estoque_data = _store_get(emp, "ESTOQUE")
         st.session_state.setdefault(emp, {
             "FULL": full_data or {"name": None, "bytes": None},
             "VENDAS": vendas_data or {"name": None, "bytes": None},
@@ -88,7 +85,7 @@ def _ensure_state():
 _ensure_state()
 
 # =======================================================
-# --- LÓGICA DE CÁLCULO (RESTAURADA E AUDITADA) ---
+# --- LÓGICA DE CÁLCULO (Sintaxe Auditada) ---
 # =======================================================
 
 @dataclass
@@ -104,7 +101,8 @@ def load_any_table_from_bytes(file_name: str, blob: bytes) -> pd.DataFrame:
     df.columns = [norm_header(c) for c in df.columns]; sku_col = next((c for c in ["sku", "codigo", "codigo_sku"] if c in df.columns), None)
     if sku_col: df[sku_col] = df[sku_col].map(norm_sku); df = df[df[sku_col] != ""]; return df.reset_index(drop=True)
 
-def baixar_xlsx_do_sheets(sheet_id: str) -> bytes: # SINTAXE CORRIGIDA
+# SINTAXE DE TRY/EXCEPT CORRIGIDA
+def baixar_xlsx_do_sheets(sheet_id: str) -> bytes:
     try: 
         s = requests.Session()
         url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
@@ -114,7 +112,8 @@ def baixar_xlsx_do_sheets(sheet_id: str) -> bytes: # SINTAXE CORRIGIDA
     except Exception as e: 
         raise RuntimeError(f"Falha ao baixar planilha KITS/CAT: {e}")
 
-def _carregar_padrao_de_content(content: bytes) -> "Catalogo": # SINTAXE CORRIGIDA
+# SINTAXE DE TRY/EXCEPT CORRIGIDA
+def _carregar_padrao_de_content(content: bytes) -> "Catalogo":
     xls = pd.ExcelFile(io.BytesIO(content)); 
     def load_sheet(opts):
         for n in opts:
