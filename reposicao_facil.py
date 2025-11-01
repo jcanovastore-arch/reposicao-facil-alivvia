@@ -58,13 +58,13 @@ def _ensure_state():
         })
 _ensure_state()
 
-# ===================== HTTP / GOOGLE SHEETS =====================
+# reposicao_facil.py (Substitua as linhas 60-66)
 def _requests_session() -> requests.Session:
-    s = requests.Session()
-    retries = Retry(total=3, backoff_factor=0.6, status_forcelist=[429,500,502,503,504], allowed_methods=["GET"])
-    s.mount("https://", HTTPAdapter(max_retries=retries))
-    s.headers.update({"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"})
-    return s
+    s = requests.Session() # <--- Indentação limpa aqui
+    retries = Retry(total=3, backoff_factor=0.6, status_forcelist=[429,500,502,503,504], allowed_methods=["GET"])
+    s.mount("https://", HTTPAdapter(max_retries=retries))
+    s.headers.update({"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"})
+    return s
 
 def gs_export_xlsx_url(sheet_id: str) -> str:
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx&gid={DEFAULT_GID_KITS_CAT}"
