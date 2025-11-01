@@ -1,4 +1,4 @@
-# reposicao_facil.py - VERSÃO FINAL DE PRODUÇÃO (V4.10.0)
+# reposicao_facil.py - VERSÃO FINAL DE PRODUÇÃO (V4.11.0 - REVERSÃO DE LOGICA)
 import io
 import re
 import hashlib
@@ -14,51 +14,43 @@ import requests
 from requests.adapters import HTTPAdapter, Retry
 
 # MÓDULOS DE ORDEM DE COMPRA (SQLITE)
-import ordem_compra 
-import gerenciador_oc 
+# Importação mantida do seu script original
+try:
+    import ordem_compra 
+    import gerenciador_oc 
+except ImportError:
+    st.error("Arquivos de Módulos (ordem_compra.py ou gerenciador_oc.py) ausentes. O app não funcionará corretamente.")
+    ordem_compra = None
+    gerenciador_oc = None
 
-VERSION = "v4.10.0 - ULTIMA TENTATIVA DE SYNC"
+VERSION = "v4.11.0 - REVERSAO FINAL"
 
+# ===================== CONFIG BÁSICA =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
-# ===================== CONFIG BÁSICA (LINK CORRIGIDO) =====================
-
-# Link que você me forneceu (limpo de U+00A0)
 DEFAULT_SHEET_LINK = (
     "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/"
     "edit?usp=sharing&ouid=109458533144345974874&rtpof=true&sd=true"
 )
-DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"  # ID fixo
-DEFAULT_GID_KITS_CAT = "1589453187" # GID da aba KITS/CAT (se aplicável, para download direto)
+DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"  # fixo
 
-# ===================== ESTADO (mantido como o seu original) =====================
-@st.cache_resource(show_spinner=False)
-def _file_store():
-    return {
-        "ALIVVIA": {"FULL": None, "VENDAS": None, "ESTOQUE": None},
-        "JCA":     {"FULL": None, "VENDAS": None, "ESTOQUE": None},
-    }
-def _store_put(emp: str, kind: str, name: str, blob: bytes):
-    store = _file_store(); store[emp][kind] = {"name": name, "bytes": blob}
-def _store_get(emp: str, kind: str):
-    store = _file_store(); return store[emp][kind]
-def _store_delete(emp: str, kind: str):
-    store = _file_store(); store[emp][kind] = None
-    
+# ===================== ESTADO =====================
 def _ensure_state():
-    st.session_state.setdefault("catalogo_df", None); st.session_state.setdefault("kits_df", None)
-    st.session_state.setdefault("loaded_at", None); st.session_state.setdefault("resultado_compra", {})
+    st.session_state.setdefault("catalogo_df", None)
+    st.session_state.setdefault("kits_df", None)
+    st.session_state.setdefault("loaded_at", None)
     st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK)
+
+    # uploads por empresa
     for emp in ["ALIVVIA", "JCA"]:
-        full_data = _store_get(emp, "FULL"); vendas_data = _store_get(emp, "VENDAS"); estoque_data = _store_get(emp, "ESTOQUE")
-        st.session_state.setdefault(emp, {
-            "FULL": full_data or {"name": None, "bytes": None},
-            "VENDAS": vendas_data or {"name": None, "bytes": None},
-            "ESTOQUE": estoque_data or {"name": None, "bytes": None}
-        })
+        st.session_state.setdefault(emp, {})
+        st.session_state[emp].setdefault("FULL",   {"name": None, "bytes": None})
+        st.session_state[emp].setdefault("VENDAS", {"name": None, "bytes": None})
+        st.session_state[emp].setdefault("ESTOQUE",{"name": None, "bytes": None})
+
 _ensure_state()
 
-# ===================== HTTP / GOOGLE SHEETS =====================
+# ===================== HTTP / GOOGLE SHEETS (SEU BLOCO ORIGINAL) =====================
 def _requests_session() -> requests.Session:
     s = requests.Session()
     retries = Retry(total=3, backoff_factor=0.6, status_forcelist=[429,500,502,503,504], allowed_methods=["GET"])
@@ -67,7 +59,8 @@ def _requests_session() -> requests.Session:
     return s
 
 def gs_export_xlsx_url(sheet_id: str) -> str:
-    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx&gid={DEFAULT_GID_KITS_CAT}"
+    # A URL original não usava GID
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
 
 def extract_sheet_id_from_url(url: str) -> Optional[str]:
     if not url: return None
@@ -87,14 +80,13 @@ def baixar_xlsx_do_sheets(sheet_id: str) -> bytes:
     url = gs_export_xlsx_url(sheet_id)
     try:
         r = s.get(url, timeout=30)
-        # r.raise_for_status() # Removido para tratamento manual
-        if r.status_code != 200:
-            raise RuntimeError(f"Falha ao baixar XLSX (HTTP {r.status_code}). Verifique: compartilhamento 'Qualquer pessoa com link – Leitor'.")
-        return r.content
-    except requests.exceptions.RequestException as e:
-        raise RuntimeError(f"Falha ao baixar XLSX (Conexão). Verifique: {e}")
-    except Exception as e:
-        raise RuntimeError(f"Falha crítica ao baixar XLSX: {e}")
+        r.raise_for_status()
+    except requests.HTTPError as e:
+        sc = getattr(e.response, "status_code", "?")
+        raise RuntimeError(
+            f"Falha ao baixar XLSX (HTTP {sc}). Verifique: compartilhamento 'Qualquer pessoa com link – Leitor'.\nURL: {url}"
+        )
+    return r.content
 
 # ===================== UTILS DE DADOS =====================
 def norm_header(s: str) -> str:
@@ -116,7 +108,8 @@ def br_to_float(x):
     if isinstance(x,(int,float,np.integer,np.floating)): return float(x)
     s = str(x).strip()
     if s == "": return np.nan
-    s = s.replace("\u00a0"," ").replace("R$","").replace(" ","").replace(".","").replace(",",".")
+    # MANTIDO O CÓDIGO DO SEU SCRIPT, mas sem o U+00A0
+    s = s.replace("\u00a0"," ").replace("R$","").replace(" ","").replace(".","").replace(",",".") 
     try: return float(s)
     except: return np.nan
 
@@ -134,6 +127,45 @@ def badge_ok(label: str, filename: str) -> str:
     return f"<span style='background:#198754; color:#fff; padding:6px 10px; border-radius:10px; font-size:12px;'>✅ {label}: <b>{filename}</b></span>"
 
 # ===================== LEITURA DE ARQUIVOS =====================
+
+def load_any_table(uploaded_file) -> Optional[pd.DataFrame]:
+    if uploaded_file is None:
+        return None
+    name = uploaded_file.name.lower()
+    try:
+        if name.endswith(".csv"):
+            uploaded_file.seek(0)
+            df = pd.read_csv(uploaded_file, dtype=str, keep_default_na=False, sep=None, engine="python")
+        else:
+            uploaded_file.seek(0)
+            df = pd.read_excel(uploaded_file, dtype=str, keep_default_na=False)
+    except Exception as e:
+        raise RuntimeError(f"Não consegui ler o arquivo '{uploaded_file.name}': {e}")
+
+    df.columns = [norm_header(c) for c in df.columns]
+
+    # fallback header=2 (FULL Magiic)
+    tem_col_sku = any(c in df.columns for c in ["sku","codigo","codigo_sku"]) or any("sku" in c for c in df.columns)
+    if (not tem_col_sku) and (len(df) > 0):
+        try:
+            uploaded_file.seek(0)
+            if name.endswith(".csv"):
+                df = pd.read_csv(uploaded_file, dtype=str, keep_default_na=False, header=2)
+            else:
+                df = pd.read_excel(uploaded_file, dtype=str, keep_default_na=False, header=2)
+            df.columns = [norm_header(c) for c in df.columns]
+        except Exception:
+            pass
+
+    # limpeza
+    cols = set(df.columns)
+    sku_col = next((c for c in ["sku","codigo","codigo_sku"] if c in cols), None)
+    if sku_col:
+        df[sku_col] = df[sku_col].map(norm_sku)
+        df = df[df[sku_col] != ""]
+    for c in list(df.columns):
+        df = df[~df[c].astype(str).str.contains(r"^TOTALS?$|^TOTAIS?$", case=False, na=False)]
+    return df.reset_index(drop=True)
 
 def load_any_table_from_bytes(file_name: str, blob: bytes) -> pd.DataFrame:
     """Leitura a partir de bytes salvos na sessão (com fallback header=2)."""
@@ -171,8 +203,8 @@ def load_any_table_from_bytes(file_name: str, blob: bytes) -> pd.DataFrame:
 # ===================== PADRÃO KITS/CAT =====================
 @dataclass
 class Catalogo:
-    catalogo_simples: pd.DataFrame
-    kits_reais: pd.DataFrame
+    catalogo_simples: pd.DataFrame  # component_sku, fornecedor, status_reposicao
+    kits_reais: pd.DataFrame        # kit_sku, component_sku, qty
 
 def _carregar_padrao_de_content(content: bytes) -> Catalogo:
     try:
@@ -184,9 +216,10 @@ def _carregar_padrao_de_content(content: bytes) -> Catalogo:
         for n in opts:
             if n in xls.sheet_names:
                 return pd.read_excel(xls, n, dtype=str, keep_default_na=False)
+        # Revertendo a mensagem de erro para ser menos agressiva, se falhar.
         raise RuntimeError(f"Aba não encontrada. Esperado uma de {opts}. Abas lidas: {xls.sheet_names}")
 
-    # CORREÇÃO DE LOGICA: Usando os nomes mais prováveis e amplos
+    # Lista de nomes de abas expandida para capturar o seu caso de uso
     df_kits = load_sheet(["KITS","KITS_REAIS","kits","kits_reais","KIT", "kit"]).copy()
     df_cat  = load_sheet(["CATALOGO_SIMPLES","CATALOGO","catalogo_simples","catalogo", "CAT", "cat"]).copy()
 
@@ -224,7 +257,7 @@ def _carregar_padrao_de_content(content: bytes) -> Catalogo:
                 rename_c[c] = alvo; break
     df_cat = df_cat.rename(columns=rename_c)
     if "component_sku" not in df_cat.columns:
-        raise ValueError("CATALOGO inválido: precisa ter a coluna 'component_sku' (ou 'sku').")
+        raise ValueError("CATALOGO precisa ter a coluna 'component_sku' (ou 'sku').")
     if "fornecedor" not in df_cat.columns:
         df_cat["fornecedor"] = ""
     if "status_reposicao" not in df_cat.columns:
@@ -278,9 +311,9 @@ def mapear_tipo(df: pd.DataFrame) -> str:
 
 def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
     if tipo == "FULL":
-        if "sku" in df.columns:             df["SKU"] = df["sku"].map(norm_sku)
-        elif "codigo" in df.columns:       df["SKU"] = df["codigo"].map(norm_sku)
-        elif "codigo_sku" in df.columns:   df["SKU"] = df["codigo_sku"].map(norm_sku)
+        if "sku" in df.columns:           df["SKU"] = df["sku"].map(norm_sku)
+        elif "codigo" in df.columns:      df["SKU"] = df["codigo"].map(norm_sku)
+        elif "codigo_sku" in df.columns:  df["SKU"] = df["codigo_sku"].map(norm_sku)
         else: raise RuntimeError("FULL inválido: precisa de coluna SKU/codigo.")
 
         c_v = [c for c in df.columns if c in ["vendas_qtd_60d","vendas_60d","vendas 60d"] or c.startswith("vendas_60d")]
@@ -346,7 +379,7 @@ def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_co
     base = df.copy()
     base["kit_sku"] = base[sku_col].map(norm_sku)
     base["qtd"]     = base[qtd_col].astype(int)
-    merged    = base.merge(kits, on="kit_sku", how="left")
+    merged   = base.merge(kits, on="kit_sku", how="left")
     exploded = merged.dropna(subset=["component_sku"]).copy()
     exploded["qty"] = exploded["qty"].astype(int)
     exploded["quantidade_comp"] = exploded["qtd"] * exploded["qty"]
@@ -413,7 +446,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     base.loc[mask_nao, "Compra_Sugerida"] = 0
 
     base["Valor_Compra_R$"] = (base["Compra_Sugerida"].astype(float) * base["Preco"].astype(float)).round(2)
-    base["Vendas_h_ML"]      = np.round(base["ML_60d"] * (h/60.0)).astype(int)
+    base["Vendas_h_ML"]     = np.round(base["ML_60d"] * (h/60.0)).astype(int)
     base["Vendas_h_Shopee"] = np.round(base["Shopee_60d"] * (h/60.0)).astype(int)
 
     base = base.sort_values(["fornecedor","Valor_Compra_R$","SKU"], ascending=[True, False, True])
@@ -679,7 +712,7 @@ with tab3:
 
                 # leitura BYTES
                 def read_pair(emp: str) -> Tuple[pd.DataFrame,pd.DataFrame]:
-                    fa = load_any_table_from_bytes(st.session_state[emp]["FULL"]["name"],    st.session_state[emp]["FULL"]["bytes"])
+                    fa = load_any_table_from_bytes(st.session_state[emp]["FULL"]["name"],   st.session_state[emp]["FULL"]["bytes"])
                     sa = load_any_table_from_bytes(st.session_state[emp]["VENDAS"]["name"], st.session_state[emp]["VENDAS"]["bytes"])
                     tfa = mapear_tipo(fa); tsa = mapear_tipo(sa)
                     if tfa != "FULL":   raise RuntimeError(f"FULL inválido ({emp}): precisa de SKU e Vendas_60d/Estoque_full.")
@@ -724,7 +757,7 @@ with tab3:
 
                 res = pd.DataFrame([
                     {"Empresa":"ALIVVIA", "SKU":norm_sku(sku_escolhido), "Demanda_60d":dA, "Proporção":round(propA,4), "Alocação_Sugerida":alocA},
-                    {"Empresa":"JCA",      "SKU":norm_sku(sku_escolhido), "Demanda_60d":dJ, "Proporção":round(propJ,4), "Alocação_Sugerida":alocJ},
+                    {"Empresa":"JCA",     "SKU":norm_sku(sku_escolhido), "Demanda_60d":dJ, "Proporção":round(propJ,4), "Alocação_Sugerida":alocJ},
                 ])
                 st.dataframe(res, use_container_width=True)
                 st.success(f"Total alocado: {qtd_lote} un (ALIVVIA {alocA} | JCA {alocJ})")
