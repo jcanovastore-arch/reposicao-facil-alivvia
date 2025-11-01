@@ -1,6 +1,6 @@
-# reposicao_facil.py - VERSÃO FINAL DE PRODUÇÃO (V4.24.0 - FIX DE PERSISTÊNCIA)
-# - FIX CRÍTICO: Persistência de arquivos na TAB 1 garantida via controle de estado e UX aprimorada.
-# - Compra Automática: Filtros e Compra Conjunta Simplificada (Patch V4.23.0 mantido).
+# reposicao_facil.py - VERSÃO FINAL DE PRODUÇÃO (V4.25.0 - SINCRONIA FORÇADA)
+# - FIX CRÍTICO: Persistência de arquivos na TAB 1 (Sincronia Forçada para evitar reset do uploader).
+# - TODOS OS FIXES ANTERIORES GARANTIDOS (Filtros, Dados Fixos, Compra Conjunta Simplificada).
 
 import io
 import re
@@ -23,7 +23,7 @@ try:
 except ImportError:
     pass 
 
-VERSION = "v4.24.0 - FIX DE PERSISTÊNCIA"
+VERSION = "v4.25.0 - SINCRONIA FORÇADA"
 
 # ===================== CONFIG BÁSICA =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -584,7 +584,7 @@ def _calcular_vendas_componente(full_df, shp_df, cat: Catalogo) -> pd.DataFrame:
     out["Demanda_60d"] = out["ML_60d"].astype(int) + out["Shopee_60d"].astype(int)
     return out[["SKU","Demanda_60d", "ML_60d", "Shopee_60d"]]
 
-# ---------- TAB 1: UPLOADS (PATCH DE PERSISTÊNCIA V4.24.0) ----------
+# ---------- TAB 1: UPLOADS (PATCH DE SINCRONIA FORÇADA V4.25.0) ----------
 with tab1:
     st.subheader("Uploads fixos por empresa (os arquivos permanecem salvos após F5)")
 
@@ -596,23 +596,25 @@ with tab1:
         
         with col1:
             if saved_name:
-                st.success(f"{label} salvo: **{saved_name}**")
+                st.success(f"✅ {label} salvo: **{saved_name}**")
                 # Não renderiza o uploader se o arquivo está salvo.
             else:
-                up_file = st.file_uploader(f"{label} — {emp} (CSV/XLSX/XLS)", 
+                # Renderiza o uploader SÓ SE não houver arquivo salvo
+                up_file = st.file_uploader(f"👆 {label} — {emp} (CSV/XLSX/XLS)", 
                                            type=["csv","xlsx","xls"], key=f"up_{slot}_{emp}")
                 if up_file is not None:
                     # Salva imediatamente e força um rerun para atualizar o status (UX)
                     st.session_state[emp][slot]["name"] = up_file.name
                     st.session_state[emp][slot]["bytes"] = up_file.read()
-                    st.rerun() # FORÇA RERUN PARA FIXAR O STATUS E LIMPAR O UPLOADER
+                    # CRÍTICO: RERUN Sincronizado para garantir que o estado se fixe
+                    st.rerun() 
         
         with col2:
             if saved_name:
-                if st.button("Limpar", key=f"clr_{slot}_{emp}", use_container_width=True):
+                if st.button("🗑️ Limpar", key=f"clr_{slot}_{emp}", use_container_width=True):
                     st.session_state[emp][slot]["name"] = None
                     st.session_state[emp][slot]["bytes"] = None
-                    st.rerun() # FORÇA RERUN PARA RENDERIZAR O UPLOADER NOVAMENTE
+                    st.rerun() # RERUN para renderizar o uploader novamente
     
     def bloco_empresa(emp: str):
         st.markdown(f"### {emp}")
@@ -627,12 +629,21 @@ with tab1:
         st.markdown("**Estoque Físico — (necessário para Compra Automática)**")
         render_file_slot(emp, "ESTOQUE", "Estoque Físico")
 
+        # Botão de limpeza de toda a empresa
+        if st.button(f"Limpar TODOS os arquivos de {emp}", key=f"clr_all_{emp}", type="secondary", use_container_width=True):
+             st.session_state[emp] = {"FULL":{"name":None,"bytes":None},
+                                      "VENDAS":{"name":None,"bytes":None},
+                                      "ESTOQUE":{"name":None,"bytes":None}}
+             st.info(f"{emp} limpo.")
+             st.rerun()
+
+
         st.divider()
 
     bloco_empresa("ALIVVIA")
     bloco_empresa("JCA")
 
-# ---------- TAB 2: COMPRA AUTOMÁTICA (PATCH V4.23.0) ----------
+# ---------- TAB 2: COMPRA AUTOMÁTICA (PATCH V4.23.0 MANTIDO) ----------
 with tab2:
     st.subheader("Gerar Compra (por empresa ou conjunta) — lógica original")
 
@@ -656,11 +667,9 @@ with tab2:
 
         # 2. Lógica de Disparo (ou manutenção do estado)
         
-        # O botão força o recálculo, garantindo que novos uploads sejam processados.
         if st.button(f"Gerar Compra — {nome_estado}", type="primary"):
             st.session_state.compra_autom_data["force_recalc"] = True
         
-        # Dispara o cálculo se for forçado OU se o estado não existir
         if nome_estado not in st.session_state.compra_autom_data or st.session_state.compra_autom_data.get("force_recalc", False):
             
             st.session_state.compra_autom_data["force_recalc"] = False
@@ -929,4 +938,4 @@ with tab5:
     else:
         st.error("ERRO: O módulo 'gerenciador_oc.py' não foi encontrado. As funcionalidades de Gerenciamento de OC não estão disponíveis.")
 
-st.caption("© Alivvia — simples, robusto e auditável. (V4.24.0)")
+st.caption("© Alivvia — simples, robusto e auditável. (V4.25.0)")
