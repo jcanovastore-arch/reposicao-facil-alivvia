@@ -1,5 +1,5 @@
-# reposicao_facil.py - VERSÃO FINAL DE PRODUÇÃO (V4.25.0 - SINCRONIA FORÇADA)
-# - FIX CRÍTICO: Persistência de arquivos na TAB 1 (Sincronia Forçada para evitar reset do uploader).
+# reposicao_facil.py - VERSÃO FINAL DE PRODUÇÃO (V4.26.0 - ESTABILIDADE PLENA)
+# - FIX CRÍTICO: Reversão da TAB 1 para o padrão simples e estável de persistência.
 # - TODOS OS FIXES ANTERIORES GARANTIDOS (Filtros, Dados Fixos, Compra Conjunta Simplificada).
 
 import io
@@ -23,7 +23,7 @@ try:
 except ImportError:
     pass 
 
-VERSION = "v4.25.0 - SINCRONIA FORÇADA"
+VERSION = "v4.26.0 - ESTABILIDADE PLENA"
 
 # ===================== CONFIG BÁSICA =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -251,7 +251,7 @@ def construir_kits_efetivo(cat: Catalogo) -> pd.DataFrame:
     kits = kits.drop_duplicates(subset=["kit_sku","component_sku"], keep="first")
     return kits
 
-# ===================== MAPEAMENTO E COLUNAS (sem alteração) =====================
+# ===================== MAPEAMENTO E COLUNAS (mantido) =====================
 def mapear_tipo(df: pd.DataFrame) -> str:
     cols = [c.lower() for c in df.columns]
     tem_sku_std  = any(c in {"sku","codigo","codigo_sku"} for c in cols) or any("sku" in c for c in cols)
@@ -347,7 +347,7 @@ def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_co
     out = out.rename(columns={"component_sku":"SKU","quantidade_comp":"Quantidade"})
     return out
 
-# ===================== CÁLCULOS PRINCIPAIS (com remoção de colunas) =====================
+# ===================== CÁLCULOS PRINCIPAIS (mantido) =====================
 def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     kits = construir_kits_efetivo(cat)
     full = full_df.copy()
@@ -386,7 +386,6 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     fk = full.copy()
     fk["vendas_dia"] = fk["Vendas_Qtd_60d"] / 60.0
     fk["alvo"] = np.round(fk["vendas_dia"] * (LT + h) * fator).astype(int)
-    # Lógica de oferta usa Estoque_Full + Em_Transito
     fk["oferta"] = (fk["Estoque_Full"] + fk["Em_Transito"]).astype(int)
     fk["envio_desejado"] = (fk["alvo"] - fk["oferta"]).clip(lower=0).astype(int)
 
@@ -399,8 +398,6 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
 
     base["Demanda_dia"]  = base["TOTAL_60d"] / 60.0
     base["Reserva_30d"]  = np.round(base["Demanda_dia"] * 30).astype(int)
-    
-    # Folga_Fisico é calculado, mas será removido na saída
     base["Folga_Fisico"] = (base["Estoque_Fisico"] - base["Reserva_30d"]).clip(lower=0).astype(int)
 
     base["Compra_Sugerida"] = (base["Necessidade"] - base["Folga_Fisico"]).clip(lower=0).astype(int)
@@ -434,7 +431,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     painel = {"full_unid": full_unid, "full_valor": full_valor, "fisico_unid": fis_unid, "fisico_valor": fis_valor}
     return df_final, painel
 
-# ===================== FUNÇÕES DE AGREGAÇÃO PARA COMPRA CONJUNTA =====================
+# ===================== FUNÇÕES DE AGREGAÇÃO PARA COMPRA CONJUNTA (mantido) =====================
 def _aggregate_data_for_conjunta(emp_a="ALIVVIA", emp_j="JCA") -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Lê e agrega dados FULL, VENDAS e FÍSICO das duas empresas."""
     
@@ -471,7 +468,7 @@ def _aggregate_data_for_conjunta(emp_a="ALIVVIA", emp_j="JCA") -> Tuple[pd.DataF
 
     return full_df_final, fisi_df_final, vend_df_final
 
-# ===================== EXPORT XLSX (sem alteração) =====================
+# ===================== EXPORT XLSX (mantido) =====================
 def sha256_of_csv(df: pd.DataFrame) -> str:
     csv_bytes = df.to_csv(index=False).encode("utf-8")
     return hashlib.sha256(csv_bytes).hexdigest()
@@ -518,7 +515,7 @@ def exportar_xlsx(df_final: pd.DataFrame, h: int, params: dict, pendencias: list
     output.seek(0)
     return output.read()
 
-# ===================== UI: SIDEBAR (PADRÃO) =====================
+# ===================== UI: SIDEBAR (mantido) =====================
 with st.sidebar:
     st.subheader("Parâmetros")
     h  = st.selectbox("Horizonte (dias)", [30, 60, 90], index=1)
@@ -573,7 +570,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "✨ Gerenciador de OCs"
 ])
 
-# ===================== FUNÇÃO AUXILIAR PARA ALOCAÇÃO DE COMPRA =====================
+# ===================== FUNÇÃO AUXILIAR PARA ALOCAÇÃO DE COMPRA (mantido) =====================
 def _calcular_vendas_componente(full_df, shp_df, cat: Catalogo) -> pd.DataFrame:
     kits = construir_kits_efetivo(cat)
     a = explodir_por_kits(full_df[["SKU","Vendas_Qtd_60d"]].rename(columns={"SKU":"kit_sku","Vendas_Qtd_60d":"Qtd"}), kits,"kit_sku","Qtd")
@@ -584,66 +581,76 @@ def _calcular_vendas_componente(full_df, shp_df, cat: Catalogo) -> pd.DataFrame:
     out["Demanda_60d"] = out["ML_60d"].astype(int) + out["Shopee_60d"].astype(int)
     return out[["SKU","Demanda_60d", "ML_60d", "Shopee_60d"]]
 
-# ---------- TAB 1: UPLOADS (PATCH DE SINCRONIA FORÇADA V4.25.0) ----------
+# ---------- TAB 1: UPLOADS (REVERSÃO ESTRATÉGICA V4.26.0) ----------
 with tab1:
     st.subheader("Uploads fixos por empresa (os arquivos permanecem salvos após F5)")
+    st.caption("Faça o upload e clique em **Salvar [Empresa]** para persistir o estado.")
 
-    def render_file_slot(emp: str, slot: str, label: str):
-        """Renderiza o slot de upload com persistência e feedback claro."""
-        col1, col2 = st.columns([3, 1])
-        
-        saved_name = st.session_state[emp][slot]["name"]
-        
-        with col1:
-            if saved_name:
-                st.success(f"✅ {label} salvo: **{saved_name}**")
-                # Não renderiza o uploader se o arquivo está salvo.
-            else:
-                # Renderiza o uploader SÓ SE não houver arquivo salvo
-                up_file = st.file_uploader(f"👆 {label} — {emp} (CSV/XLSX/XLS)", 
-                                           type=["csv","xlsx","xls"], key=f"up_{slot}_{emp}")
-                if up_file is not None:
-                    # Salva imediatamente e força um rerun para atualizar o status (UX)
-                    st.session_state[emp][slot]["name"] = up_file.name
-                    st.session_state[emp][slot]["bytes"] = up_file.read()
-                    # CRÍTICO: RERUN Sincronizado para garantir que o estado se fixe
-                    st.rerun() 
-        
-        with col2:
-            if saved_name:
-                if st.button("🗑️ Limpar", key=f"clr_{slot}_{emp}", use_container_width=True):
-                    st.session_state[emp][slot]["name"] = None
-                    st.session_state[emp][slot]["bytes"] = None
-                    st.rerun() # RERUN para renderizar o uploader novamente
-    
     def bloco_empresa(emp: str):
         st.markdown(f"### {emp}")
         c1, c2 = st.columns(2)
-        
+        # FULL
         with c1:
-            render_file_slot(emp, "FULL", "FULL")
-        
+            st.markdown(f"**FULL — {emp}**")
+            # st.file_uploader é mantido simples, dependendo da chave de sessão
+            up_full = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_full_{emp}")
+            if up_full is not None:
+                # Salva o arquivo na sessão imediatamente
+                st.session_state[emp]["FULL"]["name"]  = up_full.name
+                st.session_state[emp]["FULL"]["bytes"] = up_full.read()
+            
+            # Mostra o status do arquivo salvo na sessão
+            if st.session_state[emp]["FULL"]["name"]:
+                st.caption(f"FULL salvo: **{st.session_state[emp]['FULL']['name']}**")
+            else:
+                st.caption("Nenhum arquivo FULL salvo.")
+                
+        # Shopee/MT
         with c2:
-            render_file_slot(emp, "VENDAS", "Shopee/MT (Vendas)")
-        
+            st.markdown(f"**Shopee/MT — {emp}**")
+            up_v = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_v_{emp}")
+            if up_v is not None:
+                st.session_state[emp]["VENDAS"]["name"]  = up_v.name
+                st.session_state[emp]["VENDAS"]["bytes"] = up_v.read()
+            
+            if st.session_state[emp]["VENDAS"]["name"]:
+                st.caption(f"Vendas salvo: **{st.session_state[emp]['VENDAS']['name']}**")
+            else:
+                st.caption("Nenhum arquivo de Vendas salvo.")
+
+        # Estoque Físico
         st.markdown("**Estoque Físico — (necessário para Compra Automática)**")
-        render_file_slot(emp, "ESTOQUE", "Estoque Físico")
+        up_e = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_e_{emp}")
+        if up_e is not None:
+            st.session_state[emp]["ESTOQUE"]["name"]  = up_e.name
+            st.session_state[emp]["ESTOQUE"]["bytes"] = up_e.read()
+        
+        if st.session_state[emp]["ESTOQUE"]["name"]:
+            st.caption(f"Estoque salvo: **{st.session_state[emp]['ESTOQUE']['name']}**")
+        else:
+            st.caption("Nenhum arquivo de Estoque salvo.")
 
-        # Botão de limpeza de toda a empresa
-        if st.button(f"Limpar TODOS os arquivos de {emp}", key=f"clr_all_{emp}", type="secondary", use_container_width=True):
-             st.session_state[emp] = {"FULL":{"name":None,"bytes":None},
-                                      "VENDAS":{"name":None,"bytes":None},
-                                      "ESTOQUE":{"name":None,"bytes":None}}
-             st.info(f"{emp} limpo.")
-             st.rerun()
 
+        # Botões de Salvar e Limpar (mantidos no fluxo antigo)
+        c3, c4 = st.columns([1,1])
+        with c3:
+            if st.button(f"Salvar {emp}", use_container_width=True, key=f"save_{emp}"):
+                st.success(f"Status {emp} SALVO: FULL [{'OK' if st.session_state[emp]['FULL']['name'] else '–'}] • "
+                           f"Shopee [{'OK' if st.session_state[emp]['VENDAS']['name'] else '–'}] • "
+                           f"Estoque [{'OK' if st.session_state[emp]['ESTOQUE']['name'] else '–'}]")
+        with c4:
+            if st.button(f"Limpar {emp}", use_container_width=True, key=f"clr_{emp}"):
+                st.session_state[emp] = {"FULL":{"name":None,"bytes":None},
+                                         "VENDAS":{"name":None,"bytes":None},
+                                         "ESTOQUE":{"name":None,"bytes":None}}
+                st.info(f"{emp} limpo. (Recarregue a página para limpar o visual do upload.)")
 
         st.divider()
 
     bloco_empresa("ALIVVIA")
     bloco_empresa("JCA")
 
-# ---------- TAB 2: COMPRA AUTOMÁTICA (PATCH V4.23.0 MANTIDO) ----------
+# ---------- TAB 2: COMPRA AUTOMÁTICA (MANTIDO O PATCH V4.25.0) ----------
 with tab2:
     st.subheader("Gerar Compra (por empresa ou conjunta) — lógica original")
 
@@ -811,7 +818,7 @@ with tab2:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
-# ---------- TAB 3: ALOCAÇÃO DE COMPRA (sem alteração) ----------
+# ---------- TAB 3: ALOCAÇÃO DE COMPRA (mantido) ----------
 with tab3:
     st.subheader("📦 Alocação de Compra — Fracionar Lote por Proporção de Vendas")
 
@@ -906,7 +913,7 @@ with tab3:
             except Exception as e:
                 st.error(f"Erro ao calcular Alocação de Compra: {e}")
 
-# ---------- TAB 4: ORDEM DE COMPRA (OC) - CESTA DE ITENS (sem alteração) ----------
+# ---------- TAB 4: ORDEM DE COMPRA (OC) - CESTA DE ITENS (mantido) ----------
 with tab4:
     if 'ordem_compra' in globals():
         st.subheader("🛒 Ordem de Compra (OC) - Cesta de Itens")
@@ -928,7 +935,7 @@ with tab4:
     else:
         st.error("ERRO: O módulo 'ordem_compra.py' não foi encontrado. As funcionalidades de OC não estão disponíveis.")
 
-# ---------- TAB 5: GERENCIADOR DE OCS - CONTROLE DE RECEBIMENTO (sem alteração) ----------
+# ---------- TAB 5: GERENCIADOR DE OCS - CONTROLE DE RECEBIMENTO (mantido) ----------
 with tab5:
     if 'gerenciador_oc' in globals():
         st.subheader("✨ Gerenciador de OCs - Controle de Recebimento")
@@ -938,4 +945,4 @@ with tab5:
     else:
         st.error("ERRO: O módulo 'gerenciador_oc.py' não foi encontrado. As funcionalidades de Gerenciamento de OC não estão disponíveis.")
 
-st.caption("© Alivvia — simples, robusto e auditável. (V4.25.0)")
+st.caption("© Alivvia — simples, robusto e auditável. (V4.26.0)")
