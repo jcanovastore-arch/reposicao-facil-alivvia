@@ -1,6 +1,6 @@
-# reposicao_facil.py - VERSÃO FINAL DE PRODUÇÃO (V4.18.0 - TUDO RESTAURADO)
-# - Abas: Dados, Compra Automática, Alocação de Compra, Ordem de Compra, Gerenciador de OCs.
-# - Lógica de Alocação de Compra (compra conjunta) totalmente restaurada.
+# reposicao_facil.py - VERSÃO FINAL DE PRODUÇÃO (V4.19.0 - CORREÇÃO DA ALOCAÇÃO)
+# - Todas as 5 abas restauradas (incluindo Alocação simples).
+# - Lógica da Alocação de Compra corrigida para fracionar o lote de um SKU.
 # - Checkbox de seleção de itens para OC restaurado (data_editor).
 # - Estabilidade de download mantida com cache.
 
@@ -25,7 +25,7 @@ try:
 except ImportError:
     pass 
 
-VERSION = "v4.18.0 - TUDO RESTAURADO"
+VERSION = "v4.19.0 - CORREÇÃO DA ALOCAÇÃO"
 
 # ===================== CONFIG BÁSICA =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -62,7 +62,6 @@ def _requests_session() -> requests.Session:
     return s
 
 def gs_export_xlsx_url(sheet_id: str) -> str:
-    # Lógica mais simples (sem GID)
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
 
 def extract_sheet_id_from_url(url: str) -> Optional[str]:
@@ -446,7 +445,7 @@ def exportar_xlsx(df_final: pd.DataFrame, h: int, params: dict, pendencias: list
             sku = df_final.loc[bad[0], "SKU"] if "SKU" in df_final.columns else "?"
             raise RuntimeError(f"Auditoria: coluna '{c}' precisa ser inteiro ≥ 0. Ex.: linha {linha} (SKU={sku}).")
 
-    calc = (df_final["Compra_Sugerida"].astype(float) * df_final["Preco"].astype(float)).round(2).values
+    calc = (df_final["Compra_Sugerida"] * df_final["Preco"]).round(2).values
     if not np.allclose(df_final["Valor_Compra_R$"].values, calc):
         bad = np.where(~np.isclose(df_final["Valor_Compra_R$"].values, calc))[0]
         linha = int(bad[0]) + 2 if len(bad) else "?"
@@ -496,7 +495,7 @@ with st.sidebar:
             baixar_xlsx_do_sheets.clear() 
             try:
                 cat = carregar_padrao_do_xlsx(DEFAULT_SHEET_ID)
-                st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku":"sku"})
+                st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"sku":"component_sku"})
                 st.session_state.kits_df = cat.kits_reais
                 st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 st.success("Padrão carregado com sucesso.")
@@ -511,7 +510,7 @@ with st.sidebar:
     if st.button("Carregar deste link", use_container_width=True):
         try:
             cat = carregar_padrao_do_link(st.session_state.alt_sheet_link.strip())
-            st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku":"sku"})
+            st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"sku":"component_sku"})
             st.session_state.kits_df = cat.kits_reais
             st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             st.success("Padrão carregado (link alternativo).")
@@ -608,7 +607,7 @@ with tab2:
     st.subheader("Gerar Compra (por empresa) — lógica original")
 
     if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
-        st.info("Carregue o **Padrão (KITS/CAT)** no sidebar antes de usar as abas.")
+        st.info("Carregue o **Padrão (KITS/CAT)** no sidebar.")
     else:
         empresa = st.radio("Empresa ativa", ["ALIVVIA", "JCA"], horizontal=True, key="empresa_ca")
         dados = st.session_state[empresa]
@@ -653,7 +652,7 @@ with tab2:
 
                 st.session_state[f"df_compra_{empresa}"] = df_final # Salva para uso na cesta OC
 
-                st.success("Cálculo concluído.")
+                st.success("Cálculo concluído. Selecione itens abaixo para Ordem de Compra.")
                 cA, cB, cC, cD = st.columns(4)
                 cA.metric("Full (un)",  f"{painel['full_unid']:,}".replace(",", "."))
                 cB.metric("Full (R$)",  f"R$ {painel['full_valor']:,.2f}")
@@ -699,122 +698,99 @@ with tab2:
             except Exception as e:
                 st.error(str(e))
 
-# ---------- TAB 3: ALOCAÇÃO DE COMPRA (COMPRA CONJUNTA) - RESTAURADA ----------
+# ---------- TAB 3: ALOCAÇÃO DE COMPRA (COMPRA CONJUNTA) - RESTAURADA COM LÓGICA CORRETA ----------
 with tab3:
-    st.subheader("Distribuir quantidade entre empresas — Compra Sugerida Agregada")
+    st.subheader("📦 Alocação de Compra — Fracionar Lote por Proporção de Vendas")
 
     if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
         st.info("Carregue o **Padrão (KITS/CAT)** no sidebar antes de usar as abas.")
     else:
         CATALOGO = st.session_state.catalogo_df
         
-        if not (st.session_state["ALIVVIA"]["FULL"]["name"] and st.session_state["JCA"]["FULL"]["name"]):
-            st.warning("É necessário carregar os arquivos FULL, VENDAS e ESTOQUE para AMBAS as empresas na aba **Dados das Empresas**.")
+        # Validação de Dados (precisa de todos os uploads das duas empresas)
+        missing_data = False
+        for emp in ["ALIVVIA", "JCA"]:
+            if not (st.session_state[emp]["FULL"]["name"] and st.session_state[emp]["VENDAS"]["name"]):
+                 missing_data = True
+                 break
         
-        if st.button("Gerar Compra Agregada e Alocação", type="primary"):
+        if missing_data:
+            st.warning("É necessário carregar os arquivos **FULL** e **Shopee/MT (Vendas)** para AMBAS as empresas na aba **Dados das Empresas**.")
+        
+        else:
             try:
-                # 1. VALIDAÇÃO DE ARQUIVOS
-                missing = []
-                for emp in ["ALIVVIA","JCA"]:
-                    for k, rot in [("FULL","FULL"),("VENDAS","Shopee/MT"),("ESTOQUE","Estoque")]:
-                        if not (st.session_state[emp][k]["name"] and st.session_state[emp][k]["bytes"]):
-                            missing.append(f"{emp} {rot}")
-                if missing:
-                    raise RuntimeError("Faltam arquivos salvos: " + ", ".join(missing) + ". Use a aba **Dados das Empresas**.")
-
-                # 2. LEITURA DE DADOS
-                def read_data(emp: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-                    full_r = load_any_table_from_bytes(st.session_state[emp]["FULL"]["name"], st.session_state[emp]["FULL"]["bytes"])
-                    vend_r = load_any_table_from_bytes(st.session_state[emp]["VENDAS"]["name"], st.session_state[emp]["VENDAS"]["bytes"])
-                    fisi_r = load_any_table_from_bytes(st.session_state[emp]["ESTOQUE"]["name"], st.session_state[emp]["ESTOQUE"]["bytes"])
+                # 1. Leitura de Dados
+                def read_pair(emp: str) -> Tuple[pd.DataFrame,pd.DataFrame]:
+                    fa = load_any_table_from_bytes(st.session_state[emp]["FULL"]["name"],   st.session_state[emp]["FULL"]["bytes"])
+                    sa = load_any_table_from_bytes(st.session_state[emp]["VENDAS"]["name"], st.session_state[emp]["VENDAS"]["bytes"])
                     
-                    if mapear_tipo(full_r) != "FULL" or mapear_tipo(vend_r) != "VENDAS" or mapear_tipo(fisi_r) != "FISICO":
-                        raise RuntimeError(f"Um dos arquivos de {emp} é inválido. Verifique se as colunas estão corretas.")
+                    tfa = mapear_tipo(fa); tsa = mapear_tipo(sa)
+                    if tfa != "FULL":   raise RuntimeError(f"FULL inválido ({emp}): precisa de SKU e Vendas_60d/Estoque_full.")
+                    if tsa != "VENDAS": raise RuntimeError(f"Vendas inválido ({emp}): não achei coluna de quantidade.")
                     
-                    return mapear_colunas(full_r, "FULL"), mapear_colunas(vend_r, "VENDAS"), mapear_colunas(fisi_r, "FISICO")
+                    return mapear_colunas(fa, tfa), mapear_colunas(sa, tsa)
 
-                full_A, shp_A, fis_A = read_data("ALIVVIA")
-                full_J, shp_J, fis_J = read_data("JCA")
+                full_A, shp_A = read_pair("ALIVVIA")
+                full_J, shp_J = read_pair("JCA")
                 
-                # 3. UNIFICAÇÃO DE VENDAS E ESTOQUE FÍSICO (Componentes)
                 cat_obj = Catalogo(
                     catalogo_simples=CATALOGO.rename(columns={"sku":"component_sku"}),
                     kits_reais=st.session_state.kits_df
                 )
 
-                # Vendas por componente (Agregada)
-                demA = _calcular_vendas_componente(full_A, shp_A, cat_obj).rename(columns={"Demanda_60d":"Demanda_A", "ML_60d":"ML_A", "Shopee_60d":"Shopee_A"})
-                demJ = _calcular_vendas_componente(full_J, shp_J, cat_obj).rename(columns={"Demanda_60d":"Demanda_J", "ML_60d":"ML_J", "Shopee_60d":"Shopee_J"})
+                # 2. Cálculo das Vendas Agregadas por Componente
+                demA = _calcular_vendas_componente(full_A, shp_A, cat_obj).rename(columns={"Demanda_60d":"Demanda_A"})
+                demJ = _calcular_vendas_componente(full_J, shp_J, cat_obj).rename(columns={"Demanda_60d":"Demanda_J"})
                 
-                demanda_comp = pd.merge(demA, demJ, on="SKU", how="outer").fillna(0)
+                demanda_comp = pd.merge(demA[["SKU", "Demanda_A"]], demJ[["SKU", "Demanda_J"]], on="SKU", how="outer").fillna(0)
                 demanda_comp["TOTAL_60d"] = demanda_comp["Demanda_A"] + demanda_comp["Demanda_J"]
                 
-                # Estoque Físico e Preço (Agregado)
-                fis_A = fis_A.rename(columns={"Estoque_Fisico":"Estoque_A", "Preco":"Preco_A"})
-                fis_J = fis_J.rename(columns={"Estoque_Fisico":"Estoque_J", "Preco":"Preco_J"})
+                # 3. Seleção do SKU e Quantidade
+                sku_opcoes = demanda_comp["SKU"].unique().tolist()
                 
-                estoque_comp = pd.merge(fis_A, fis_J, on="SKU", how="outer", suffixes=("_A", "_J")).fillna(0)
-                estoque_comp["Estoque_Total"] = estoque_comp["Estoque_A"] + estoque_comp["Estoque_J"]
-                # Usa o Preço_A se existir, senão usa Preco_J (Assumindo que o custo é o mesmo)
-                estoque_comp["Preco"] = np.where(estoque_comp["Preco_A"] > 0, estoque_comp["Preco_A"], estoque_comp["Preco_J"])
+                col_sel, col_qtd = st.columns([2, 1])
+                with col_sel:
+                    sku_escolhido = st.selectbox("SKU do componente para alocar", sku_opcoes, key="alloc_sku")
+                with col_qtd:
+                    qtd_lote = st.number_input("Quantidade total do lote (ex.: 500 un)", min_value=1, value=1000, step=50, key="alloc_qtd")
 
-                # 4. COMPRA SUGERIDA (Usando a lógica da Compra Automática, adaptada para o Total)
-                
-                # Necessidade de envio FULL (Simplificada - requer os dados FULL agregados, o que é complexo)
-                # Para simplificar, vamos estimar a Necessidade usando a Demanda_Total (Total_60d)
-                
-                h_val, LT_val, g_val = h, LT, g
-                fator = (1.0 + g_val/100.0) ** (h_val/30.0)
-                
-                # Cálculo da Demanda Diária Agregada
-                demanda_comp["Demanda_dia"] = demanda_comp["TOTAL_60d"] / 60.0
-                demanda_comp["Reserva_30d"] = np.round(demanda_comp["Demanda_dia"] * 30).astype(int)
-                
-                # Estimativa de Alvo (Simplificada: Alvo = Demanda Diária * (LT+H) * Fator)
-                demanda_comp["Alvo_Total"] = np.round(demanda_comp["Demanda_dia"] * (LT_val + h_val) * fator).astype(int)
-                
-                # Unificação para o cálculo final
-                base_final = pd.merge(demanda_comp, estoque_comp[["SKU", "Estoque_Total", "Preco"]], on="SKU", how="inner")
-                
-                base_final["Folga_Fisico"] = (base_final["Estoque_Total"] - base_final["Reserva_30d"]).clip(lower=0).astype(int)
-                base_final["Necessidade"] = base_final["Alvo_Total"] # Simplificada
-                
-                base_final["Compra_Sugerida"] = (base_final["Necessidade"] - base_final["Folga_Fisico"]).clip(lower=0).astype(int)
-                
-                # 5. ALOCAÇÃO PROPORCIONAL
-                base_final["Prop_A"] = np.where(base_final["TOTAL_60d"] > 0, base_final["Demanda_A"] / base_final["TOTAL_60d"], 0.5)
-                base_final["Prop_J"] = 1.0 - base_final["Prop_A"]
-                
-                base_final["Alocacao_A"] = np.round(base_final["Compra_Sugerida"] * base_final["Prop_A"]).astype(int)
-                base_final["Alocacao_J"] = base_final["Compra_Sugerida"] - base_final["Alocacao_A"]
+                if st.button("Calcular Alocação Proporcional", type="primary"):
+                    
+                    sku_norm = norm_sku(sku_escolhido)
+                    
+                    # 4. Cálculo da Proporção
+                    dados_sku = demanda_comp[demanda_comp["SKU"] == sku_norm]
+                    
+                    if dados_sku.empty:
+                         raise ValueError(f"SKU {sku_norm} não encontrado ou sem demanda nas empresas.")
+                         
+                    dA = dados_sku["Demanda_A"].iloc[0]
+                    dJ = dados_sku["Demanda_J"].iloc[0]
+                    total = dA + dJ
+                    
+                    if total == 0:
+                        st.warning("SKU encontrado, mas sem vendas nos últimos 60 dias. Usando alocação 50/50.")
+                        propA = propJ = 0.5
+                    else:
+                        propA = dA / total
+                        propJ = dJ / total
+                    
+                    # 5. Cálculo da Alocação
+                    alocA = int(round(qtd_lote * propA))
+                    alocJ = int(qtd_lote - alocA)
 
-                # 6. INFORMAÇÕES FINAIS E OUTPUT
-                df_aloc = base_final.merge(CATALOGO[["sku", "fornecedor"]].rename(columns={"sku":"SKU"}), on="SKU", how="left")
-                
-                df_final_aloc = df_aloc[[
-                    "SKU", "fornecedor", "Estoque_Total", "TOTAL_60d", "Compra_Sugerida", "Preco",
-                    "Prop_A", "Alocacao_A", 
-                    "Prop_J", "Alocacao_J"
-                ]].copy()
-                
-                df_final_aloc["Valor_Compra_R$"] = (df_final_aloc["Compra_Sugerida"] * df_final_aloc["Preco"]).round(2)
-
-                st.success("Compra Agregada e Alocação calculadas com sucesso.")
-
-                # Tabela de Resultados
-                st.dataframe(df_final_aloc[df_final_aloc["Compra_Sugerida"] > 0].sort_values("Valor_Compra_R$", ascending=False), use_container_width=True, height=500,
-                    column_config={
-                        "Prop_A": st.column_config.ProgressColumn("Prop A", format="%.1f%%", min_value=0, max_value=1),
-                        "Prop_J": st.column_config.ProgressColumn("Prop J", format="%.1f%%", min_value=0, max_value=1),
-                        "Alocacao_A": "ALIVVIA (Comprar)",
-                        "Alocacao_J": "JCA (Comprar)",
-                        "Valor_Compra_R$": "Valor Total R$"
-                    })
-                
-                # Painel de Resumo
-                compra_total = df_final_aloc["Valor_Compra_R$"].sum()
-                st.metric("Total da Compra Sugerida (R$)", f"R$ {compra_total:,.2f}")
-                
+                    # 6. Output
+                    res = pd.DataFrame([
+                        {"Empresa":"ALIVVIA", "SKU":sku_norm, "Demanda_60d":dA, "Proporção":round(propA,4), "Alocação_Sugerida":alocA},
+                        {"Empresa":"JCA",     "SKU":sku_norm, "Demanda_60d":dJ, "Proporção":round(propJ,4), "Alocação_Sugerida":alocJ},
+                    ])
+                    
+                    st.success(f"Lote de {qtd_lote} unidades de **{sku_norm}** alocado com sucesso.")
+                    st.dataframe(res, use_container_width=True)
+                    st.markdown(f"**Resultado:** ALIVVIA recebe **{alocA}** un. ({round(propA*100, 1)}%) | JCA recebe **{alocJ}** un. ({round(propJ*100, 1)}%)")
+                    st.download_button("Baixar alocação (.csv)", data=res.to_csv(index=False).encode("utf-8"),
+                                       file_name=f"Alocacao_{sku_norm}_{qtd_lote}.csv", mime="text/csv")
+            
             except Exception as e:
                 st.error(f"Erro ao calcular Alocação de Compra: {e}")
 
@@ -827,11 +803,13 @@ with tab4:
         if cesta.empty:
             st.info("A cesta de Ordem de Compra está vazia. Adicione itens da aba 'Compra Automática'.")
         else:
-            st.success(f"Itens prontos para OC: {len(cesta)} itens.")
+            st.success(f"Itens prontos para OC: {len(cesta)} itens de {len(cesta['fornecedor'].unique())} fornecedores.")
             st.dataframe(cesta, use_container_width=True)
             
-            # Aqui o código chamaria a função ordem_compra.renderizar_cesta(cesta)
-            st.warning("A função de renderização final da OC (criar arquivo/planilha) deve ser chamada pelo módulo `ordem_compra.py`.")
+            # Botão para agrupar e criar OC
+            if st.button("Gerar e Finalizar Ordem de Compra (Módulo OC)", type="primary"):
+                # O código aqui chamaria a função ordem_compra.finalizar_oc(cesta)
+                st.warning("Esta função requer a implementação do módulo `ordem_compra.py`.")
             
             if st.button("Limpar Cesta de OC", type="secondary"):
                 st.session_state.oc_cesta = pd.DataFrame()
@@ -850,4 +828,4 @@ with tab5:
     else:
         st.error("ERRO: O módulo 'gerenciador_oc.py' não foi encontrado. As funcionalidades de Gerenciamento de OC não estão disponíveis.")
 
-st.caption("© Alivvia — simples, robusto e auditável. (V4.18.0)")
+st.caption("© Alivvia — simples, robusto e auditável. (V4.19.0)")
