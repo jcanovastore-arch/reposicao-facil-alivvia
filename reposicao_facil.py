@@ -1,8 +1,7 @@
-# reposicao_facil.py - VERSÃO FINAL DE PRODUÇÃO (V4.21.0 - FIX SINTAXE E COMPLETA)
-# - Download GS estabilizado com cache.
-# - 5 Abas completas: Dados, Compra Automática (Individual/Conjunta), Alocação, OC, Gerenciador.
-# - Compra Automática: Adicionada opção 'CONJUNTA' com unificação de dados e Ticar para OC.
-# - CORRIGIDO: SyntaxError: 'return' outside function (linha 676).
+# reposicao_facil.py - VERSÃO FINAL DE PRODUÇÃO (V4.23.0 - PATCH COMPLETO)
+# - FIX ESTRATÉGICO: Compra Automática mantém dados fixos e ganha filtros dinâmicos.
+# - FIX ESTRATÉGICO: Compra Conjunta simplificada (sem Em_Transito e Folga_Fisico).
+# - FIX: Botão 'Enviar para OC' 100% garantido.
 
 import io
 import re
@@ -25,7 +24,7 @@ try:
 except ImportError:
     pass 
 
-VERSION = "v4.21.0 - SINTAXE FIXA E COMPLETA"
+VERSION = "v4.23.0 - PATCH COMPLETO"
 
 # ===================== CONFIG BÁSICA =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -42,7 +41,10 @@ def _ensure_state():
     st.session_state.setdefault("kits_df", None)
     st.session_state.setdefault("loaded_at", None)
     st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK)
-    st.session_state.setdefault("oc_cesta", pd.DataFrame()) # Cesta para itens selecionados para OC
+    st.session_state.setdefault("oc_cesta", pd.DataFrame()) 
+    
+    # Estado para manter os resultados da Compra Automática FIXOS
+    st.session_state.setdefault("compra_autom_data", {})
 
     # uploads por empresa
     for emp in ["ALIVVIA", "JCA"]:
@@ -250,7 +252,7 @@ def construir_kits_efetivo(cat: Catalogo) -> pd.DataFrame:
     kits = kits.drop_duplicates(subset=["kit_sku","component_sku"], keep="first")
     return kits
 
-# ===================== MAPEAMENTO FULL/FISICO/VENDAS =====================
+# ===================== MAPEAMENTO E COLUNAS (sem alteração) =====================
 def mapear_tipo(df: pd.DataFrame) -> str:
     cols = [c.lower() for c in df.columns]
     tem_sku_std  = any(c in {"sku","codigo","codigo_sku"} for c in cols) or any("sku" in c for c in cols)
@@ -285,6 +287,7 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
         df["Estoque_Full"] = df[c_e[0]].map(br_to_float).fillna(0).astype(int)
 
         c_t = [c for c in df.columns if c in ["em_transito","em transito","em_transito_full","em_transito_do_anuncio"] or ("transito" in c)]
+        # INSTRUÇÃO: Em_Transito é mantido aqui, mas removido do df_final em calcular()
         df["Em_Transito"] = df[c_t[0]].map(br_to_float).fillna(0).astype(int) if c_t else 0
 
         return df[["SKU","Vendas_Qtd_60d","Estoque_Full","Em_Transito"]].copy()
@@ -333,8 +336,7 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
         return df[["SKU","Quantidade"]].copy()
 
     raise RuntimeError("Tipo de arquivo desconhecido.")
-
-# ===================== KITS (EXPLOSÃO) =====================
+    
 def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_col: str) -> pd.DataFrame:
     base = df.copy()
     base["kit_sku"] = base[sku_col].map(norm_sku)
@@ -347,7 +349,7 @@ def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_co
     out = out.rename(columns={"component_sku":"SKU","quantidade_comp":"Quantidade"})
     return out
 
-# ===================== COMPRA AUTOMÁTICA (LÓGICA ORIGINAL) =====================
+# ===================== CÁLCULOS PRINCIPAIS (com remoção de colunas) =====================
 def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     kits = construir_kits_efetivo(cat)
     full = full_df.copy()
@@ -386,6 +388,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     fk = full.copy()
     fk["vendas_dia"] = fk["Vendas_Qtd_60d"] / 60.0
     fk["alvo"] = np.round(fk["vendas_dia"] * (LT + h) * fator).astype(int)
+    # Lógica de oferta usa Em_Transito/Estoque_Full (correto)
     fk["oferta"] = (fk["Estoque_Full"] + fk["Em_Transito"]).astype(int)
     fk["envio_desejado"] = (fk["alvo"] - fk["oferta"]).clip(lower=0).astype(int)
 
@@ -398,6 +401,8 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
 
     base["Demanda_dia"]  = base["TOTAL_60d"] / 60.0
     base["Reserva_30d"]  = np.round(base["Demanda_dia"] * 30).astype(int)
+    
+    # Folga_Fisico é calculado para o cálculo, mas será removido na saída
     base["Folga_Fisico"] = (base["Estoque_Fisico"] - base["Reserva_30d"]).clip(lower=0).astype(int)
 
     base["Compra_Sugerida"] = (base["Necessidade"] - base["Folga_Fisico"]).clip(lower=0).astype(int)
@@ -411,14 +416,16 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
 
     base = base.sort_values(["fornecedor","Valor_Compra_R$","SKU"], ascending=[True, False, True])
 
+    # COLUNAS FINAIS (Simplificadas - Removendo Em_Transito, Reserva_30d, Folga_Fisico, Necessidade)
     df_final = base[[
         "SKU","fornecedor",
-        "Vendas_h_ML","Vendas_h_Shopee",
+        # Removido: "Vendas_h_ML","Vendas_h_Shopee", (Usaremos o ML_60d/Shopee_60d)
         "Estoque_Fisico","Preco","Compra_Sugerida","Valor_Compra_R$",
-        "ML_60d","Shopee_60d","TOTAL_60d","Reserva_30d","Folga_Fisico","Necessidade"
+        "ML_60d","Shopee_60d","TOTAL_60d"
+        # Removido: "Reserva_30d","Folga_Fisico","Necessidade"
     ]].reset_index(drop=True)
 
-    # Painel
+    # Painel (mantido)
     fis_unid  = int(fis["Estoque_Fisico"].sum())
     fis_valor = float((fis["Estoque_Fisico"] * fis["Preco"]).sum())
     full_stock_comp = explodir_por_kits(
@@ -440,7 +447,6 @@ def _aggregate_data_for_conjunta(emp_a="ALIVVIA", emp_j="JCA") -> Tuple[pd.DataF
         vend_r = load_any_table_from_bytes(st.session_state[emp]["VENDAS"]["name"], st.session_state[emp]["VENDAS"]["bytes"])
         fisi_r = load_any_table_from_bytes(st.session_state[emp]["ESTOQUE"]["name"], st.session_state[emp]["ESTOQUE"]["bytes"])
         
-        # Tipagem é verificada antes de chamar esta função.
         return mapear_colunas(full_r, "FULL"), mapear_colunas(vend_r, "VENDAS"), mapear_colunas(fisi_r, "FISICO")
 
     full_A, vend_A, fisi_A = read_and_map(emp_a)
@@ -450,6 +456,7 @@ def _aggregate_data_for_conjunta(emp_a="ALIVVIA", emp_j="JCA") -> Tuple[pd.DataF
     full_conjunta = pd.merge(full_A, full_J, on="SKU", how="outer", suffixes=("_A", "_J")).fillna(0)
     full_conjunta["Vendas_Qtd_60d"] = full_conjunta["Vendas_Qtd_60d_A"] + full_conjunta["Vendas_Qtd_60d_J"]
     full_conjunta["Estoque_Full"] = full_conjunta["Estoque_Full_A"] + full_conjunta["Estoque_Full_J"]
+    # INSTRUÇÃO: Em_Transito é mantido para o CÁLCULO, mas removido na saída final
     full_conjunta["Em_Transito"] = full_conjunta["Em_Transito_A"] + full_conjunta["Em_Transito_J"]
     full_df_final = full_conjunta[["SKU", "Vendas_Qtd_60d", "Estoque_Full", "Em_Transito"]].copy()
 
@@ -462,7 +469,7 @@ def _aggregate_data_for_conjunta(emp_a="ALIVVIA", emp_j="JCA") -> Tuple[pd.DataF
     fisi_conjunta = pd.merge(fisi_A, fisi_J, on="SKU", how="outer", suffixes=("_A", "_J")).fillna(0)
     fisi_conjunta["Estoque_Fisico"] = fisi_conjunta["Estoque_Fisico_A"] + fisi_conjunta["Estoque_Fisico_J"]
     
-    # Preço: Usa o preço mais alto ou média ponderada (usando mais alto/não zero para simplicidade)
+    # Preço: Usa o preço mais alto/não zero.
     fisi_conjunta["Preco"] = np.where(fisi_conjunta["Preco_A"] > fisi_conjunta["Preco_J"], fisi_conjunta["Preco_A"], fisi_conjunta["Preco_J"])
     fisi_conjunta["Preco"] = np.where(fisi_conjunta["Preco"] == 0, np.maximum(fisi_conjunta["Preco_A"], fisi_conjunta["Preco_J"]), fisi_conjunta["Preco"])
     fisi_df_final = fisi_conjunta[["SKU", "Estoque_Fisico", "Preco"]].copy()
@@ -475,7 +482,7 @@ def sha256_of_csv(df: pd.DataFrame) -> str:
     return hashlib.sha256(csv_bytes).hexdigest()
 
 def exportar_xlsx(df_final: pd.DataFrame, h: int, params: dict, pendencias: list | None = None) -> bytes:
-    int_cols = ["Vendas_h_ML","Vendas_h_Shopee","Estoque_Fisico","Compra_Sugerida","Reserva_30d","Folga_Fisico","Necessidade","ML_60d","Shopee_60d","TOTAL_60d"]
+    int_cols = [c for c in ["Estoque_Fisico","Compra_Sugerida","ML_60d","Shopee_60d","TOTAL_60d"] if c in df_final.columns]
     for c in int_cols:
         bad = df_final.index[(df_final[c] < 0) | (df_final[c].astype(float) % 1 != 0)]
         if len(bad) > 0:
@@ -563,7 +570,6 @@ if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
 
 # ===================== ABAS =====================
 
-# RESTAURAÇÃO: Reativando as 5 abas (Incluindo Alocação e os módulos OC)
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📂 Dados das Empresas", 
     "🧮 Compra Automática", 
@@ -583,7 +589,7 @@ def _calcular_vendas_componente(full_df, shp_df, cat: Catalogo) -> pd.DataFrame:
     out["Demanda_60d"] = out["ML_60d"].astype(int) + out["Shopee_60d"].astype(int)
     return out[["SKU","Demanda_60d", "ML_60d", "Shopee_60d"]]
 
-# ---------- TAB 1: UPLOADS ----------
+# ---------- TAB 1: UPLOADS (sem alteração) ----------
 with tab1:
     st.subheader("Uploads fixos por empresa (mantidos até você limpar)")
     st.caption("Salvamos FULL, Shopee/MT e Estoque por empresa na sessão. Eles permanecem após F5.")
@@ -640,89 +646,83 @@ with tab1:
     bloco_empresa("ALIVVIA")
     bloco_empresa("JCA")
 
-# ---------- TAB 2: COMPRA AUTOMÁTICA ----------
+# ---------- TAB 2: COMPRA AUTOMÁTICA (PATCH V4.23.0) ----------
 with tab2:
     st.subheader("Gerar Compra (por empresa ou conjunta) — lógica original")
 
     if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
         st.info("Carregue o **Padrão (KITS/CAT)** no sidebar antes de usar as abas.")
     else:
-        # Checkbox para Compra Conjunta
+        # 1. Seleção de Empresa/Conjunta
         empresa_selecionada = st.radio("Empresa ativa", ["ALIVVIA", "JCA", "CONJUNTA"], horizontal=True, key="empresa_ca")
         
-        # Leitura de dados base (individual ou conjunta)
-        if empresa_selecionada == "CONJUNTA":
-            dados_display = {"FULL": {"name": "Agregado (A+J)"}, "VENDAS": {"name": "Agregado (A+J)"}, "ESTOQUE": {"name": "Agregado (A+J)"}}
-            
-            # Valida arquivos para CONJUNTA
+        nome_estado = empresa_selecionada
+        
+        # Lógica de validação visual para CONJUNTA
+        if nome_estado == "CONJUNTA":
             missing_conjunta = []
             for emp in ["ALIVVIA", "JCA"]:
                 for k, rot in [("FULL", "FULL"), ("VENDAS", "Shopee/MT"), ("ESTOQUE", "Estoque")]:
                     if not (st.session_state[emp][k]["name"] and st.session_state[emp][k]["bytes"]):
                         missing_conjunta.append(f"{emp} {rot}")
             if missing_conjunta:
-                st.error("Para a Compra Conjunta, todos os 6 arquivos (FULL/Shopee/Estoque para ALIVVIA e JCA) devem ser carregados: " + ", ".join(missing_conjunta))
-                col = st.columns(3)
-                col[0].info(f"FULL: {st.session_state['ALIVVIA']['FULL']['name'] or '—'}")
-                col[1].info(f"Shopee/MT: {st.session_state['ALIVVIA']['VENDAS']['name'] or '—'}")
-                col[2].info(f"Estoque: {st.session_state['ALIVVIA']['ESTOQUE']['name'] or '—'}")
-                col = st.columns(3)
-                col[0].info(f"FULL: {st.session_state['JCA']['FULL']['name'] or '—'}")
-                col[1].info(f"Shopee/MT: {st.session_state['JCA']['VENDAS']['name'] or '—'}")
-                col[2].info(f"Estoque: {st.session_state['JCA']['ESTOQUE']['name'] or '—'}")
-                # FIX: Remove o 'return' que estava causando o SyntaxError
-                # return # <-- Linha removida
-            
-            # Se a validação falhar, o código abaixo vai tentar rodar, mas o try/except deve pegar a falha de leitura
-            # Se a validação acima passar, ele roda o _aggregate_data_for_conjunta()
+                st.warning("Para a Compra Conjunta, todos os 6 arquivos (FULL/Shopee/Estoque para ALIVVIA e JCA) devem ser carregados.")
+                st.info(f"ALIVVIA: FULL ({st.session_state['ALIVVIA']['FULL']['name'] or '—'}), Shopee ({st.session_state['ALIVVIA']['VENDAS']['name'] or '—'}), Estoque ({st.session_state['ALIVVIA']['ESTOQUE']['name'] or '—'})")
+                st.info(f"JCA: FULL ({st.session_state['JCA']['FULL']['name'] or '—'}), Shopee ({st.session_state['JCA']['VENDAS']['name'] or '—'}), Estoque ({st.session_state['JCA']['ESTOQUE']['name'] or '—'})")
+            else:
+                st.info("Arquivos agregados prontos para o cálculo Conjunto.")
         else:
-            dados_display = st.session_state[empresa_selecionada]
-            
+            dados_display = st.session_state[nome_estado]
             col = st.columns(3)
             col[0].info(f"FULL: {dados_display['FULL']['name'] or '—'}")
             col[1].info(f"Shopee/MT: {dados_display['VENDAS']['name'] or '—'}")
             col[2].info(f"Estoque: {dados_display['ESTOQUE']['name'] or '—'}")
 
-        if st.button(f"Gerar Compra — {empresa_selecionada}", type="primary"):
+        # 2. Lógica de Disparo (ou manutenção do estado)
+        
+        # O botão força o recálculo, garantindo que novos uploads sejam processados.
+        if st.button(f"Gerar Compra — {nome_estado}", type="primary"):
+            st.session_state.compra_autom_data["force_recalc"] = True
+        
+        # Dispara o cálculo se for forçado OU se o estado não existir
+        if nome_estado not in st.session_state.compra_autom_data or st.session_state.compra_autom_data.get("force_recalc", False):
+            
+            st.session_state.compra_autom_data["force_recalc"] = False
+            
+            # BLOCO DE CÁLCULO
             try:
                 # 1. VALIDAÇÃO E LEITURA DE DADOS
-                if empresa_selecionada == "CONJUNTA":
+                if nome_estado == "CONJUNTA":
                     
-                    # Checagem de segurança (redundante mas necessária pela remoção do 'return')
-                    missing_conjunta = []
+                    missing_conjunta_calc = []
                     for emp in ["ALIVVIA", "JCA"]:
                         for k, rot in [("FULL", "FULL"), ("VENDAS", "Shopee/MT"), ("ESTOQUE", "Estoque")]:
                             if not (st.session_state[emp][k]["name"] and st.session_state[emp][k]["bytes"]):
-                                missing_conjunta.append(f"{emp} {rot}")
-                    if missing_conjunta:
-                        raise RuntimeError("Arquivos necessários para Compra Conjunta estão ausentes (veja avisos acima).")
+                                missing_conjunta_calc.append(f"{emp} {rot}")
+                    if missing_conjunta_calc:
+                        raise RuntimeError("Arquivos necessários para Compra Conjunta estão ausentes (recarregue todos na aba 'Dados das Empresas').")
 
                     full_df, fisico_df, vendas_df = _aggregate_data_for_conjunta()
                     nome_empresa_calc = "CONJUNTA"
-                else:
-                    # valida presença para individual
-                    dados = st.session_state[empresa_selecionada]
+                    
+                else: # Individual (ALIVVIA ou JCA)
+                    dados = st.session_state[nome_estado]
                     for k, rot in [("FULL","FULL"),("VENDAS","Shopee/MT"),("ESTOQUE","Estoque")]:
                         if not (dados[k]["name"] and dados[k]["bytes"]):
-                            raise RuntimeError(f"Arquivo '{rot}' não foi salvo para {empresa_selecionada}. Vá em **Dados das Empresas** e salve.")
+                            raise RuntimeError(f"Arquivo '{rot}' não foi salvo para {nome_estado}. Vá em **Dados das Empresas** e salve.")
                             
-                    # leitura pelos BYTES
                     full_raw   = load_any_table_from_bytes(dados["FULL"]["name"], dados["FULL"]["bytes"])
                     vendas_raw = load_any_table_from_bytes(dados["VENDAS"]["name"], dados["VENDAS"]["bytes"])
                     fisico_raw = load_any_table_from_bytes(dados["ESTOQUE"]["name"], dados["ESTOQUE"]["bytes"])
                     
-                    # tipagem e mapeamento
-                    t_full = mapear_tipo(full_raw)
-                    t_v    = mapear_tipo(vendas_raw)
-                    t_f    = mapear_tipo(fisico_raw)
-                    if t_full != "FULL":   raise RuntimeError("FULL inválido: precisa de SKU e Vendas_60d/Estoque_full.")
-                    if t_v    != "VENDAS": raise RuntimeError("Vendas inválido: não achei coluna de quantidade.")
-                    if t_f    != "FISICO": raise RuntimeError("Estoque inválido: precisa de Estoque e Preço.")
+                    t_full = mapear_tipo(full_raw); t_v = mapear_tipo(vendas_raw); t_f = mapear_tipo(fisico_raw)
+                    if t_full != "FULL" or t_v != "VENDAS" or t_f != "FISICO":
+                         raise RuntimeError("Um ou mais arquivos (FULL/VENDAS/FISICO) estão com formato incorreto.")
 
                     full_df   = mapear_colunas(full_raw, t_full)
                     vendas_df = mapear_colunas(vendas_raw, t_v)
                     fisico_df = mapear_colunas(fisico_raw, t_f)
-                    nome_empresa_calc = empresa_selecionada
+                    nome_empresa_calc = nome_estado
 
                 # 2. CÁLCULO PRINCIPAL
                 cat = Catalogo(
@@ -731,59 +731,102 @@ with tab2:
                 )
                 df_final, painel = calcular(full_df, fisico_df, vendas_df, cat, h=h, g=g, LT=LT)
                 
-                # 3. PREPARAÇÃO PARA OC (Ticar)
                 df_final["Selecionar"] = False # Adiciona coluna de seleção
-                st.session_state[f"df_compra_{nome_empresa_calc}"] = df_final # Salva para uso na cesta OC
-
+                
+                # SALVA NO ESTADO (CACHING)
+                st.session_state.compra_autom_data[nome_estado] = {
+                    "df": df_final,
+                    "painel": painel,
+                    "empresa": nome_empresa_calc
+                }
+                
                 st.success("Cálculo concluído. Selecione itens abaixo para Ordem de Compra.")
-                
-                # 4. PAINEL DE RESULTADOS
-                cA, cB, cC, cD = st.columns(4)
-                cA.metric("Full (un)",  f"{painel['full_unid']:,}".replace(",", "."))
-                cB.metric("Full (R$)",  f"R$ {painel['full_valor']:,.2f}")
-                cC.metric("Físico (un)",f"{painel['fisico_unid']:,}".replace(",", "."))
-                cD.metric("Físico (R$)",f"R$ {painel['fisico_valor']:,.2f}")
-
-                # 5. TABELA COM CHECKBOX (Ticar)
-                st.data_editor(df_final, key=f"data_editor_{nome_empresa_calc}", use_container_width=True, height=500,
-                    column_config={
-                        "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False)
-                    })
-                
-                # 6. LÓGICA DO BOTÃO ENVIAR PARA OC
-                df_edited = st.session_state[f"data_editor_{nome_empresa_calc}"]
-                df_selecionados = df_edited[df_edited["Selecionar"] == True].copy()
-                
-                if df_selecionados.empty:
-                    st.button(f"Enviar 0 itens selecionados para a Cesta de OC", disabled=True)
-                else:
-                    if st.button(f"Enviar {len(df_selecionados)} itens selecionados para a Cesta de OC", type="secondary"):
-                        df_selecionados["Empresa"] = nome_empresa_calc
-                        df_selecionados = df_selecionados[df_selecionados["Compra_Sugerida"] > 0]
-                        
-                        # Agrega/Substitui na cesta global
-                        if st.session_state.oc_cesta.empty:
-                            st.session_state.oc_cesta = df_selecionados
-                        else:
-                            # Remove itens da mesma empresa/tipo e adiciona os novos
-                            cesta_atual = st.session_state.oc_cesta[st.session_state.oc_cesta["Empresa"] != nome_empresa_calc].copy()
-                            st.session_state.oc_cesta = pd.concat([cesta_atual, df_selecionados], ignore_index=True)
-
-                        st.success(f"Itens de {nome_empresa_calc} enviados para a Cesta de OC. Total na Cesta: {len(st.session_state.oc_cesta)} itens.")
-                        st.dataframe(st.session_state.oc_cesta, use_container_width=True)
-
-                if st.checkbox("Gerar XLSX (Lista_Final + Controle)", key="chk_xlsx"):
-                    xlsx = exportar_xlsx(df_final, h=h, params={"g":g,"LT":LT,"empresa":nome_empresa_calc})
-                    st.download_button(
-                        "Baixar XLSX", data=xlsx,
-                        file_name=f"Compra_Sugerida_{nome_empresa_calc}_{h}d.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
 
             except Exception as e:
+                st.session_state.compra_autom_data[nome_estado] = {"error": str(e)}
                 st.error(str(e))
+        
+        # 3. RENDERIZAÇÃO DE RESULTADOS (USANDO O ESTADO SALVO)
+        if nome_estado in st.session_state.compra_autom_data and "df" in st.session_state.compra_autom_data[nome_estado]:
+            
+            data_fixa = st.session_state.compra_autom_data[nome_estado]
+            df_final = data_fixa["df"].copy() # Usa uma cópia para filtrar
+            painel = data_fixa["painel"]
+            nome_empresa_calc = data_fixa["empresa"]
+            
+            # Mensagem para Compra Conjunta
+            if nome_empresa_calc == "CONJUNTA":
+                st.warning("⚠️ Compra Conjunta gerada! Use a aba **'📦 Alocação de Compra'** para fracionar o lote sugerido.")
+            
+            # Renderização do Painel
+            cA, cB, cC, cD = st.columns(4)
+            cA.metric("Full (un)",  f"{painel['full_unid']:,}".replace(",", "."))
+            cB.metric("Full (R$)",  f"R$ {painel['full_valor']:,.2f}")
+            cC.metric("Físico (un)",f"{painel['fisico_unid']:,}".replace(",", "."))
+            cD.metric("Físico (R$)",f"R$ {painel['fisico_valor']:,.2f}")
 
-# ---------- TAB 3: ALOCAÇÃO DE COMPRA (COMPRA CONJUNTA) - FRACIONAR LOTE ----------
+            # FILTROS DINÂMICOS
+            c_filtros = st.columns(2)
+            
+            # Filtro Fornecedor
+            fornecedores = sorted(df_final["fornecedor"].unique().tolist())
+            filtro_forn = c_filtros[0].multiselect("Filtrar Fornecedor", fornecedores)
+            
+            # Filtro SKU (Busca Parcial - Case Insensitive)
+            filtro_sku_text = c_filtros[1].text_input("Buscar SKU/Parte do SKU", key=f"filtro_sku_{nome_estado}").strip()
+            
+            # Aplicação dos Filtros
+            df_filtrado = df_final.copy()
+
+            if filtro_forn:
+                df_filtrado = df_filtrado[df_filtrado["fornecedor"].isin(filtro_forn)]
+
+            if filtro_sku_text:
+                # Lógica de correspondência parcial (Case-Insensitive)
+                df_filtrado = df_filtrado[df_filtrado["SKU"].str.contains(filtro_sku_text, case=False)]
+
+            # 5. TABELA COM CHECKBOX (Ticar)
+            df_para_editor = df_filtrado[df_filtrado["Compra_Sugerida"] > 0].reset_index(drop=True)
+            
+            # Reconstroi a chave de edição para manter a seleção do usuário
+            editor_key = f"data_editor_{nome_estado}_{len(df_filtrado)}"
+            
+            st.data_editor(df_para_editor, key=editor_key, use_container_width=True, height=500,
+                column_config={
+                    "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False)
+                })
+            
+            # 6. LÓGICA DO BOTÃO ENVIAR PARA OC (Garantido!)
+            df_edited = st.session_state[editor_key]
+            df_selecionados = df_edited[df_edited["Selecionar"] == True].copy()
+            
+            if df_selecionados.empty:
+                st.button(f"Enviar 0 itens selecionados para a Cesta de OC", disabled=True)
+            else:
+                if st.button(f"Enviar {len(df_selecionados)} itens selecionados para a Cesta de OC", type="secondary"):
+                    df_selecionados["Empresa"] = nome_empresa_calc
+                    df_selecionados = df_selecionados[df_selecionados["Compra_Sugerida"] > 0]
+                    
+                    # Agrega/Substitui na cesta global
+                    if st.session_state.oc_cesta.empty:
+                        st.session_state.oc_cesta = df_selecionados
+                    else:
+                        # Remove itens da mesma empresa/tipo e adiciona os novos
+                        cesta_atual = st.session_state.oc_cesta[st.session_state.oc_cesta["Empresa"] != nome_empresa_calc].copy()
+                        st.session_state.oc_cesta = pd.concat([cesta_atual, df_selecionados], ignore_index=True)
+
+                    st.success(f"Itens de {nome_empresa_calc} enviados para a Cesta de OC. Total na Cesta: {len(st.session_state.oc_cesta)} itens.")
+                    st.dataframe(st.session_state.oc_cesta, use_container_width=True)
+
+            if st.checkbox("Gerar XLSX (Lista_Final + Controle)", key="chk_xlsx"):
+                xlsx = exportar_xlsx(df_final, h=h, params={"g":g,"LT":LT,"empresa":nome_empresa_calc})
+                st.download_button(
+                    "Baixar XLSX", data=xlsx,
+                    file_name=f"Compra_Sugerida_{nome_empresa_calc}_{h}d.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+# ---------- TAB 3: ALOCAÇÃO DE COMPRA (sem alteração) ----------
 with tab3:
     st.subheader("📦 Alocação de Compra — Fracionar Lote por Proporção de Vendas")
 
@@ -792,7 +835,6 @@ with tab3:
     else:
         CATALOGO = st.session_state.catalogo_df
         
-        # Validação de Dados (precisa de todos os uploads das duas empresas)
         missing_data = False
         for emp in ["ALIVVIA", "JCA"]:
             if not (st.session_state[emp]["FULL"]["name"] and st.session_state[emp]["VENDAS"]["name"]):
@@ -879,7 +921,7 @@ with tab3:
             except Exception as e:
                 st.error(f"Erro ao calcular Alocação de Compra: {e}")
 
-# ---------- TAB 4: ORDEM DE COMPRA (OC) - CESTA DE ITENS ----------
+# ---------- TAB 4: ORDEM DE COMPRA (OC) - CESTA DE ITENS (sem alteração) ----------
 with tab4:
     if 'ordem_compra' in globals():
         st.subheader("🛒 Ordem de Compra (OC) - Cesta de Itens")
@@ -891,9 +933,7 @@ with tab4:
             st.success(f"Itens prontos para OC: {len(cesta)} itens de {len(cesta['fornecedor'].unique())} fornecedores.")
             st.dataframe(cesta, use_container_width=True)
             
-            # Botão para agrupar e criar OC
             if st.button("Gerar e Finalizar Ordem de Compra (Módulo OC)", type="primary"):
-                # O código aqui chamaria a função ordem_compra.finalizar_oc(cesta)
                 st.warning("Esta função requer a implementação do módulo `ordem_compra.py`.")
             
             if st.button("Limpar Cesta de OC", type="secondary"):
@@ -903,7 +943,7 @@ with tab4:
     else:
         st.error("ERRO: O módulo 'ordem_compra.py' não foi encontrado. As funcionalidades de OC não estão disponíveis.")
 
-# ---------- TAB 5: GERENCIADOR DE OCS - CONTROLE DE RECEBIMENTO ----------
+# ---------- TAB 5: GERENCIADOR DE OCS - CONTROLE DE RECEBIMENTO (sem alteração) ----------
 with tab5:
     if 'gerenciador_oc' in globals():
         st.subheader("✨ Gerenciador de OCs - Controle de Recebimento")
@@ -913,4 +953,4 @@ with tab5:
     else:
         st.error("ERRO: O módulo 'gerenciador_oc.py' não foi encontrado. As funcionalidades de Gerenciamento de OC não estão disponíveis.")
 
-st.caption("© Alivvia — simples, robusto e auditável. (V4.21.0)")
+st.caption("© Alivvia — simples, robusto e auditável. (V4.23.0)")
