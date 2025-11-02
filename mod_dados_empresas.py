@@ -1,6 +1,6 @@
-# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V5.5.2
-# SOLUÇÃO FINAL DE ISOLAMENTO: Simplificação extrema da lógica de botões de limpeza
-# para resolver a StreamlitAPIException e garantir a persistência visual (F5).
+# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V5.6
+# SOLUÇÃO FINAL DE ESTABILIDADE: Remove o botão 'Limpar TODOS' para resolver a
+# StreamlitAPIException. A persistência visual (F5) e o Clear Individual permanecem.
 
 import streamlit as st
 import logica_compra 
@@ -12,8 +12,8 @@ def render_tab1(state):
 
     def render_company_block_final(emp: str):
         st.markdown(f"### {emp}")
-
-        # 1. Upload e Status
+        
+        # --- UPLOAD E STATUS ---
         def render_upload_slot(slot: str, label: str, col):
             saved_name = state[emp][slot]["name"]
             
@@ -27,7 +27,6 @@ def render_tab1(state):
                     # ARQUIVO NÃO SALVO: Exibe o uploader.
                     up_file = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_{slot}_{emp}")
                     if up_file is not None:
-                        # Salva imediatamente e força rerun para mover para o estado VERDE.
                         state[emp][slot]["name"] = up_file.name
                         state[emp][slot]["bytes"] = up_file.read()
                         st.rerun()
@@ -42,20 +41,18 @@ def render_tab1(state):
         col_estoque, _ = st.columns([1,1])
         render_upload_slot("ESTOQUE", "Estoque Físico", col_estoque)
         st.markdown("---")
-
-        # 2. Botões de Limpeza (AÇÕES CRÍTICAS - Simplificadas para evitar conflito)
+        
+        # --- BOTÕES DE LIMPEZA INDIVIDUAL (SOLUÇÃO DE CONFLITO) ---
         st.markdown("#### Ações de Limpeza de Arquivos")
         
-        col_full_clr, col_vendas_clr, col_estoque_clr, col_limpar_todos = st.columns(4)
+        col_full_clr, col_vendas_clr, col_estoque_clr, _ = st.columns(4)
         
-        # Botões Limpar Individuais (Com checagem de estado simplificada)
         clear_slots = [("FULL", "FULL", col_full_clr), 
                        ("VENDAS", "VENDAS", col_vendas_clr), 
                        ("ESTOQUE", "ESTOQUE", col_estoque_clr)]
         
         for slot, label, col in clear_slots:
             with col:
-                # O botão só aparece se o arquivo estiver no estado.
                 if state[emp][slot]["name"]: 
                     if st.button(f"🗑️ Limpar {label}", key=f"clr_{slot}_{emp}", use_container_width=True, type="secondary"):
                         state[emp][slot]["name"] = None
@@ -64,15 +61,8 @@ def render_tab1(state):
                 else:
                     st.info(f"Slot {label} vazio.")
 
-        # Botão Limpar TODOS (O PONTO DE CONFLITO - AGORA ISOLADO EM SUA PRÓPRIA COLUNA)
-        with col_limpar_todos:
-            if st.button(f"Limpar TODOS", key=f"clr_all_{emp}", type="warning", use_container_width=True):
-                 state[emp] = {"FULL":{"name":None,"bytes":None},
-                               "VENDAS":{"name":None,"bytes":None},
-                               "ESTOQUE":{"name":None,"bytes":None}}
-                 st.info(f"{emp} limpo. Reinicie a página se necessário.")
-                 st.rerun()
-        st.markdown("---")
+        # O BOTÃO 'Limpar TODOS' FOI REMOVIDO PARA ELIMINAR O CONFLITO DE REPETIÇÃO E GARANTIR A ESTABILIDADE.
+        
         st.markdown("___") # Separador visual
 
     # Chamadas finais
