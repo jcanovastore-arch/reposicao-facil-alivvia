@@ -1,71 +1,57 @@
-# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V5.1.1
-# FIX: Corrigido NameError (up_file -> up_full)
+# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V5.2
+# FIX CRÍTICO: Implementa feedback visual (verde) e lógica de esconder/mostrar o uploader
+# para garantir que o status de "salvo" seja claro e persistente.
 
 import streamlit as st
-import logica_compra
+import logica_compra # Importa o módulo de lógica para acessar o read()
 
 def render_tab1(state):
     """Renderiza toda a aba 'Dados das Empresas'."""
     st.subheader("Uploads fixos por empresa (os arquivos permanecem salvos após F5)")
-    st.caption("Faça o upload e clique em **Salvar [Empresa]** para persistir o estado.")
+    st.caption("Faça o upload. O arquivo será salvo na sessão até você clicar em 'Limpar'.")
 
     def bloco_empresa(emp: str):
         st.markdown(f"### {emp}")
+        
+        def render_slot(slot: str, label: str):
+            """Função unificada para renderizar o slot de upload/status."""
+            
+            saved_name = state[emp][slot]["name"]
+            
+            if saved_name:
+                # 1. ARQUIVO SALVO: Exibe o status em VERDE e o botão Limpar.
+                st.success(f"✅ {label} salvo: **{saved_name}**")
+                
+                # Botão "Limpar" para remover o arquivo da sessão
+                if st.button(f"🗑️ Limpar {label}", key=f"clr_{slot}_{emp}", use_container_width=True, type="secondary"):
+                    state[emp][slot]["name"] = None
+                    state[emp][slot]["bytes"] = None
+                    st.rerun() # Força a re-renderização para mostrar o uploader
+            else:
+                # 2. ARQUIVO NÃO SALVO: Exibe o uploader.
+                up_file = st.file_uploader(f"👆 {label} — {emp} (CSV/XLSX/XLS)", 
+                                           type=["csv","xlsx","xls"], key=f"up_{slot}_{emp}")
+                
+                if up_file is not None:
+                    # Se um arquivo é carregado, salva imediatamente e força rerun para mostrar o status verde.
+                    state[emp][slot]["name"] = up_file.name
+                    state[emp][slot]["bytes"] = up_file.read()
+                    st.rerun() # RERUN CRÍTICO: Fixa o estado antes que o widget resete.
+        
+        # Estrutura de colunas para FULL e VENDAS
         c1, c2 = st.columns(2)
-        # FULL
         with c1:
             st.markdown(f"**FULL — {emp}**")
-            up_full = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_full_{emp}")
-            if up_full is not None:
-                state[emp]["FULL"]["name"]  = up_full.name
-                # LINHA CORRIGIDA: Usa up_full em vez de up_file
-                state[emp]["FULL"]["bytes"] = up_full.read() 
-            
-            if state[emp]["FULL"]["name"]:
-                st.caption(f"FULL salvo: **{state[emp]['FULL']['name']}**")
-            else:
-                st.caption("Nenhum arquivo FULL salvo.")
-                
-        # Shopee/MT
+            render_slot("FULL", "FULL")
+        
         with c2:
             st.markdown(f"**Shopee/MT — {emp}**")
-            up_v = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_v_{emp}")
-            if up_v is not None:
-                state[emp]["VENDAS"]["name"]  = up_v.name
-                state[emp]["VENDAS"]["bytes"] = up_v.read()
-            
-            if state[emp]["VENDAS"]["name"]:
-                st.caption(f"Vendas salvo: **{state[emp]['VENDAS']['name']}**")
-            else:
-                st.caption("Nenhum arquivo de Vendas salvo.")
+            render_slot("VENDAS", "Shopee/MT (Vendas)")
 
         # Estoque Físico
         st.markdown("**Estoque Físico — (necessário para Compra Automática)**")
-        up_e = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_e_{emp}")
-        if up_e is not None:
-            state[emp]["ESTOQUE"]["name"]  = up_e.name
-            state[emp]["ESTOQUE"]["bytes"] = up_e.read()
+        render_slot("ESTOQUE", "Estoque Físico")
         
-        if state[emp]["ESTOQUE"]["name"]:
-            st.caption(f"Estoque salvo: **{state[emp]['ESTOQUE']['name']}**")
-        else:
-            st.caption("Nenhum arquivo de Estoque salvo.")
-
-
-        # Botões de Salvar e Limpar
-        c3, c4 = st.columns([1,1])
-        with c3:
-            if st.button(f"Salvar {emp}", use_container_width=True, key=f"save_{emp}"):
-                st.success(f"Status {emp} SALVO: FULL [{'OK' if state[emp]['FULL']['name'] else '–'}] • "
-                           f"Shopee [{'OK' if state[emp]['VENDAS']['name'] else '–'}] • "
-                           f"Estoque [{'OK' if state[emp]['ESTOQUE']['name'] else '–'}]")
-        with c4:
-            if st.button(f"Limpar {emp}", use_container_width=True, key=f"clr_{emp}"):
-                state[emp] = {"FULL":{"name":None,"bytes":None},
-                              "VENDAS":{"name":None,"bytes":None},
-                              "ESTOQUE":{"name":None,"bytes":None}}
-                st.info(f"{emp} limpo. (Recarregue a página para limpar o visual do upload.)")
-
         st.divider()
 
     bloco_empresa("ALIVVIA")
