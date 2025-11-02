@@ -1,6 +1,6 @@
-# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V5.4
-# FIX CRÍTICO: Estabilidade Máxima no Refresh. Oculta o uploader se o arquivo está salvo,
-# exibindo apenas o status VERDE fixo.
+# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V5.4.1
+# FIX CRÍTICO: Resolvido StreamlitAPIException (Button Duplication) movendo o botão 'Limpar TODOS' 
+# para um contexto de coluna estável para evitar conflitos de renderização.
 
 import streamlit as st
 import logica_compra 
@@ -23,7 +23,6 @@ def render_tab1(state):
                 
                 if saved_name:
                     # 1. ARQUIVO SALVO (PERMANENTE): Exibe o status em VERDE.
-                    # ESTE BLOCO É EXECUTADO APÓS UM REFRESH/F5 SE HOUVER ARQUIVO SALVO.
                     st.success(f"✅ Salvo: **{saved_name}**")
                     
                     # Botão "Limpar" para remover o arquivo da sessão
@@ -34,7 +33,6 @@ def render_tab1(state):
                     
                 else:
                     # 2. ARQUIVO NÃO SALVO: Exibe o uploader.
-                    # ESTE BLOCO NUNCA É EXECUTADO SE HOUVER ARQUIVO SALVO.
                     up_file = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_{slot}_{emp}")
                     
                     if up_file is not None:
@@ -53,14 +51,17 @@ def render_tab1(state):
         col_estoque, _ = st.columns([1,1])
         render_slot("ESTOQUE", "Estoque Físico", col_estoque)
         
-        # Bloco de Limpeza total (para o caso de um estado ruim)
+        # Bloco de Limpeza total (AGORA EM UM CONTEXTO DE COLUNA DEDICADO E ESTÁVEL)
         st.markdown("---")
-        if st.button(f"Limpar TODOS os arquivos de {emp}", key=f"clr_all_{emp}", type="warning", use_container_width=True):
-             state[emp] = {"FULL":{"name":None,"bytes":None},
-                           "VENDAS":{"name":None,"bytes":None},
-                           "ESTOQUE":{"name":None,"bytes":None}}
-             st.info(f"{emp} limpo. Reinicie a página se necessário.")
-             st.rerun()
+        col_limpar_todos, _ = st.columns([1, 2])
+        with col_limpar_todos:
+            if st.button(f"Limpar TODOS os arquivos de {emp}", key=f"clr_all_{emp}", type="warning", use_container_width=True):
+                 state[emp] = {"FULL":{"name":None,"bytes":None},
+                               "VENDAS":{"name":None,"bytes":None},
+                               "ESTOQUE":{"name":None,"bytes":None}}
+                 st.info(f"{emp} limpo. Reinicie a página se necessário.")
+                 st.rerun()
+        st.markdown("---")
 
     bloco_empresa("ALIVVIA")
     bloco_empresa("JCA")
