@@ -1,5 +1,5 @@
-# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V7.2 (CORREÇÃO DE TYPE ERROR E ESTABILIDADE)
-# Resolve o TypeError na chamada da função e mantém a estrutura de persistência condicional.
+# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V7.2 (ESTABILIDADE MÁXIMA E PERSISTÊNCIA)
+# Resolve o TypeError e garante que a persistência condicional (LocalStorage) seja estável.
 
 import streamlit as st
 import logica_compra 
