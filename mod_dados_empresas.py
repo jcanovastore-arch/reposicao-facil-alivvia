@@ -1,5 +1,5 @@
-# mod_dados_empresas.py - MÓDULO DA TAB 1
-# Responsável por toda a UI e lógica de persistência da aba "Dados das Empresas".
+# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V5.1.1
+# FIX: Corrigido NameError (up_file -> up_full)
 
 import streamlit as st
 import logica_compra
@@ -18,7 +18,8 @@ def render_tab1(state):
             up_full = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_full_{emp}")
             if up_full is not None:
                 state[emp]["FULL"]["name"]  = up_full.name
-                state[emp]["FULL"]["bytes"] = up_file.read()
+                # LINHA CORRIGIDA: Usa up_full em vez de up_file
+                state[emp]["FULL"]["bytes"] = up_full.read() 
             
             if state[emp]["FULL"]["name"]:
                 st.caption(f"FULL salvo: **{state[emp]['FULL']['name']}**")
