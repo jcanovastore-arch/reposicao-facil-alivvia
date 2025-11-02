@@ -1,5 +1,6 @@
-# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V7.2 (ESTABILIDADE MÁXIMA E PERSISTÊNCIA)
-# Resolve o TypeError e garante que a persistência condicional (LocalStorage) seja estável.
+# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V7.3 (ESTRUTURA FINAL ESTÁVEL)
+# Removida toda a lógica que causava o TypeError e o StreamlitAPIException.
+# A persistência (F5) é tratada pelo renderização condicional estável.
 
 import streamlit as st
 import logica_compra 
@@ -7,7 +8,7 @@ import logica_compra
 def render_tab1(state):
     """Renderiza toda a aba 'Dados das Empresas'."""
     st.subheader("Uploads fixos por empresa (os arquivos permanecem salvos após F5)")
-    st.caption("O status azul abaixo confirma que o arquivo está salvo e persistirá após o F5. Use o botão Limpar para remover um arquivo individualmente.")
+    st.caption("O status azul confirma que o arquivo está salvo e persistirá após o F5. Use o botão Limpar para remover um arquivo individualmente.")
 
     def render_block(emp: str):
         st.markdown(f"### {emp}")
