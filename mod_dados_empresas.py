@@ -1,5 +1,5 @@
-# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V6.0 (SOLUÇÃO FINAL E ESTÁVEL)
-# REPLICAÇÃO EXATA DA LÓGICA DE PERSISTÊNCIA QUE FUNCIONAVA NO ARQUIVO ANTIGO.
+# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V6.1 (SOLUÇÃO FINAL E ESTÁVEL)
+# REPLICAÇÃO EXATA DA LÓGICA DE PERSISTÊNCIA QUE FUNCIONAVA NO CÓDIGO ANTIGO.
 
 import streamlit as st
 import logica_compra 
@@ -12,14 +12,14 @@ def render_tab1(state):
     def render_company_block_final(emp: str):
         st.markdown(f"### {emp}")
         
-        # --- UPLOAD E STATUS (LÓGICA ESTÁVEL) ---
+        # --- UPLOAD E STATUS (LÓGICA ESTÁVEL REPLICADA) ---
         def render_upload_slot(slot: str, label: str, col):
             saved_name = state[emp][slot]["name"]
             
             with col:
                 st.markdown(f"**{label} — {emp}**")
                 
-                # 1. RENDERIZA O UPLOADER SEMPRE (Permite que o Streamlit o resete)
+                # 1. RENDERIZA O UPLOADER SEMPRE
                 up_file = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_{slot}_{emp}")
                 
                 # 2. Ação: Se houver um upload VÁLIDO, salva os bytes no estado
@@ -32,7 +32,7 @@ def render_tab1(state):
                 
                 # 3. Status Persistente (A CHAVE DA CORREÇÃO): Mostra o nome salvo.
                 if state[emp][slot]["name"]:
-                    # Este st.caption/st.info é o único elemento que garante feedback visual pós-F5.
+                    # Este st.info garante o feedback visual da persistência após o F5.
                     st.info(f"💾 **Salvo na Sessão**: {state[emp][slot]['name']}") 
 
         # Renderizar slots principais
