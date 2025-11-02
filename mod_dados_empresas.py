@@ -1,5 +1,5 @@
-# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V7.0 (CORREÇÃO DE TYPE ERROR E ESTABILIDADE)
-# Simplificação do fluxo de funções para resolver o TypeError de argumento.
+# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V7.2 (CORREÇÃO DE TYPE ERROR E ESTABILIDADE)
+# Resolve o TypeError na chamada da função e mantém a estrutura de persistência condicional.
 
 import streamlit as st
 import logica_compra 
@@ -20,7 +20,7 @@ def render_tab1(state):
                 st.markdown(f"**{label} — {emp}**")
                 
                 if saved_name:
-                    # 1. ARQUIVO SALVO: Exibe o status e o botão Limpar Individual. (PERSISTÊNCIA GARANTIDA)
+                    # 1. ARQUIVO SALVO: Exibe o status e o botão Limpar Individual.
                     st.info(f"💾 **Salvo na Sessão**: {saved_name}")
                     
                     if st.button(f"🗑️ Limpar {label}", key=f"clr_{slot}_{emp}", use_container_width=True, type="secondary"):
@@ -53,7 +53,7 @@ def render_tab1(state):
     render_block("ALIVVIA")
     render_block("JCA")
     
-    # --- BOTÃO GLOBAL ÚNICO (Solução para o crash) ---
+    # --- BOTÃO GLOBAL ÚNICO (Limpeza Final) ---
     st.markdown("## ⚠️ Limpeza Total de Dados")
     st.warning("Este botão limpa TODOS os uploads de ALIVVIA e JCA salvos na sessão.")
     
