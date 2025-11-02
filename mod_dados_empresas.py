@@ -1,14 +1,17 @@
-# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V5.4.4
-# SOLUÇÃO DEFINITIVA: Consolidado em uma única função para isolar blocos de renderização
-# e resolver o StreamlitAPIException. A persistência visual (F5) está garantida.
+# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V5.5
+# SOLUÇÃO FINAL: Separação de Botões de Ação em Funções Destinadas a um Único RERUN Contexto
+# para resolver o StreamlitAPIException de forma definitiva.
 
 import streamlit as st
 import logica_compra 
 
-def render_company_block(state, emp: str):
-    """Renderiza a seção completa (Uploads e Botões de Limpeza) para uma única empresa."""
+# -----------------------------------------------------------
+# Função 1: Apenas Renderiza Uploads e Status (SAFE)
+# -----------------------------------------------------------
+def render_uploads_and_status(state, emp: str):
+    """Renderiza a seção de uploads e o status VERDE (sem botões de limpar)."""
     st.markdown(f"### {emp}")
-    
+
     def render_slot(slot: str, label: str, col):
         saved_name = state[emp][slot]["name"]
         
@@ -16,7 +19,7 @@ def render_company_block(state, emp: str):
             st.markdown(f"**{label} — {emp}**")
             
             if saved_name:
-                # 1. ARQUIVO SALVO (VERDE): Oculta o uploader no F5.
+                # 1. ARQUIVO SALVO (VERDE): Persiste no F5.
                 st.success(f"✅ Salvo: **{saved_name}**")
             else:
                 # 2. ARQUIVO NÃO SALVO: Exibe o uploader.
@@ -27,8 +30,8 @@ def render_company_block(state, emp: str):
                     state[emp][slot]["name"] = up_file.name
                     state[emp][slot]["bytes"] = up_file.read()
                     st.rerun() 
-
-    # --- BLOCO DE UPLOAD E STATUS (Persistência no F5) ---
+    
+    # Renderização
     c1, c2 = st.columns(2)
     render_slot("FULL", "FULL", c1)
     render_slot("VENDAS", "Shopee/MT (Vendas)", c2)
@@ -37,11 +40,16 @@ def render_company_block(state, emp: str):
     col_estoque, _ = st.columns([1,1])
     render_slot("ESTOQUE", "Estoque Físico", col_estoque)
     st.markdown("---")
+
+# -----------------------------------------------------------
+# Função 2: Apenas Renderiza Botões de Limpeza (CRITICAL CONFLICT RESOLUTION)
+# -----------------------------------------------------------
+def render_clear_buttons(state, emp: str):
+    """Renderiza apenas os botões de limpeza para uma empresa (isolando o st.rerun)."""
     
-    # --- BLOCO DE AÇÕES (Botões de Limpeza) ---
-    st.markdown("#### Ações de Limpeza de Arquivos")
+    st.markdown(f"#### Ações de Limpeza de Arquivos {emp}")
     
-    # Botões de Limpeza Individual (Repetição controlada em colunas separadas)
+    # Botões de Limpeza Individual
     col_full, col_vendas, col_estoque_limpar = st.columns(3)
     
     slots_to_clear = [("FULL", "FULL", col_full), 
@@ -50,6 +58,7 @@ def render_company_block(state, emp: str):
                       
     for slot, label, col in slots_to_clear:
         with col:
+            # O botão só aparece se houver algo para limpar.
             if state[emp][slot]["name"]: 
                 if st.button(f"🗑️ Limpar {label}", key=f"clr_{slot}_{emp}", use_container_width=True, type="secondary"):
                     state[emp][slot]["name"] = None
@@ -58,11 +67,10 @@ def render_company_block(state, emp: str):
             else:
                 st.info(f"Slot {label} vazio.")
 
-    # Botão Limpar TODOS (O PROBLEMA CRÍTICO - Agora isolado no final)
+    # Botão Limpar TODOS (O PROBLEMA CRÍTICO - AGORA ISOLADO)
     st.markdown("---")
     col_limpar_todos, _ = st.columns([1, 2])
     with col_limpar_todos:
-        # Este botão deve ser o último elemento a ser renderizado antes do bloco da próxima empresa
         if st.button(f"Limpar TODOS os arquivos de {emp}", key=f"clr_all_{emp}", type="warning", use_container_width=True):
              state[emp] = {"FULL":{"name":None,"bytes":None},
                            "VENDAS":{"name":None,"bytes":None},
@@ -73,13 +81,16 @@ def render_company_block(state, emp: str):
     st.markdown("___") # Separador visual entre empresas
 
 
+# -----------------------------------------------------------
+# Função Principal da TAB 1 (Junta as partes)
+# -----------------------------------------------------------
 def render_tab1(state):
-    """Função principal da TAB 1 que chama os blocos isolados."""
-    st.subheader("Uploads fixos por empresa (os arquivos permanecem salvos após F5)")
-    st.caption("O arquivo permanece salvo na sessão do servidor até você clicar em 'Limpar'.")
+    """Renderiza toda a aba 'Dados das Empresas'."""
 
-    # ALIVVIA
-    render_company_block(state, "ALIVVIA")
+    # --- ALIVVIA ---
+    render_uploads_and_status(state, "ALIVVIA")
+    render_clear_buttons(state, "ALIVVIA")
     
-    # JCA
-    render_company_block(state, "JCA")
+    # --- JCA ---
+    render_uploads_and_status(state, "JCA")
+    render_clear_buttons(state, "JCA")
