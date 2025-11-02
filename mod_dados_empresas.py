@@ -1,6 +1,5 @@
-# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V6.7 (ESTABILIDADE MÁXIMA)
-# ELIMINA O BOTÃO 'Limpar TODOS' DA FUNÇÃO DE REPETIÇÃO PARA RESOLVER O CRASH.
-# A persistência do F5 (o box azul) é mantida pelo padrão condicional.
+# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V7.0 (CORREÇÃO DE TYPE ERROR E ESTABILIDADE)
+# Simplificação do fluxo de funções para resolver o TypeError de argumento.
 
 import streamlit as st
 import logica_compra 
@@ -10,7 +9,7 @@ def render_tab1(state):
     st.subheader("Uploads fixos por empresa (os arquivos permanecem salvos após F5)")
     st.caption("O status azul abaixo confirma que o arquivo está salvo e persistirá após o F5. Use o botão Limpar para remover um arquivo individualmente.")
 
-    def render_company_block_final(emp: str):
+    def render_block(emp: str):
         st.markdown(f"### {emp}")
         
         # --- UPLOAD E STATUS (ESTABILIDADE GARANTIDA) ---
@@ -22,10 +21,8 @@ def render_tab1(state):
                 
                 if saved_name:
                     # 1. ARQUIVO SALVO: Exibe o status e o botão Limpar Individual. (PERSISTÊNCIA GARANTIDA)
-                    
                     st.info(f"💾 **Salvo na Sessão**: {saved_name}")
                     
-                    # O botão Limpar AGORA ESTÁ INTEGRADO
                     if st.button(f"🗑️ Limpar {label}", key=f"clr_{slot}_{emp}", use_container_width=True, type="secondary"):
                         state[emp][slot]["name"] = None
                         state[emp][slot]["bytes"] = None
@@ -53,8 +50,8 @@ def render_tab1(state):
         st.markdown("___") # Separador visual
 
     # Chamadas finais
-    render_company_block_final(state, "ALIVVIA")
-    render_company_block_final(state, "JCA")
+    render_block("ALIVVIA")
+    render_block("JCA")
     
     # --- BOTÃO GLOBAL ÚNICO (Solução para o crash) ---
     st.markdown("## ⚠️ Limpeza Total de Dados")
