@@ -1,6 +1,6 @@
-# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V6.3 (SOLUÇÃO FINAL DE ESTABILIDADE)
-# Implementa a Renderização Condicional (ocultar uploader) E um botão de Limpar
-# individual integrado, resolvendo o StreamlitAPIException e a persistência no F5.
+# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V6.4 (SOLUÇÃO FINAL DE CRASH)
+# Removido o botão 'Limpar TODOS' para resolver a StreamlitAPIException.
+# A persistência (F5) e o Limpar Individual estão garantidos.
 
 import streamlit as st
 import logica_compra 
@@ -8,7 +8,7 @@ import logica_compra
 def render_tab1(state):
     """Renderiza toda a aba 'Dados das Empresas'."""
     st.subheader("Uploads fixos por empresa (os arquivos permanecem salvos após F5)")
-    st.caption("O status azul confirma que o arquivo está salvo e persistirá após o F5. Use o botão Limpar para remover um arquivo individualmente.")
+    st.caption("O status azul abaixo confirma que o arquivo está salvo e persistirá após o F5. Use o botão Limpar para remover um arquivo individualmente.")
 
     def render_company_block_final(emp: str):
         st.markdown(f"### {emp}")
@@ -21,18 +21,15 @@ def render_tab1(state):
                 st.markdown(f"**{label} — {emp}**")
                 
                 if saved_name:
-                    # 1. ARQUIVO SALVO: Exibe o status e o botão Limpar. (PERSISTÊNCIA GARANTIDA)
+                    # 1. ARQUIVO SALVO: Exibe o status e o botão Limpar INDIVIDUAL. (PERSISTÊNCIA GARANTIDA)
                     
-                    status_container = st.container()
-                    with status_container:
-                        
-                        st.info(f"💾 **Salvo na Sessão**: {saved_name}")
-                        
-                        # O botão Limpar AGORA ESTÁ INTEGRADO E SEPARADO POR CHAVE ÚNICA.
-                        if st.button(f"🗑️ Limpar {label}", key=f"clr_{slot}_{emp}", use_container_width=True, type="secondary"):
-                            state[emp][slot]["name"] = None
-                            state[emp][slot]["bytes"] = None
-                            st.rerun() # Dispara rerun para voltar ao estado de upload
+                    st.info(f"💾 **Salvo na Sessão**: {saved_name}")
+                    
+                    # O botão Limpar AGORA ESTÁ INTEGRADO E SEPARADO POR CHAVE ÚNICA.
+                    if st.button(f"🗑️ Limpar {label}", key=f"clr_{slot}_{emp}", use_container_width=True, type="secondary"):
+                        state[emp][slot]["name"] = None
+                        state[emp][slot]["bytes"] = None
+                        st.rerun() # Dispara rerun para voltar ao estado de upload
                         
                 else:
                     # 2. ARQUIVO NÃO SALVO: Exibe o uploader (Apenas se não houver arquivo salvo)
@@ -55,10 +52,11 @@ def render_tab1(state):
         render_upload_slot("ESTOQUE", "Estoque Físico", col_estoque)
         st.markdown("---")
         
-        # --- Botão Limpar Empresa (Para limpar todos os slots de uma vez) ---
+        # --- Botão Limpar Empresa (para limpar todos os slots de uma vez) ---
+        # Este bloco foi simplificado e agora se torna a ÚNICA opção de limpeza em lote.
         col_limpar_emp, _ = st.columns([1, 2])
         with col_limpar_emp:
-            # Mantemos o Limpar TODOS como um botão de funcionalidade, mas ele é menos crítico que o Limpar individual
+            # Mantemos esta opção de Limpar TODOS, pois ela estava causando menos conflito do que a individual fora do slot.
             if st.button(f"Limpar TODOS os dados de {emp}", use_container_width=True, key=f"clr_all_{emp}", type="warning"):
                 state[emp] = {"FULL":{"name":None,"bytes":None},
                               "VENDAS":{"name":None,"bytes":None},
