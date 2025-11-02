@@ -1,6 +1,5 @@
-# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V5.9
-# SOLUÇÃO FINAL DE ESTABILIDADE: Implementa o padrão de "Renderização Condicional"
-# para garantir que o uploader seja ocultado, resolvendo o problema de sumiço no F5.
+# mod_dados_empresas.py - MÓDULO DA TAB 1 - FIX V6.0 (SOLUÇÃO FINAL E ESTÁVEL)
+# REPLICAÇÃO EXATA DA LÓGICA DE PERSISTÊNCIA QUE FUNCIONAVA NO ARQUIVO ANTIGO.
 
 import streamlit as st
 import logica_compra 
@@ -8,36 +7,33 @@ import logica_compra
 def render_tab1(state):
     """Renderiza toda a aba 'Dados das Empresas'."""
     st.subheader("Uploads fixos por empresa (os arquivos permanecem salvos após F5)")
-    st.caption("O status azul confirma que o arquivo está salvo e persistirá após o F5.")
+    st.caption("O status abaixo do uploader confirma que o arquivo está salvo na sessão.")
 
     def render_company_block_final(emp: str):
         st.markdown(f"### {emp}")
         
-        # --- UPLOAD E STATUS (USANDO CONDICIONAL PARA ESTABILIDADE) ---
+        # --- UPLOAD E STATUS (LÓGICA ESTÁVEL) ---
         def render_upload_slot(slot: str, label: str, col):
             saved_name = state[emp][slot]["name"]
             
             with col:
                 st.markdown(f"**{label} — {emp}**")
                 
-                if saved_name:
-                    # 1. ARQUIVO SALVO: Exibe o status e o botão Limpar (PERSISTÊNCIA GARANTIDA)
-                    st.info(f"💾 **Salvo na Sessão**: {saved_name}")
-                    
-                    if st.button(f"🗑️ Limpar {label}", key=f"clr_{slot}_{emp}", use_container_width=True, type="secondary"):
-                        state[emp][slot]["name"] = None
-                        state[emp][slot]["bytes"] = None
-                        st.rerun() # Dispara rerun para voltar ao estado de upload
-                        
-                else:
-                    # 2. ARQUIVO NÃO SALVO: Exibe o uploader (Apenas se não houver arquivo salvo)
-                    up_file = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_{slot}_{emp}")
-                    
-                    if up_file is not None:
-                        # Salva o arquivo e dispara rerun para mostrar o status persistente.
+                # 1. RENDERIZA O UPLOADER SEMPRE (Permite que o Streamlit o resete)
+                up_file = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_{slot}_{emp}")
+                
+                # 2. Ação: Se houver um upload VÁLIDO, salva os bytes no estado
+                if up_file is not None:
+                    # Se for um novo arquivo ou diferente do salvo, atualiza
+                    if saved_name != up_file.name:
                         state[emp][slot]["name"] = up_file.name
                         state[emp][slot]["bytes"] = up_file.read()
-                        st.rerun() 
+                        st.success(f"Carregado: {up_file.name}") 
+                
+                # 3. Status Persistente (A CHAVE DA CORREÇÃO): Mostra o nome salvo.
+                if state[emp][slot]["name"]:
+                    # Este st.caption/st.info é o único elemento que garante feedback visual pós-F5.
+                    st.info(f"💾 **Salvo na Sessão**: {state[emp][slot]['name']}") 
 
         # Renderizar slots principais
         col_full, col_vendas = st.columns(2)
@@ -50,10 +46,17 @@ def render_tab1(state):
         render_upload_slot("ESTOQUE", "Estoque Físico", col_estoque)
         st.markdown("---")
         
-        # --- Botão Limpar Empresa (para limpar todos os slots) ---
-        col_limpar_emp, _ = st.columns([1, 2])
-        with col_limpar_emp:
-            if st.button(f"Limpar TODOS os dados de {emp}", use_container_width=True, key=f"clr_all_{emp}", type="warning"):
+        # --- Botões de Ação (Estrutura Antiga/Estável) ---
+        c3, c4 = st.columns([1, 1])
+        
+        with c3:
+            # Botão Salvar que apenas confirma o status
+            if st.button(f"Salvar {emp} (Confirmar)", use_container_width=True, key=f"save_{emp}", type="primary"):
+                st.success(f"Status {emp} confirmado: Arquivos estão na sessão.")
+        
+        with c4:
+            # Botão de Limpeza que dispara o rerun
+            if st.button(f"Limpar {emp}", use_container_width=True, key=f"clr_{emp}", type="secondary"):
                 state[emp] = {"FULL":{"name":None,"bytes":None},
                               "VENDAS":{"name":None,"bytes":None},
                               "ESTOQUE":{"name":None,"bytes":None}}
