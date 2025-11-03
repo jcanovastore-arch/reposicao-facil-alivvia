@@ -1,385 +1,226 @@
-# reposicao_facil.py - CÓDIGO FINAL DE ESTABILIDADE V9.2
-# Implementa a persistência síncrona + persistência em DISCO (.uploads) para o upload.
-# Após F5/refresh, os arquivos são restaurados automaticamente a partir de .uploads/.
+# mod_compra_autom.py - MÓDULO DA TAB 2 - FIX V8.5
+# Inclui correção defensiva para o AttributeError/Crash do st.data_editor.
 
-import datetime as dt
 import pandas as pd
 import streamlit as st
-from io import BytesIO
-from pathlib import Path
-import json, hashlib
-from typing import Optional
-
-# ========= MÓDULOS DO PROJETO =========
 import logica_compra
-import mod_compra_autom
-import mod_alocacao
+import numpy as np
 
 from logica_compra import (
     Catalogo,
-    baixar_xlsx_do_sheets,
-    baixar_xlsx_por_link_google,
+    aggregate_data_for_conjunta_clean,
     load_any_table_from_bytes,
-    mapear_tipo,
     mapear_colunas,
-    calcular as calcular_compra,
-    DEFAULT_SHEET_ID,
+    mapear_tipo,
+    exportar_xlsx,
+    calcular as calcular_compra
 )
 
-# MÓDULOS DE ORDEM DE COMPRA (SQLITE)
-try:
-    import ordem_compra
-    import gerenciador_oc
-except ImportError:
-    ordem_compra = None
-    gerenciador_oc = None
+def render_tab2(state, h, g, LT):
+    """Renderiza toda a aba 'Compra Automática'."""
+    st.subheader("Gerar Compra (por empresa ou conjunta) — lógica original")
 
-VERSION = "v9.2 - PERSISTÊNCIA SÍNCRONA FINAL + DISCO"
-
-# ===================== CONFIG =====================
-st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
-DEFAULT_SHEET_LINK = (
-    "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/"
-    "edit?usp=sharing&ouid=109458533144345974874&rtpof=true&sd=true"
-)
-
-# ===================== ESTADO INICIAL =====================
-def _ensure_state():
-    """Garante chaves base na sessão (não re-inicialize em outros pontos)."""
-    st.session_state.setdefault("catalogo_df", None)
-    st.session_state.setdefault("kits_df", None)
-    st.session_state.setdefault("loaded_at", None)
-    st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK)
-    st.session_state.setdefault("oc_cesta", pd.DataFrame())
-    st.session_state.setdefault("compra_autom_data", {})
-
-    for emp in ("ALIVVIA", "JCA"):
-        st.session_state.setdefault(emp, {})
-        st.session_state[emp].setdefault("FULL",    {"name": None, "bytes": None})
-        st.session_state[emp].setdefault("VENDAS",  {"name": None, "bytes": None})
-        st.session_state[emp].setdefault("ESTOQUE", {"name": None, "bytes": None})
-
-_ensure_state()
-
-# ===================== PERSISTÊNCIA EM DISCO (.uploads) =====================
-BASE_DIR = Path(".uploads")
-BASE_DIR.mkdir(exist_ok=True)
-
-def _slug(s: str) -> str:
-    return "".join(c if c.isalnum() or c in ("-", "_") else "-" for c in (s or "").upper())
-
-def _empresa_dir(empresa: str) -> Path:
-    p = BASE_DIR / _slug(empresa)
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-def _tipo_dir(empresa: str, tipo: str) -> Path:
-    p = _empresa_dir(empresa) / _slug(tipo)
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-def _manifest_path(empresa: str) -> Path:
-    return _empresa_dir(empresa) / "_manifest.json"
-
-def _load_manifest(empresa: str) -> dict:
-    mp = _manifest_path(empresa)
-    if mp.exists():
-        try:
-            return json.loads(mp.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
-
-def _save_manifest(empresa: str, manifest: dict) -> None:
-    _manifest_path(empresa).write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-
-def persist_to_disk(empresa: str, tipo: str, name: str, mime: str, data: bytes) -> Path:
-    """Grava arquivo em .uploads/{EMPRESA}/{TIPO}/TIPO.ext e atualiza manifest."""
-    ext = Path(name).suffix or ""
-    fname = f"{_slug(tipo)}{ext}"
-    fpath = _tipo_dir(empresa, tipo) / fname
-    fpath.write_bytes(data)
-
-    manifest = _load_manifest(empresa)
-    manifest[tipo] = {
-        "name": name,
-        "mime": mime or "application/octet-stream",
-        "path": str(fpath),
-        "size": len(data),
-        "sha1": hashlib.sha1(data).hexdigest(),
-    }
-    _save_manifest(empresa, manifest)
-    return fpath
-
-def remove_from_disk(empresa: str, tipo: str) -> None:
-    manifest = _load_manifest(empresa)
-    info = manifest.get(tipo)
-    if info:
-        try:
-            Path(info["path"]).unlink(missing_ok=True)
-        except Exception:
-            pass
-        manifest.pop(tipo, None)
-        _save_manifest(empresa, manifest)
-
-def load_from_disk_if_any(empresa: str, tipo: str) -> Optional[dict]:
-    """Se houver arquivo no disco, devolve dict {name,mime,bytes}."""
-    manifest = _load_manifest(empresa)
-    info = manifest.get(tipo)
-    if not info:
-        return None
-    p = Path(info["path"])
-    if not p.exists():
-        return None
-    try:
-        data = p.read_bytes()
-        return {"name": info.get("name", p.name), "mime": info.get("mime", "application/octet-stream"), "bytes": data}
-    except Exception:
-        return None
-
-def preload_persisted_uploads():
-    """Se sessão estiver vazia, carrega do disco para sessão (ao iniciar o app)."""
-    for emp in ("ALIVVIA", "JCA"):
-        for tipo in ("FULL", "VENDAS", "ESTOQUE"):
-            if not st.session_state[emp][tipo]["name"]:
-                disk_item = load_from_disk_if_any(emp, tipo)
-                if disk_item:
-                    st.session_state[emp][tipo]["name"]  = disk_item["name"]
-                    st.session_state[emp][tipo]["bytes"] = disk_item["bytes"]
-
-preload_persisted_uploads()
-
-# ===================== LOADERS PARA USO NAS ABAS =====================
-def set_upload(empresa: str, tipo: str, uploaded_file) -> None:
-    """Grava em sessão (nível 1)."""
-    if uploaded_file is None:
+    if state.catalogo_df is None or state.kits_df is None:
+        st.info("Carregue o **Padrão (KITS/CAT)** no sidebar antes de usar as abas.")
         return
-    st.session_state[empresa][tipo]["name"] = uploaded_file.name
-    st.session_state[empresa][tipo]["bytes"] = uploaded_file.getbuffer().tobytes()
 
-def clear_upload(empresa: str, tipo: str, also_disk: bool = True) -> None:
-    st.session_state[empresa][tipo] = {"name": None, "bytes": None}
-    if also_disk:
-        remove_from_disk(empresa, tipo)
+    # 1. Seleção de Empresa/Conjunta
+    empresa_selecionada = st.radio("Empresa ativa", ["ALIVVIA", "JCA", "CONJUNTA"], horizontal=True, key="empresa_ca")
+    nome_estado = empresa_selecionada
+    
+    # Lógica de validação visual
+    if nome_estado == "CONJUNTA":
+        st.info("Arquivos agregados prontos para o cálculo Conjunto.")
+    else:
+        dados_display = state[nome_estado]
+        col = st.columns(3)
+        col[0].info(f"FULL: {dados_display['FULL']['name'] or '—'}")
+        col[1].info(f"Shopee/MT: {dados_display['VENDAS']['name'] or '—'}")
+        col[2].info(f"Estoque: {dados_display['ESTOQUE']['name'] or '—'}")
 
-def df_from_saved(empresa: str, tipo: str) -> Optional[pd.DataFrame]:
-    """Retorna DataFrame a partir do que está em sessão/disco."""
-    item_name = st.session_state[empresa][tipo]["name"]
-    item_bytes = st.session_state[empresa][tipo]["bytes"]
-    if not item_name or not item_bytes:
-        # fallback: tenta disco
-        disk_item = load_from_disk_if_any(empresa, tipo)
-        if not disk_item:
-            return None
-        item_name = disk_item["name"]
-        item_bytes = disk_item["bytes"]
-        st.session_state[empresa][tipo]["name"] = item_name
-        st.session_state[empresa][tipo]["bytes"] = item_bytes
-
-    name = (item_name or "").lower()
-    bio = BytesIO(item_bytes)
-    try:
-        if name.endswith(".csv"):
-            try:
-                return pd.read_csv(bio)
-            except Exception:
-                bio.seek(0)
-                return pd.read_csv(bio, sep=";")
-        elif name.endswith(".xlsx") or name.endswith(".xls"):
-            return pd.read_excel(bio, engine="openpyxl")
-        else:
-            st.error(f"{empresa}/{tipo}: formato não suportado ({item_name}).")
-            return None
-    except Exception as e:
-        st.error(f"{empresa}/{tipo}: falha ao ler arquivo — {e}")
-        return None
-
-# ===================== SIDEBAR / PARÂMETROS =====================
-with st.sidebar:
-    st.subheader("Parâmetros")
-    st.session_state.h  = st.selectbox("Horizonte (dias)", [30, 60, 90], index=1, key="h")
-    st.session_state.g  = st.number_input("Crescimento % ao mês", value=0.0, step=1.0, key="g")
-    st.session_state.LT = st.number_input("Lead time (dias)", value=0, step=1, min_value=0, key="LT")
-
-    st.markdown("---")
-    st.subheader("Padrão (KITS/CAT) — Google Sheets")
-    st.caption("Carrega **somente** quando você clicar.")
-
-    @st.cache_data(show_spinner="Baixando Planilha de Padrões KITS/CAT...")
-    def get_padrao_from_sheets(sheet_id):
-        content = logica_compra.baixar_xlsx_do_sheets(sheet_id)
-        return logica_compra._carregar_padrao_de_content(content)
-
-    colA, colB = st.columns([1, 1])
-    with colA:
-        if st.button("Carregar padrão agora", use_container_width=True):
-            try:
-                cat = get_padrao_from_sheets(DEFAULT_SHEET_ID)
-                st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku": "sku"})
-                st.session_state.kits_df = cat.kits_reais
-                st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                st.success("Padrão carregado com sucesso.")
-            except Exception as e:
-                st.session_state.catalogo_df = None
-                st.session_state.kits_df = None
-                st.session_state.loaded_at = None
-                st.error(str(e))
-    with colB:
-        st.link_button("🔗 Abrir no Drive (editar)", DEFAULT_SHEET_LINK, use_container_width=True)
-
-    st.text_input(
-        "Link alternativo do Google Sheets (opcional)",
-        key="alt_sheet_link",
-        help="Se necessário, cole o link e use o botão abaixo.",
-        value=st.session_state.get("alt_sheet_link") or DEFAULT_SHEET_LINK,
-    )
-    if st.button("Carregar deste link", use_container_width=True):
+    # 2. Lógica de Disparo (ou manutenção do estado)
+    if st.button(f"Gerar Compra — {nome_estado}", type="primary"):
+        state.compra_autom_data["force_recalc"] = True
+    
+    # Se o cálculo não existir no estado ou se for forçado, execute-o
+    if nome_estado not in state.compra_autom_data or state.compra_autom_data.get("force_recalc", False):
+        
+        state.compra_autom_data["force_recalc"] = False
+        
+        # BLOCO DE CÁLCULO
         try:
-            content = logica_compra.baixar_xlsx_por_link_google(st.session_state.alt_sheet_link.strip())
-            cat = logica_compra._carregar_padrao_de_content(content)
-            st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku": "sku"})
-            st.session_state.kits_df = cat.kits_reais
-            st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            st.success("Padrão carregado (link alternativo).")
+            cat = Catalogo(
+                catalogo_simples=state.catalogo_df.rename(columns={"sku":"component_sku"}),
+                kits_reais=state.kits_df
+            )
+
+            if nome_estado == "CONJUNTA":
+                
+                dfs = {}
+                missing_conjunta_calc = []
+                for emp in ["ALIVVIA", "JCA"]:
+                    dados = state[emp]
+                    for k, rot in [("FULL", "FULL"), ("VENDAS", "Shopee/MT"), ("ESTOQUE", "Estoque")]:
+                        if not (dados[k]["name"] and dados[k]["bytes"]):
+                            missing_conjunta_calc.append(f"{emp} {rot}")
+                        
+                        raw = load_any_table_from_bytes(dados[k]["name"], dados[k]["bytes"])
+                        tipo = mapear_tipo(raw)
+                        if tipo == "FULL": dfs[f"full_{emp[0]}"] = mapear_colunas(raw, tipo)
+                        elif tipo == "VENDAS": dfs[f"vend_{emp[0]}"] = mapear_colunas(raw, tipo)
+                        elif tipo == "FISICO": dfs[f"fisi_{emp[0]}"] = mapear_colunas(raw, tipo)
+                        else: raise RuntimeError(f"Arquivo {rot} de {emp} com formato incorreto: {tipo}.")
+
+                if missing_conjunta_calc:
+                    raise RuntimeError("Arquivos necessários para Compra Conjunta estão ausentes (recarregue todos na aba 'Dados das Empresas').")
+                
+                full_df, fisico_df, vendas_df = aggregate_data_for_conjunta_clean(
+                    dfs['full_A'], dfs['vend_A'], dfs['fisi_A'],
+                    dfs['full_J'], dfs['vend_J'], dfs['fisi_J']
+                )
+                nome_empresa_calc = "CONJUNTA"
+                
+            else: # Individual (ALIVVIA ou JCA)
+                dados = state[nome_estado]
+                for k, rot in [("FULL","FULL"),("VENDAS","Shopee/MT"),("ESTOQUE","Estoque")]:
+                    if not (dados[k]["name"] and dados[k]["bytes"]):
+                        raise RuntimeError(f"Arquivo '{rot}' não foi salvo para {nome_estado}. Vá em **Dados das Empresas** e salve.")
+                        
+                full_raw   = load_any_table_from_bytes(dados["FULL"]["name"], dados["FULL"]["bytes"])
+                vendas_raw = load_any_table_from_bytes(dados["VENDAS"]["name"], dados["VENDAS"]["bytes"])
+                fisico_raw = load_any_table_from_bytes(dados["ESTOQUE"]["name"], dados["ESTOQUE"]["bytes"])
+                
+                t_full = mapear_tipo(full_raw); t_v = mapear_tipo(vendas_raw); t_f = mapear_tipo(fisico_raw)
+                if t_full != "FULL" or t_v != "VENDAS" or t_f != "FISICO":
+                     raise RuntimeError("Um ou mais arquivos (FULL/VENDAS/FISICO) estão com formato incorreto.")
+
+                full_df   = mapear_colunas(full_raw, t_full)
+                vendas_df = mapear_colunas(vendas_raw, t_v)
+                fisico_df = mapear_colunas(fisico_raw, t_f)
+                nome_empresa_calc = nome_estado
+
+            # 2. CÁLCULO PRINCIPAL
+            df_final, painel = calcular_compra(full_df, fisico_df, vendas_df, cat, h=h, g=g, LT=LT)
+            
+            df_final["Selecionar"] = False # Adiciona coluna de seleção
+            
+            # SALVA NO ESTADO (CACHING)
+            state.compra_autom_data[nome_estado] = {
+                "df": df_final,
+                "painel": painel,
+                "empresa": nome_empresa_calc
+            }
+            
+            st.success("Cálculo concluído. Selecione itens abaixo para Ordem de Compra.")
+
         except Exception as e:
-            st.session_state.catalogo_df = None
-            st.session_state.kits_df = None
-            st.session_state.loaded_at = None
+            state.compra_autom_data[nome_estado] = {"error": str(e)}
             st.error(str(e))
+    
+    # 3. RENDERIZAÇÃO DE RESULTADOS (USANDO O ESTADO SALVO)
+    if nome_estado in state.compra_autom_data and "df" in state.compra_autom_data[nome_estado]:
+        
+        data_fixa = state.compra_autom_data[nome_estado]
+        df_final = data_fixa["df"].copy()
+        painel = data_fixa["painel"]
+        nome_empresa_calc = data_fixa["empresa"]
+        
+        if nome_empresa_calc == "CONJUNTA":
+            st.warning("⚠️ Compra Conjunta gerada! Use a aba **'📦 Alocação de Compra'** para fracionar o lote sugerido.")
+        
+        # Renderização do Painel
+        cA, cB, cC, cD = st.columns(4)
+        cA.metric("Full (un)",  f"{painel['full_unid']:,}".replace(",", "."))
+        cB.metric("Full (R$)",  f"R$ {painel['full_valor']:,.2f}")
+        cC.metric("Físico (un)",f"{painel['fisico_unid']:,}".replace(",", "."))
+        cD.metric("Físico (R$)",f"R$ {painel['fisico_valor']:,.2f}")
 
-# ===================== TÍTULO E ABAS =====================
-st.title("Reposição Logística — Alivvia")
-if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
-    st.warning("► Carregue o **Padrão (KITS/CAT)** no sidebar antes de usar as abas.")
+        # FILTROS DINÂMICOS
+        c_filtros = st.columns(2)
+        
+        fornecedores = sorted(df_final["fornecedor"].unique().tolist())
+        filtro_forn = c_filtros[0].multiselect("Filtrar Fornecedor", fornecedores)
+        
+        filtro_sku_text = c_filtros[1].text_input("Buscar SKU/Parte do SKU", key=f"filtro_sku_{nome_estado}").strip()
+        
+        # Aplicação dos Filtros
+        df_filtrado = df_final.copy()
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["📂 Dados das Empresas", "🧮 Compra Automática", "📦 Alocação de Compra", "🛒 Ordem de Compra (OC)", "✨ Gerenciador de OCs"]
-)
+        if filtro_forn:
+            df_filtrado = df_filtrado[df_filtrado["fornecedor"].isin(filtro_forn)]
 
-# ===================== TAB 1 — UPLOADS COM PERSISTÊNCIA =====================
-with tab1:
-    st.subheader("Uploads fixos por empresa (permanecem após F5)")
-    st.caption("O arquivo é salvo na **sessão** ao enviar; com **Salvar (Confirmar)**, grava também em **.uploads/**.")
+        if filtro_sku_text:
+            df_filtrado = df_filtrado[df_filtrado["SKU"].str.contains(filtro_sku_text, case=False)]
 
-    def render_upload_slot(emp: str, slot: str, label: str, col):
-        with col:
-            st.markdown(f"**{label} — {emp}**")
-            current_name = st.session_state[emp][slot]["name"]
+        # 5. TABELA COM CHECKBOX (Ticar)
+        df_para_editor = df_filtrado[df_filtrado["Compra_Sugerida"] > 0].reset_index(drop=True)
+        
+        editor_key = f"data_editor_{nome_estado}"
+        
+        # Inicializa a coluna Selecionar para evitar o crash se o estado for resetado
+        if "Selecionar" not in df_para_editor.columns:
+             df_para_editor["Selecionar"] = False
+        
+        # FIX V8.5: Inicialização DEFENSIVA do estado do editor
+        if editor_key not in state or not isinstance(state[editor_key], dict):
+            state[editor_key] = {} 
 
-            up_file = st.file_uploader("CSV/XLSX/XLS", type=["csv", "xlsx", "xls"], key=f"up_{slot}_{emp}")
-            if up_file is not None:
-                # Salva em sessão imediatamente (nível 1)
-                set_upload(emp, slot, up_file)
-                # Rerun para atualizar o box de status com o nome salvo
-                st.rerun()
+        st.data_editor(df_para_editor, key=editor_key, use_container_width=True, height=500,
+            column_config={
+                "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False)
+            })
+        
+        # 6. LÓGICA DO BOTÃO ENVIAR PARA OC (Defensiva)
+        df_edited_raw = state[editor_key]
+        df_selecionados = pd.DataFrame()
 
-            # Status
-            if current_name:
-                st.info(f"💾 Salvo: {current_name}")
+        # FIX V8.5: Checagem DEFENSIVA contra o crash do data_editor (AttributeError/KeyError)
+        try:
+            # Pega o DataFrame base que foi exibido no data_editor
+            df_base = df_para_editor.copy()
+            
+            if isinstance(df_edited_raw, dict) and 'edited_rows' in df_edited_raw:
+                
+                edited_indices = df_edited_raw['edited_rows'].keys()
+                
+                if edited_indices:
+                    selecao_editada = pd.Series([False] * len(df_base), index=df_base.index)
+                    
+                    for idx, row_data in df_edited_raw['edited_rows'].items():
+                        if 'Selecionar' in row_data:
+                            selecao_editada.loc[idx] = row_data['Selecionar']
+                    
+                    df_base['Selecionar'] = selecao_editada.combine_first(df_base['Selecionar'])
+                
+                df_selecionados = df_base[df_base['Selecionar'] == True].copy()
+            
+            else:
+                df_selecionados = pd.DataFrame()
+                
+        except Exception:
+            df_selecionados = pd.DataFrame()
 
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button(f"Salvar {label}", key=f"btn_save_{slot}_{emp}", use_container_width=True):
-                    item_name = st.session_state[emp][slot]["name"]
-                    item_bytes = st.session_state[emp][slot]["bytes"]
-                    if not item_name or not item_bytes:
-                        st.warning("Nada para salvar.")
-                    else:
-                        persist_to_disk(emp, slot, item_name, "application/octet-stream", item_bytes)
-                        st.success("Confirmado e gravado em .uploads/")
-            with c2:
-                if st.button(f"Limpar {label}", key=f"btn_clear_{slot}_{emp}", use_container_width=True):
-                    clear_upload(emp, slot, also_disk=True)
-                    st.info("Limpo da sessão e do disco.")
-                    st.rerun()
 
-    def render_block(emp: str):
-        st.markdown(f"### {emp}")
-        c1, c2 = st.columns(2)
-        render_upload_slot(emp, "FULL", "FULL", c1)
-        render_upload_slot(emp, "VENDAS", "Shopee/MT (Vendas)", c2)
-
-        st.markdown("---")
-        c3, _ = st.columns([1, 1])
-        render_upload_slot(emp, "ESTOQUE", "Estoque Físico", c3)
-
-        st.markdown("---")
-        # Ações em lote (empresa)
-        b1, b2 = st.columns(2)
-        with b1:
-            if st.button(f"Salvar {emp} (Confirmar tudo)", key=f"save_all_{emp}", type="primary", use_container_width=True):
-                faltando = []
-                for slot in ("FULL", "VENDAS", "ESTOQUE"):
-                    nm = st.session_state[emp][slot]["name"]
-                    bt = st.session_state[emp][slot]["bytes"]
-                    if not nm or not bt:
-                        faltando.append(slot)
-                        continue
-                    persist_to_disk(emp, slot, nm, "application/octet-stream", bt)
-                if faltando:
-                    st.warning(f"{emp}: faltou salvar {', '.join(faltando)}.")
+        if df_selecionados.empty:
+            st.button(f"Enviar 0 itens selecionados para a Cesta de OC", disabled=True)
+        else:
+            if st.button(f"Enviar {len(df_selecionados)} itens selecionados para a Cesta de OC", type="secondary"):
+                df_selecionados["Empresa"] = nome_empresa_calc
+                df_selecionados = df_selecionados[df_selecionados["Compra_Sugerida"] > 0]
+                
+                if state.get("oc_cesta") is None or state.oc_cesta.empty:
+                    state.oc_cesta = df_selecionados
                 else:
-                    st.success(f"{emp}: todos os arquivos confirmados e gravados em .uploads/")
-        with b2:
-            if st.button(f"Limpar {emp} (Tudo)", key=f"clear_all_{emp}", use_container_width=True):
-                for slot in ("FULL", "VENDAS", "ESTOQUE"):
-                    clear_upload(emp, slot, also_disk=True)
-                st.info(f"{emp}: tudo limpo de sessão e disco.")
-                st.rerun()
+                    cesta_atual = state.oc_cesta[state.oc_cesta["Empresa"] != nome_empresa_calc].copy()
+                    state.oc_cesta = pd.concat([cesta_atual, df_selecionados], ignore_index=True)
 
-    # Renderiza ALIVVIA e JCA
-    render_block("ALIVVIA")
-    render_block("JCA")
+                st.success(f"Itens de {nome_empresa_calc} enviados para a Cesta de OC. Total na Cesta: {len(state.oc_cesta)} itens.")
+                st.dataframe(state.oc_cesta, use_container_width=True)
 
-    st.markdown("## ⚠️ Limpeza Total")
-    if st.button("🔴 Limpar TUDO (ALIVVIA e JCA)", key="clr_all_global", type="primary", use_container_width=True):
-        for emp in ("ALIVVIA", "JCA"):
-            for slot in ("FULL", "VENDAS", "ESTOQUE"):
-                clear_upload(emp, slot, also_disk=True)
-        st.info("Todos os dados foram limpos (sessão + disco).")
-        st.rerun()
-
-    with st.expander("Prévia (opcional)"):
-        for emp in ("ALIVVIA", "JCA"):
-            st.caption(f"Arquivos de {emp}")
-            c1, c2, c3 = st.columns(3)
-            for col, slot in zip((c1, c2, c3), ("FULL", "VENDAS", "ESTOQUE")):
-                with col:
-                    dfp = df_from_saved(emp, slot)
-                    if dfp is not None:
-                        st.caption(f"{slot}: {dfp.shape[0]} linhas / {dfp.shape[1]} colunas")
-                        st.dataframe(dfp.head(5), use_container_width=True, hide_index=True)
-                    else:
-                        st.caption(f"{slot}: (vazio)")
-
-# ===================== TAB 2 — COMPRA AUTOMÁTICA =====================
-with tab2:
-    # As funções internas dos módulos devem usar os bytes armazenados na sessão:
-    # st.session_state["ALIVVIA"]["FULL"]["bytes"], etc., ou chamar df_from_saved(...)
-    mod_compra_autom.render_tab2(st.session_state, st.session_state.h, st.session_state.g, st.session_state.LT)
-
-# ===================== TAB 3 — ALOCAÇÃO DE COMPRA =====================
-with tab3:
-    mod_alocacao.render_tab3(st.session_state)
-
-# ===================== TAB 4 — ORDEM DE COMPRA (placeholder) =====================
-with tab4:
-    if ordem_compra:
-        try:
-            ordem_compra.render_tab4(st.session_state)
-        except Exception as e:
-            st.error(f"Erro na Tab 4: {e}")
-    else:
-        st.info("Módulo 'ordem_compra' indisponível neste ambiente.")
-
-# ===================== TAB 5 — GERENCIADOR DE OCs (placeholder) =====================
-with tab5:
-    if gerenciador_oc:
-        try:
-            gerenciador_oc.render_tab5(st.session_state)
-        except Exception as e:
-            st.error(f"Erro na Tab 5: {e}")
-    else:
-        st.info("Módulo 'gerenciador_oc' indisponível neste ambiente.")
-
-st.caption(f"© Alivvia — simples, robusto e auditável. ({VERSION})")
+        if st.checkbox("Gerar XLSX (Lista_Final + Controle)", key="chk_xlsx"):
+            xlsx = exportar_xlsx(df_final, h=h, params={"g":g,"LT":LT,"empresa":nome_empresa_calc})
+            st.download_button(
+                "Baixar XLSX", data=xlsx,
+                file_name=f"Compra_Sugerida_{nome_empresa_calc}_{h}d.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
