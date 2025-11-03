@@ -1,4 +1,4 @@
-# reposicao_facil.py - CÓDIGO FINAL DE ESTABILIDADE V9.1
+# reposicao_facil.py - CÓDIGO FINAL DE ESTABILIDADE V9.2
 # Implementa a persistência síncrona (leitura e salvamento imediato) para o upload.
 
 import datetime as dt
@@ -38,7 +38,7 @@ try:
 except ImportError:
     pass 
 
-VERSION = "v9.1 - PERSISTÊNCIA SÍNCRONA FINAL"
+VERSION = "v9.2 - PERSISTÊNCIA SÍNCRONA FINAL"
 
 # ===================== CONFIG E ESTADO =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -141,11 +141,10 @@ with tab1:
                 if up_file is not None:
                     # FIX V9.1: GARANTIA DE PERSISTÊNCIA SÍNCRONA
                     if saved_name != up_file.name:
-                        # Reseta o ponteiro de leitura e garante que os bytes sejam lidos AGORA
                         up_file.seek(0)
                         st.session_state[emp][slot]["bytes"] = up_file.read() 
                         st.session_state[emp][slot]["name"] = up_file.name
-                        st.rerun() # Dispara rerun para entrar no estado 'saved_name'
+                        st.rerun() 
                     
                 # 3. Status Persistente
                 if st.session_state[emp][slot]["name"]:
@@ -165,12 +164,10 @@ with tab1:
         c3, c4 = st.columns([1, 1])
 
         with c3:
-            # Botão Salvar que apenas confirma o status
             if st.button(f"Salvar {emp} (Confirmar)", use_container_width=True, key=f"save_{emp}", type="primary"):
                 st.success(f"Status {emp} confirmado: Arquivos estão na sessão.")
         
         with c4:
-            # Botão de Limpeza que dispara o rerun
             if st.button(f"Limpar {emp}", use_container_width=True, key=f"clr_{emp}", type="secondary"):
                 st.session_state[emp] = {"FULL":{"name":None,"bytes":None},
                                          "VENDAS":{"name":None,"bytes":None},
@@ -204,4 +201,4 @@ with tab3:
     
 # ... (Restante das Tabs 4 e 5)
 
-st.caption("© Alivvia — simples, robusto e auditável. (V9.1)")
+st.caption("© Alivvia — simples, robusto e auditável. (V9.2)")
