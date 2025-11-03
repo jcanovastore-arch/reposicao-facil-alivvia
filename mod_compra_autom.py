@@ -1,44 +1,21 @@
-# mod_compra_autom.py - MÓDULO DA TAB 2 - FIX V10.1 (Adaptação para Leitura do Disco)
-# Inclui correção defensiva e adaptação para carregar os bytes do disco.
+# mod_compra_autom.py - MÓDULO DA TAB 2 - FIX V10.2 (Correção de NameError)
 
 import pandas as pd
 import streamlit as st
 import logica_compra
 import numpy as np
-import os # NOVO: Para manipulação de disco
-import json # NOVO: Para manipular o manifesto
+import os # Necessário para funções de suporte
+from typing import Optional, Tuple # CRÍTICO: Importações de tipo que estavam faltando
 
-# [IMPORTAÇÕES DA LOGICA_COMPRA MANTIDAS]
 from logica_compra import (
-    Catalogo, aggregate_data_for_conjunta_clean, load_any_table_from_bytes,
-    mapear_colunas, mapear_tipo, exportar_xlsx, calcular as calcular_compra
+    Catalogo,
+    aggregate_data_for_conjunta_clean,
+    load_any_table_from_bytes,
+    mapear_colunas,
+    mapear_tipo,
+    exportar_xlsx,
+    calcular as calcular_compra
 )
-
-# Funções de suporte para o disco (replicadas ou importadas)
-def load_file_from_disk(file_path: str) -> Optional[bytes]:
-    """Carrega os bytes de um arquivo do disco local."""
-    if file_path and os.path.exists(file_path):
-        with open(file_path, "rb") as f:
-            return f.read()
-    return None
-
-def _get_required_bytes(state, empresa, slot):
-    """Lê os bytes do session_state ou do disco, e salva na sessão para uso imediato."""
-    data = state[empresa][slot]
-    
-    if data["bytes"] is not None:
-        return data["bytes"] # Já está na RAM
-    
-    if data["path"]:
-        # Tenta carregar do disco (o que a lógica de persistência fez)
-        bytes_from_disk = load_file_from_disk(data["path"])
-        
-        if bytes_from_disk is not None:
-            # Salva na RAM (session_state) para que o cálculo subsequente seja rápido
-            state[empresa][slot]["bytes"] = bytes_from_disk
-            return bytes_from_disk
-        
-    return None # Arquivo não encontrado/salvo
 
 def render_tab2(state, h, g, LT):
     """Renderiza toda a aba 'Compra Automática'."""
@@ -48,25 +25,36 @@ def render_tab2(state, h, g, LT):
         st.info("Carregue o **Padrão (KITS/CAT)** no sidebar antes de usar as abas.")
         return
 
-    # [RESTANTE DA LÓGICA ATÉ O CÁLCULO]
+    # 1. Seleção de Empresa/Conjunta
+    empresa_selecionada = st.radio("Empresa ativa", ["ALIVVIA", "JCA", "CONJUNTA"], horizontal=True, key="empresa_ca")
+    nome_estado = empresa_selecionada
     
+    # Lógica de validação visual
+    if nome_estado == "CONJUNTA":
+        st.info("Arquivos agregados prontos para o cálculo Conjunto.")
+    else:
+        dados_display = state[nome_estado]
+        col = st.columns(3)
+        col[0].info(f"FULL: {dados_display['FULL']['name'] or '—'}")
+        col[1].info(f"Shopee/MT: {dados_display['VENDAS']['name'] or '—'}")
+        col[2].info(f"Estoque: {dados_display['ESTOQUE']['name'] or '—'}")
+
     # 2. Lógica de Disparo (ou manutenção do estado)
     if st.button(f"Gerar Compra — {nome_estado}", type="primary"):
         state.compra_autom_data["force_recalc"] = True
     
+    # Se o cálculo não existir no estado ou se for forçado, execute-o
     if nome_estado not in state.compra_autom_data or state.compra_autom_data.get("force_recalc", False):
         
         state.compra_autom_data["force_recalc"] = False
         
         # BLOCO DE CÁLCULO
         try:
-            # ... (Lógica do Catalogo) ...
             cat = Catalogo(
                 catalogo_simples=state.catalogo_df.rename(columns={"sku":"component_sku"}),
                 kits_reais=state.kits_df
             )
-            
-            # --- ADAPTAÇÃO CRÍTICA PARA LER OS BYTES DO DISCO ---
+
             if nome_estado == "CONJUNTA":
                 
                 dfs = {}
@@ -75,29 +63,40 @@ def render_tab2(state, h, g, LT):
                     dados = state[emp]
                     for k, rot in [("FULL", "FULL"), ("VENDAS", "Shopee/MT"), ("ESTOQUE", "Estoque")]:
                         
-                        raw_bytes = _get_required_bytes(state, emp, k) # LÊ DO DISCO SE FOR NECESSÁRIO
-                        
+                        # USAMOS O session_state DIRETO (V9.2)
+                        raw_bytes = dados[k]["bytes"]
+
                         if raw_bytes is None:
                             missing_conjunta_calc.append(f"{emp} {rot}")
                             continue
 
                         raw = raw_bytes
                         tipo = mapear_tipo(raw)
-                        # ... (Restante da lógica de mapeamento e agregação) ...
-                
-                # ... (Restante da lógica de cálculo CONJUNTA) ...
+                        if tipo == "FULL": dfs[f"full_{emp[0]}"] = mapear_colunas(raw, tipo)
+                        elif tipo == "VENDAS": dfs[f"vend_{emp[0]}"] = mapear_colunas(raw, tipo)
+                        elif tipo == "FISICO": dfs[f"fisi_{emp[0]}"] = mapear_colunas(raw, tipo)
+                        else: raise RuntimeError(f"Arquivo {rot} de {emp} com formato incorreto: {tipo}.")
 
+                if missing_conjunta_calc:
+                    raise RuntimeError("Arquivos necessários para Compra Conjunta estão ausentes (recarregue todos na aba 'Dados das Empresas').")
+                
+                full_df, fisico_df, vendas_df = aggregate_data_for_conjunta_clean(
+                    dfs['full_A'], dfs['vend_A'], dfs['fisi_A'],
+                    dfs['full_J'], dfs['vend_J'], dfs['fisi_J']
+                )
+                nome_empresa_calc = "CONJUNTA"
+                
             else: # Individual (ALIVVIA ou JCA)
                 dados = state[nome_estado]
-
-                # LÊ OS BYTES DA SESSÃO OU DO DISCO
-                full_raw_bytes   = _get_required_bytes(state, nome_estado, "FULL")
-                vendas_raw_bytes = _get_required_bytes(state, nome_estado, "VENDAS")
-                fisico_raw_bytes = _get_required_bytes(state, nome_estado, "ESTOQUE")
+                
+                # USAMOS O session_state DIRETO (V9.2)
+                full_raw_bytes   = dados["FULL"]["bytes"]
+                vendas_raw_bytes = dados["VENDAS"]["bytes"]
+                fisico_raw_bytes = dados["ESTOQUE"]["bytes"]
 
                 if full_raw_bytes is None or vendas_raw_bytes is None or fisico_raw_bytes is None:
-                    raise RuntimeError(f"Arquivos necessários não encontrados ou não salvos para {nome_estado}. Por favor, verifique a aba 'Dados das Empresas'.")
-                
+                    raise RuntimeError(f"Arquivos necessários não encontrados ou não salvos para {nome_estado}. Vá em **Dados das Empresas** e salve.")
+                        
                 full_raw = full_raw_bytes; vendas_raw = vendas_raw_bytes; fisico_raw = fisico_raw_bytes
 
                 t_full = mapear_tipo(full_raw); t_v = mapear_tipo(vendas_raw); t_f = mapear_tipo(fisico_raw)
@@ -108,11 +107,129 @@ def render_tab2(state, h, g, LT):
                 vendas_df = mapear_colunas(vendas_raw, t_v)
                 fisico_df = mapear_colunas(fisico_raw, t_f)
                 nome_empresa_calc = nome_estado
+
+            # 2. CÁLCULO PRINCIPAL
+            df_final, painel = calcular_compra(full_df, fisico_df, vendas_df, cat, h=h, g=g, LT=LT)
             
-            # ... (Restante do cálculo principal e salvamento no estado) ...
+            df_final["Selecionar"] = False # Adiciona coluna de seleção
+            
+            # SALVA NO ESTADO (CACHING)
+            state.compra_autom_data[nome_estado] = {
+                "df": df_final,
+                "painel": painel,
+                "empresa": nome_empresa_calc
+            }
+            
+            st.success("Cálculo concluído. Selecione itens abaixo para Ordem de Compra.")
 
         except Exception as e:
-            # ... (Tratamento de erro) ...
+            state.compra_autom_data[nome_estado] = {"error": str(e)}
             st.error(str(e))
+    
+    # 3. RENDERIZAÇÃO DE RESULTADOS (USANDO O ESTADO SALVO)
+    if nome_estado in state.compra_autom_data and "df" in state.compra_autom_data[nome_estado]:
+        
+        data_fixa = state.compra_autom_data[nome_estado]
+        df_final = data_fixa["df"].copy()
+        painel = data_fixa["painel"]
+        nome_empresa_calc = data_fixa["empresa"]
+        
+        if nome_empresa_calc == "CONJUNTA":
+            st.warning("⚠️ Compra Conjunta gerada! Use a aba **'📦 Alocação de Compra'** para fracionar o lote sugerido.")
+        
+        # Renderização do Painel
+        cA, cB, cC, cD = st.columns(4)
+        cA.metric("Full (un)",  f"{painel['full_unid']:,}".replace(",", "."))
+        cB.metric("Full (R$)",  f"R$ {painel['full_valor']:,.2f}")
+        cC.metric("Físico (un)",f"{painel['fisico_unid']:,}".replace(",", "."))
+        cD.metric("Físico (R$)",f"R$ {painel['fisico_valor']:,.2f}")
+
+        # FILTROS DINÂMICOS
+        c_filtros = st.columns(2)
+        
+        fornecedores = sorted(df_final["fornecedor"].unique().tolist())
+        filtro_forn = c_filtros[0].multiselect("Filtrar Fornecedor", fornecedores)
+        
+        filtro_sku_text = c_filtros[1].text_input("Buscar SKU/Parte do SKU", key=f"filtro_sku_{nome_estado}").strip()
+        
+        # Aplicação dos Filtros
+        df_filtrado = df_final.copy()
+
+        if filtro_forn:
+            df_filtrado = df_filtrado[df_filtrado["fornecedor"].isin(filtro_forn)]
+
+        if filtro_sku_text:
+            df_filtrado = df_filtrado[df_filtrado["SKU"].str.contains(filtro_sku_text, case=False)]
+
+        # 5. TABELA COM CHECKBOX (Ticar)
+        df_para_editor = df_filtrado[df_filtrado["Compra_Sugerida"] > 0].reset_index(drop=True)
+        
+        editor_key = f"data_editor_{nome_estado}"
+        
+        # Inicializa a coluna Selecionar para evitar o crash se o estado for resetado
+        if "Selecionar" not in df_para_editor.columns:
+             df_para_editor["Selecionar"] = False
+        
+        # FIX V8.5: Inicialização DEFENSIVA do estado do editor
+        if editor_key not in state or not isinstance(state[editor_key], dict):
+            state[editor_key] = {} 
+
+        st.data_editor(df_para_editor, key=editor_key, use_container_width=True, height=500,
+            column_config={
+                "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False)
+            })
+        
+        # 6. LÓGICA DO BOTÃO ENVIAR PARA OC (Defensiva)
+        df_edited_raw = state[editor_key]
+        df_selecionados = pd.DataFrame()
+
+        # FIX V8.5: Checagem DEFENSIVA contra o crash do data_editor (AttributeError/KeyError)
+        try:
+            # Pega o DataFrame base que foi exibido no data_editor
+            df_base = df_para_editor.copy()
             
-    # [RESTANTE DO CÓDIGO (RENDERIZAÇÃO DE RESULTADOS E BOTÕES)]
+            if isinstance(df_edited_raw, dict) and 'edited_rows' in df_edited_raw:
+                
+                edited_indices = df_edited_raw['edited_rows'].keys()
+                
+                if edited_indices:
+                    selecao_editada = pd.Series([False] * len(df_base), index=df_base.index)
+                    
+                    for idx, row_data in df_edited_raw['edited_rows'].items():
+                        if 'Selecionar' in row_data:
+                            selecao_editada.loc[idx] = row_data['Selecionar']
+                    
+                    df_base['Selecionar'] = selecao_editada.combine_first(df_base['Selecionar'])
+                
+                df_selecionados = df_base[df_base['Selecionar'] == True].copy()
+            
+            else:
+                df_selecionados = pd.DataFrame()
+                
+        except Exception:
+            df_selecionados = pd.DataFrame()
+
+
+        if df_selecionados.empty:
+            st.button(f"Enviar 0 itens selecionados para a Cesta de OC", disabled=True)
+        else:
+            if st.button(f"Enviar {len(df_selecionados)} itens selecionados para a Cesta de OC", type="secondary"):
+                df_selecionados["Empresa"] = nome_empresa_calc
+                df_selecionados = df_selecionados[df_selecionados["Compra_Sugerida"] > 0]
+                
+                if state.get("oc_cesta") is None or state.oc_cesta.empty:
+                    state.oc_cesta = df_selecionados
+                else:
+                    cesta_atual = state.oc_cesta[state.oc_cesta["Empresa"] != nome_empresa_calc].copy()
+                    state.oc_cesta = pd.concat([cesta_atual, df_selecionados], ignore_index=True)
+
+                st.success(f"Itens de {nome_empresa_calc} enviados para a Cesta de OC. Total na Cesta: {len(state.oc_cesta)} itens.")
+                st.dataframe(state.oc_cesta, use_container_width=True)
+
+        if st.checkbox("Gerar XLSX (Lista_Final + Controle)", key="chk_xlsx"):
+            xlsx = exportar_xlsx(df_final, h=h, params={"g":g,"LT":LT,"empresa":nome_empresa_calc})
+            st.download_button(
+                "Baixar XLSX", data=xlsx,
+                file_name=f"Compra_Sugerida_{nome_empresa_calc}_{h}d.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
