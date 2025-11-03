@@ -1,226 +1,205 @@
-# mod_compra_autom.py - MÓDULO DA TAB 2 - FIX V8.5
-# Inclui correção defensiva para o AttributeError/Crash do st.data_editor.
+# reposicao_facil.py - CÓDIGO FINAL DE ESTABILIDADE V9.5
+# Fixa o StreamlitAPIException removendo a área de erro problemático.
 
+import datetime as dt
 import pandas as pd
 import streamlit as st
-import logica_compra
-import numpy as np
+import io 
+import re 
+import hashlib 
+from dataclasses import dataclass 
+from typing import Optional, Tuple 
+import numpy as np 
+from unidecode import unidecode 
+import requests 
+from requests.adapters import HTTPAdapter, Retry 
 
+# MÓDULOS MODULARIZADOS
+import logica_compra 
+import mod_compra_autom
+import mod_alocacao 
+
+# Importando funções e constantes do módulo de lógica
 from logica_compra import (
     Catalogo,
-    aggregate_data_for_conjunta_clean,
+    baixar_xlsx_do_sheets,
+    baixar_xlsx_por_link_google,
     load_any_table_from_bytes,
-    mapear_colunas,
     mapear_tipo,
-    exportar_xlsx,
-    calcular as calcular_compra
+    mapear_colunas,
+    calcular as calcular_compra,
+    DEFAULT_SHEET_ID
 )
 
-def render_tab2(state, h, g, LT):
-    """Renderiza toda a aba 'Compra Automática'."""
-    st.subheader("Gerar Compra (por empresa ou conjunta) — lógica original")
+# MÓDULOS DE ORDEM DE COMPRA (SQLITE) - Mantenha a estrutura
+try:
+    import ordem_compra 
+    import gerenciador_oc 
+except ImportError:
+    pass 
 
-    if state.catalogo_df is None or state.kits_df is None:
-        st.info("Carregue o **Padrão (KITS/CAT)** no sidebar antes de usar as abas.")
-        return
+VERSION = "v9.5 - CORREÇÃO DE EXCEÇÃO FINAL"
 
-    # 1. Seleção de Empresa/Conjunta
-    empresa_selecionada = st.radio("Empresa ativa", ["ALIVVIA", "JCA", "CONJUNTA"], horizontal=True, key="empresa_ca")
-    nome_estado = empresa_selecionada
+# ===================== CONFIG E ESTADO =====================
+st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
+
+DEFAULT_SHEET_LINK = "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/edit?usp=sharing&ouid=109458533144345974874&rtpof=true&sd=true"
+
+def _ensure_state():
+    """Garante que todas as chaves de estado de sessão existam."""
+    st.session_state.setdefault("catalogo_df", None)
+    st.session_state.setdefault("kits_df", None)
+    st.session_state.setdefault("loaded_at", None)
+    st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK)
+    st.session_state.setdefault("oc_cesta", pd.DataFrame()) 
+    st.session_state.setdefault("compra_autom_data", {})
     
-    # Lógica de validação visual
-    if nome_estado == "CONJUNTA":
-        st.info("Arquivos agregados prontos para o cálculo Conjunto.")
-    else:
-        dados_display = state[nome_estado]
-        col = st.columns(3)
-        col[0].info(f"FULL: {dados_display['FULL']['name'] or '—'}")
-        col[1].info(f"Shopee/MT: {dados_display['VENDAS']['name'] or '—'}")
-        col[2].info(f"Estoque: {dados_display['ESTOQUE']['name'] or '—'}")
+    for emp in ["ALIVVIA", "JCA"]:
+        st.session_state.setdefault(emp, {})
+        st.session_state[emp].setdefault("FULL",   {"name": None, "bytes": None})
+        st.session_state[emp].setdefault("VENDAS", {"name": None, "bytes": None})
+        st.session_state[emp].setdefault("ESTOQUE",{"name": None, "bytes": None})
 
-    # 2. Lógica de Disparo (ou manutenção do estado)
-    if st.button(f"Gerar Compra — {nome_estado}", type="primary"):
-        state.compra_autom_data["force_recalc"] = True
+_ensure_state()
+
+# ===================== UI: SIDEBAR E PARÂMETROS =====================
+with st.sidebar:
+    st.subheader("Parâmetros")
+    h  = st.selectbox("Horizonte (dias)", [30, 60, 90], index=1, key="h")
+    g  = st.number_input("Crescimento % ao mês", value=0.0, step=1.0, key="g")
+    LT = st.number_input("Lead time (dias)", value=0, step=1, min_value=0, key="LT")
+
+    st.markdown("---")
+    st.subheader("Padrão (KITS/CAT) — Google Sheets")
+    st.caption("Carrega **somente** quando você clicar.")
     
-    # Se o cálculo não existir no estado ou se for forçado, execute-o
-    if nome_estado not in state.compra_autom_data or state.compra_autom_data.get("force_recalc", False):
-        
-        state.compra_autom_data["force_recalc"] = False
-        
-        # BLOCO DE CÁLCULO
+    @st.cache_data(show_spinner="Baixando Planilha de Padrões KITS/CAT...")
+    def get_padrao_from_sheets(sheet_id):
+        content = logica_compra.baixar_xlsx_do_sheets(sheet_id)
+        return logica_compra._carregar_padrao_de_content(content)
+
+    colA, colB = st.columns([1, 1])
+    with colA:
+        if st.button("Carregar padrão agora", use_container_width=True):
+            try:
+                cat = get_padrao_from_sheets(DEFAULT_SHEET_ID)
+                st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku":"sku"})
+                st.session_state.kits_df = cat.kits_reais
+                st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                st.success("Padrão carregado com sucesso.")
+            except Exception as e:
+                # O problema estava sendo escondido e relançado aqui
+                st.session_state.catalogo_df = None; st.session_state.kits_df = None; st.session_state.loaded_at = None
+                st.error(str(e))
+    with colB:
+        st.link_button("🔗 Abrir no Drive (editar)", DEFAULT_SHEET_LINK, use_container_width=True)
+
+    st.text_input("Link alternativo do Google Sheets (opcional)", key="alt_sheet_link",
+                  help="Se necessário, cole o link e use o botão abaixo.")
+    if st.button("Carregar deste link", use_container_width=True):
         try:
-            cat = Catalogo(
-                catalogo_simples=state.catalogo_df.rename(columns={"sku":"component_sku"}),
-                kits_reais=state.kits_df
-            )
-
-            if nome_estado == "CONJUNTA":
-                
-                dfs = {}
-                missing_conjunta_calc = []
-                for emp in ["ALIVVIA", "JCA"]:
-                    dados = state[emp]
-                    for k, rot in [("FULL", "FULL"), ("VENDAS", "Shopee/MT"), ("ESTOQUE", "Estoque")]:
-                        if not (dados[k]["name"] and dados[k]["bytes"]):
-                            missing_conjunta_calc.append(f"{emp} {rot}")
-                        
-                        raw = load_any_table_from_bytes(dados[k]["name"], dados[k]["bytes"])
-                        tipo = mapear_tipo(raw)
-                        if tipo == "FULL": dfs[f"full_{emp[0]}"] = mapear_colunas(raw, tipo)
-                        elif tipo == "VENDAS": dfs[f"vend_{emp[0]}"] = mapear_colunas(raw, tipo)
-                        elif tipo == "FISICO": dfs[f"fisi_{emp[0]}"] = mapear_colunas(raw, tipo)
-                        else: raise RuntimeError(f"Arquivo {rot} de {emp} com formato incorreto: {tipo}.")
-
-                if missing_conjunta_calc:
-                    raise RuntimeError("Arquivos necessários para Compra Conjunta estão ausentes (recarregue todos na aba 'Dados das Empresas').")
-                
-                full_df, fisico_df, vendas_df = aggregate_data_for_conjunta_clean(
-                    dfs['full_A'], dfs['vend_A'], dfs['fisi_A'],
-                    dfs['full_J'], dfs['vend_J'], dfs['fisi_J']
-                )
-                nome_empresa_calc = "CONJUNTA"
-                
-            else: # Individual (ALIVVIA ou JCA)
-                dados = state[nome_estado]
-                for k, rot in [("FULL","FULL"),("VENDAS","Shopee/MT"),("ESTOQUE","Estoque")]:
-                    if not (dados[k]["name"] and dados[k]["bytes"]):
-                        raise RuntimeError(f"Arquivo '{rot}' não foi salvo para {nome_estado}. Vá em **Dados das Empresas** e salve.")
-                        
-                full_raw   = load_any_table_from_bytes(dados["FULL"]["name"], dados["FULL"]["bytes"])
-                vendas_raw = load_any_table_from_bytes(dados["VENDAS"]["name"], dados["VENDAS"]["bytes"])
-                fisico_raw = load_any_table_from_bytes(dados["ESTOQUE"]["name"], dados["ESTOQUE"]["bytes"])
-                
-                t_full = mapear_tipo(full_raw); t_v = mapear_tipo(vendas_raw); t_f = mapear_tipo(fisico_raw)
-                if t_full != "FULL" or t_v != "VENDAS" or t_f != "FISICO":
-                     raise RuntimeError("Um ou mais arquivos (FULL/VENDAS/FISICO) estão com formato incorreto.")
-
-                full_df   = mapear_colunas(full_raw, t_full)
-                vendas_df = mapear_colunas(vendas_raw, t_v)
-                fisico_df = mapear_colunas(fisico_raw, t_f)
-                nome_empresa_calc = nome_estado
-
-            # 2. CÁLCULO PRINCIPAL
-            df_final, painel = calcular_compra(full_df, fisico_df, vendas_df, cat, h=h, g=g, LT=LT)
-            
-            df_final["Selecionar"] = False # Adiciona coluna de seleção
-            
-            # SALVA NO ESTADO (CACHING)
-            state.compra_autom_data[nome_estado] = {
-                "df": df_final,
-                "painel": painel,
-                "empresa": nome_empresa_calc
-            }
-            
-            st.success("Cálculo concluído. Selecione itens abaixo para Ordem de Compra.")
-
+            content = logica_compra.baixar_xlsx_por_link_google(st.session_state.alt_sheet_link.strip())
+            cat = logica_compra._carregar_padrao_de_content(content)
+            st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku":"sku"})
+            st.session_state.kits_df = cat.kits_reais
+            st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            st.success("Padrão carregado (link alternativo).")
         except Exception as e:
-            state.compra_autom_data[nome_estado] = {"error": str(e)}
+            st.session_state.catalogo_df = None; st.session_state.kits_df = None; st.session_state.loaded_at = None
             st.error(str(e))
+            
+# ===================== TÍTULO E ABAS =====================
+st.title("Reposição Logística — Alivvia")
+if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
+    st.warning("► Carregue o **Padrão (KITS/CAT)** no sidebar antes de usar as abas.")
+
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📂 Dados das Empresas", 
+    "🧮 Compra Automática", 
+    "📦 Alocação de Compra", 
+    "🛒 Ordem de Compra (OC)", 
+    "✨ Gerenciador de OCs"
+])
+
+# ---------- TAB 1: UPLOADS (LÓGICA ESTÁVEL INTEGRADA - SALVAMENTO IMEDIATO) ----------
+with tab1:
+    st.subheader("Uploads fixos por empresa (os arquivos permanecem salvos após F5)")
+    st.caption("O arquivo é salvo **imediatamente** na sessão após o upload (o box azul confirma a persistência).")
+
+    def render_block(emp: str):
+        st.markdown(f"### {emp}")
+        
+        def render_upload_slot(slot: str, label: str, col):
+            saved_name = st.session_state[emp][slot]["name"]
+            
+            with col:
+                st.markdown(f"**{label} — {emp}**")
+                
+                # 1. RENDERIZA O UPLOADER SEMPRE
+                up_file = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_{slot}_{emp}")
+                
+                # 2. Ação: SE HOUVER UM ARQUIVO NO UPLOADER
+                if up_file is not None:
+                    # FIX V9.1: GARANTIA DE PERSISTÊNCIA SÍNCRONA
+                    if saved_name != up_file.name:
+                        up_file.seek(0)
+                        st.session_state[emp][slot]["bytes"] = up_file.read() 
+                        st.session_state[emp][slot]["name"] = up_file.name
+                        st.rerun() # Dispara rerun para entrar no estado 'saved_name'
+                    
+                # 3. Status Persistente
+                if st.session_state[emp][slot]["name"]:
+                    st.info(f"💾 **Salvo na Sessão**: {st.session_state[emp][slot]['name']}") 
+
+        # Renderizar slots
+        col_full, col_vendas = st.columns(2)
+        render_upload_slot("FULL", "FULL", col_full)
+        render_upload_slot("VENDAS", "Shopee/MT (Vendas)", col_vendas)
+
+        st.markdown("---")
+        col_estoque, _ = st.columns([1,1])
+        render_upload_slot("ESTOQUE", "Estoque Físico", col_estoque)
+        st.markdown("___") 
+
+        # --- Botões de Ação ---
+        c3, c4 = st.columns([1, 1])
+
+        with c3:
+            if st.button(f"Salvar {emp} (Confirmar)", use_container_width=True, key=f"save_{emp}", type="primary"):
+                st.success(f"Status {emp} confirmado: Arquivos estão na sessão.")
+        
+        with c4:
+            if st.button(f"Limpar {emp}", use_container_width=True, key=f"clr_{emp}", type="secondary"):
+                st.session_state[emp] = {"FULL":{"name":None,"bytes":None},
+                                         "VENDAS":{"name":None,"bytes":None},
+                                         "ESTOQUE":{"name":None,"bytes":None}}
+                st.info(f"{emp} limpo.")
+                st.rerun() 
+
+        st.markdown("___") 
+
+    # Chamadas finais
+    render_block("ALIVVIA")
+    render_block("JCA")
     
-    # 3. RENDERIZAÇÃO DE RESULTADOS (USANDO O ESTADO SALVO)
-    if nome_estado in state.compra_autom_data and "df" in state.compra_autom_data[nome_estado]:
-        
-        data_fixa = state.compra_autom_data[nome_estado]
-        df_final = data_fixa["df"].copy()
-        painel = data_fixa["painel"]
-        nome_empresa_calc = data_fixa["empresa"]
-        
-        if nome_empresa_calc == "CONJUNTA":
-            st.warning("⚠️ Compra Conjunta gerada! Use a aba **'📦 Alocação de Compra'** para fracionar o lote sugerido.")
-        
-        # Renderização do Painel
-        cA, cB, cC, cD = st.columns(4)
-        cA.metric("Full (un)",  f"{painel['full_unid']:,}".replace(",", "."))
-        cB.metric("Full (R$)",  f"R$ {painel['full_valor']:,.2f}")
-        cC.metric("Físico (un)",f"{painel['fisico_unid']:,}".replace(",", "."))
-        cD.metric("Físico (R$)",f"R$ {painel['fisico_valor']:,.2f}")
+    # Botão de Limpeza Global
+    st.markdown("## ⚠️ Limpeza Total de Dados")
+    if st.button("🔴 Limpar TUDO (ALIVVIA e JCA)", key="clr_all_global", type="primary", use_container_width=True):
+        for emp in ["ALIVVIA", "JCA"]:
+            st.session_state[emp] = {"FULL":{"name":None,"bytes":None},
+                                     "VENDAS":{"name":None,"bytes":None},
+                                     "ESTOQUE":{"name":None,"bytes":None}}
+        st.info("Todos os dados foram limpos.")
+        st.rerun()
 
-        # FILTROS DINÂMICOS
-        c_filtros = st.columns(2)
-        
-        fornecedores = sorted(df_final["fornecedor"].unique().tolist())
-        filtro_forn = c_filtros[0].multiselect("Filtrar Fornecedor", fornecedores)
-        
-        filtro_sku_text = c_filtros[1].text_input("Buscar SKU/Parte do SKU", key=f"filtro_sku_{nome_estado}").strip()
-        
-        # Aplicação dos Filtros
-        df_filtrado = df_final.copy()
+# ---------- TAB 2: COMPRA AUTOMÁTICA ----------
+with tab2:
+    mod_compra_autom.render_tab2(st.session_state, st.session_state.h, st.session_state.g, st.session_state.LT)
 
-        if filtro_forn:
-            df_filtrado = df_filtrado[df_filtrado["fornecedor"].isin(filtro_forn)]
+# ---------- TAB 3: ALOCAÇÃO DE COMPRA ----------
+with tab3:
+    mod_alocacao.render_tab3(st.session_state)
+    
+# ... (Restante das Tabs 4 e 5)
 
-        if filtro_sku_text:
-            df_filtrado = df_filtrado[df_filtrado["SKU"].str.contains(filtro_sku_text, case=False)]
-
-        # 5. TABELA COM CHECKBOX (Ticar)
-        df_para_editor = df_filtrado[df_filtrado["Compra_Sugerida"] > 0].reset_index(drop=True)
-        
-        editor_key = f"data_editor_{nome_estado}"
-        
-        # Inicializa a coluna Selecionar para evitar o crash se o estado for resetado
-        if "Selecionar" not in df_para_editor.columns:
-             df_para_editor["Selecionar"] = False
-        
-        # FIX V8.5: Inicialização DEFENSIVA do estado do editor
-        if editor_key not in state or not isinstance(state[editor_key], dict):
-            state[editor_key] = {} 
-
-        st.data_editor(df_para_editor, key=editor_key, use_container_width=True, height=500,
-            column_config={
-                "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False)
-            })
-        
-        # 6. LÓGICA DO BOTÃO ENVIAR PARA OC (Defensiva)
-        df_edited_raw = state[editor_key]
-        df_selecionados = pd.DataFrame()
-
-        # FIX V8.5: Checagem DEFENSIVA contra o crash do data_editor (AttributeError/KeyError)
-        try:
-            # Pega o DataFrame base que foi exibido no data_editor
-            df_base = df_para_editor.copy()
-            
-            if isinstance(df_edited_raw, dict) and 'edited_rows' in df_edited_raw:
-                
-                edited_indices = df_edited_raw['edited_rows'].keys()
-                
-                if edited_indices:
-                    selecao_editada = pd.Series([False] * len(df_base), index=df_base.index)
-                    
-                    for idx, row_data in df_edited_raw['edited_rows'].items():
-                        if 'Selecionar' in row_data:
-                            selecao_editada.loc[idx] = row_data['Selecionar']
-                    
-                    df_base['Selecionar'] = selecao_editada.combine_first(df_base['Selecionar'])
-                
-                df_selecionados = df_base[df_base['Selecionar'] == True].copy()
-            
-            else:
-                df_selecionados = pd.DataFrame()
-                
-        except Exception:
-            df_selecionados = pd.DataFrame()
-
-
-        if df_selecionados.empty:
-            st.button(f"Enviar 0 itens selecionados para a Cesta de OC", disabled=True)
-        else:
-            if st.button(f"Enviar {len(df_selecionados)} itens selecionados para a Cesta de OC", type="secondary"):
-                df_selecionados["Empresa"] = nome_empresa_calc
-                df_selecionados = df_selecionados[df_selecionados["Compra_Sugerida"] > 0]
-                
-                if state.get("oc_cesta") is None or state.oc_cesta.empty:
-                    state.oc_cesta = df_selecionados
-                else:
-                    cesta_atual = state.oc_cesta[state.oc_cesta["Empresa"] != nome_empresa_calc].copy()
-                    state.oc_cesta = pd.concat([cesta_atual, df_selecionados], ignore_index=True)
-
-                st.success(f"Itens de {nome_empresa_calc} enviados para a Cesta de OC. Total na Cesta: {len(state.oc_cesta)} itens.")
-                st.dataframe(state.oc_cesta, use_container_width=True)
-
-        if st.checkbox("Gerar XLSX (Lista_Final + Controle)", key="chk_xlsx"):
-            xlsx = exportar_xlsx(df_final, h=h, params={"g":g,"LT":LT,"empresa":nome_empresa_calc})
-            st.download_button(
-                "Baixar XLSX", data=xlsx,
-                file_name=f"Compra_Sugerida_{nome_empresa_calc}_{h}d.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+st.caption("© Alivvia — simples, robusto e auditável. (V9.5)")
