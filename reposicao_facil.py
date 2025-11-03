@@ -1,5 +1,5 @@
-# reposicao_facil.py - CÓDIGO FINAL DE ESTABILIDADE V8.4
-# Implementa o salvamento imediato do upload para garantir a persistência no F5.
+# reposicao_facil.py - CÓDIGO FINAL DE ESTABILIDADE V8.5
+# Fixa o erro de cálculo (AttributeError) e garante o salvamento imediato do upload.
 
 import datetime as dt
 import pandas as pd
@@ -39,7 +39,7 @@ try:
 except ImportError:
     pass 
 
-VERSION = "v8.4 - SOLUÇÃO FINAL DE PERSISTÊNCIA"
+VERSION = "v8.5 - SOLUÇÃO FINAL DE PERSISTÊNCIA E CRASH"
 
 # ===================== CONFIG E ESTADO =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -74,7 +74,6 @@ with st.sidebar:
     st.subheader("Padrão (KITS/CAT) — Google Sheets")
     st.caption("Carrega **somente** quando você clicar.")
     
-    # Função para carregar o padrão (necessária para o cache)
     @st.cache_data(show_spinner="Baixando Planilha de Padrões KITS/CAT...")
     def get_padrao_from_sheets(sheet_id):
         content = logica_compra.baixar_xlsx_do_sheets(sheet_id)
@@ -141,10 +140,8 @@ with tab1:
                 
                 # 2. Ação: SE HOUVER UM ARQUIVO NO UPLOADER
                 if up_file is not None:
-                    # SALVAMENTO IMEDIATO E FORÇADO: A ÚNICA LÓGICA ESTÁVEL
-                    # Verifica se o arquivo é novo ou diferente do salvo
                     if saved_name != up_file.name:
-                        # LER E SALVAR OS BYTES IMEDIATAMENTE (O SEGREDO DA PERSISTÊNCIA)
+                        # LER E SALVAR OS BYTES IMEDIATAMENTE
                         st.session_state[emp][slot]["name"] = up_file.name
                         st.session_state[emp][slot]["bytes"] = up_file.read() 
                         st.rerun() # Dispara rerun para entrar no estado 'saved_name'
@@ -198,6 +195,7 @@ with tab1:
 
 # ---------- TAB 2: COMPRA AUTOMÁTICA ----------
 with tab2:
+    # O módulo mod_compra_autom.py agora usa as chaves h, g, LT salvas na sessão
     mod_compra_autom.render_tab2(st.session_state, st.session_state.h, st.session_state.g, st.session_state.LT)
 
 # ---------- TAB 3: ALOCAÇÃO DE COMPRA ----------
@@ -206,4 +204,4 @@ with tab3:
     
 # ... (Restante das Tabs 4 e 5)
 
-st.caption("© Alivvia — simples, robusto e auditável. (V8.4)")
+st.caption("© Alivvia — simples, robusto e auditável. (V8.5)")

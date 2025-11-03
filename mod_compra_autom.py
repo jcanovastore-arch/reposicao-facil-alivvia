@@ -1,6 +1,5 @@
-# mod_compra_autom.py - MÓDULO DA TAB 2 - FIX V8.4
-# Responsável por toda a UI, lógica de persistência e filtros da aba "Compra Automática".
-# Inclui correções defensivas para o st.data_editor.
+# mod_compra_autom.py - MÓDULO DA TAB 2 - FIX V8.5
+# Inclui correção defensiva para o AttributeError/Crash do st.data_editor.
 
 import pandas as pd
 import streamlit as st
@@ -26,7 +25,6 @@ def render_tab2(state, h, g, LT):
         return
 
     # 1. Seleção de Empresa/Conjunta
-    # Use o estado globalizado para obter os parâmetros h, g, LT
     empresa_selecionada = st.radio("Empresa ativa", ["ALIVVIA", "JCA", "CONJUNTA"], horizontal=True, key="empresa_ca")
     nome_estado = empresa_selecionada
     
@@ -160,49 +158,54 @@ def render_tab2(state, h, g, LT):
         editor_key = f"data_editor_{nome_estado}"
         
         # Inicializa a coluna Selecionar para evitar o crash se o estado for resetado
+        if "Selecionar" not in df_para_editor.columns:
+             df_para_editor["Selecionar"] = False
+        
+        # FIX V8.5: Inicialização DEFENSIVA do estado do editor
         if editor_key not in state or not isinstance(state[editor_key], dict):
-            state[editor_key] = {"edited_rows": {}, "added_rows": [], "deleted_rows": []}
+            # Assegura que o estado seja inicializado como um dicionário vazio
+            state[editor_key] = {} 
 
         st.data_editor(df_para_editor, key=editor_key, use_container_width=True, height=500,
             column_config={
                 "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False)
             })
         
-        # 6. LÓGICA DO BOTÃO ENVIAR PARA OC
+        # 6. LÓGICA DO BOTÃO ENVIAR PARA OC (Defensiva)
         df_edited_raw = state[editor_key]
-        
         df_selecionados = pd.DataFrame()
 
-        # FIX V8.4: Checagem defensiva contra o crash do data_editor (AttributeError/KeyError)
+        # FIX V8.5: Checagem DEFENSIVA contra o crash do data_editor (AttributeError/KeyError)
         try:
-            # 1. Recupera o DataFrame base (o que está sendo exibido)
+            # Pega o DataFrame base que foi exibido no data_editor
             df_base = df_para_editor.copy()
             
-            # 2. Verifica se há edições no estado e se é um dict (o Streamlit retorna um dict com as edições)
             if isinstance(df_edited_raw, dict) and 'edited_rows' in df_edited_raw:
                 
-                # 3. Aplica as edições (incluindo a seleção)
-                # Esta é a lógica mais simples: pega o índice das linhas editadas
-                selected_indices = [
-                    idx for idx, row_data in df_edited_raw['edited_rows'].items() 
-                    if row_data.get('Selecionar', False)
-                ]
+                # Aplica as edições (focando apenas no que foi editado para 'Selecionar')
+                edited_indices = df_edited_raw['edited_rows'].keys()
                 
-                # Se a coluna 'Selecionar' for editada, ela estará em df_edited_raw['edited_rows']
-                df_base.loc[df_base.index.isin(df_edited_raw['edited_rows'].keys()), 'Selecionar'] = [
-                    df_edited_raw['edited_rows'][idx]['Selecionar'] 
-                    for idx in df_edited_raw['edited_rows'] if 'Selecionar' in df_edited_raw['edited_rows'][idx]
-                ]
+                # Se houver linhas editadas, atualiza a coluna 'Selecionar' no DF base
+                if edited_indices:
+                    # Cria uma série booleana baseada nas edições
+                    selecao_editada = pd.Series([False] * len(df_base), index=df_base.index)
+                    
+                    for idx, row_data in df_edited_raw['edited_rows'].items():
+                        if 'Selecionar' in row_data:
+                            selecao_editada.loc[idx] = row_data['Selecionar']
+                    
+                    # Atualiza a coluna Selecionar no DF base
+                    df_base['Selecionar'] = selecao_editada.combine_first(df_base['Selecionar'])
                 
                 # 4. Seleciona as linhas que foram ticadas
                 df_selecionados = df_base[df_base['Selecionar'] == True].copy()
             
-            elif isinstance(df_edited_raw, pd.DataFrame):
-                # Fallback: Se por acaso o Streamlit retornou o DF completo (versões antigas/instáveis)
-                df_selecionados = df_edited_raw[df_edited_raw["Selecionar"] == True].copy()
+            else:
+                # Caso o estado do editor seja vazio ou não contenha 'edited_rows'
+                df_selecionados = pd.DataFrame()
                 
         except Exception:
-            # Em caso de qualquer erro (ex: índice inválido), assume que nada foi selecionado.
+            # Em caso de qualquer erro no processamento, assume que nada foi selecionado
             df_selecionados = pd.DataFrame()
 
 
@@ -211,10 +214,8 @@ def render_tab2(state, h, g, LT):
         else:
             if st.button(f"Enviar {len(df_selecionados)} itens selecionados para a Cesta de OC", type="secondary"):
                 df_selecionados["Empresa"] = nome_empresa_calc
-                # Garante que só itens com compra sugerida > 0 sejam enviados
                 df_selecionados = df_selecionados[df_selecionados["Compra_Sugerida"] > 0]
                 
-                # Lógica de concatenação e limpeza (mantida)
                 if state.get("oc_cesta") is None or state.oc_cesta.empty:
                     state.oc_cesta = df_selecionados
                 else:
