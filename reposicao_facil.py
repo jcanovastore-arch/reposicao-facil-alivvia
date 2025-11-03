@@ -159,7 +159,7 @@ with tab1:
         col_estoque, _ = st.columns([1,1])
         render_upload_slot("ESTOQUE", "Estoque Físico", col_estoque)
         st.markdown("___") 
-        
+
         # --- Botões de Ação ---
         c3, c4 = st.columns([1, 1])
 
