@@ -1,13 +1,12 @@
-# reposicao_facil.py - CÓDIGO FINAL DE ESTABILIDADE V8.0
-# Elimina módulos problemáticos e integra a lógica de persistência mais estável diretamente.
+# reposicao_facil.py - CÓDIGO FINAL DE ESTABILIDADE V8.2
+# Integra módulos e corrige a lógica de persistência e a barra lateral.
 
 import datetime as dt
 import pandas as pd
 import streamlit as st
 
-# MÓDULOS MODULARIZADOS (Mantenha a lógica separada, mas importe aqui)
+# MÓDULOS MODULARIZADOS
 import logica_compra 
-# import mod_dados_empresas # MÓDULO PROBLEMÁTICO FOI REMOVIDO DA IMPORTAÇÃO
 import mod_compra_autom
 import mod_alocacao 
 
@@ -30,7 +29,7 @@ try:
 except ImportError:
     pass 
 
-VERSION = "v8.0 - ESTABILIDADE DE ABERTURA"
+VERSION = "v8.2 - RESTAURAÇÃO DE BOTÃO E ESTABILIDADE"
 
 # ===================== CONFIG E ESTADO =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -43,8 +42,9 @@ def _ensure_state():
     st.session_state.setdefault("kits_df", None)
     st.session_state.setdefault("loaded_at", None)
     st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK)
+    st.session_state.setdefault("oc_cesta", pd.DataFrame()) # Adicionado cesta
+    st.session_state.setdefault("compra_autom_data", {}) # Adicionado caching de compra
     
-    # GARANTIA DE CHAVES DA EMPRESA (CRÍTICO)
     for emp in ["ALIVVIA", "JCA"]:
         st.session_state.setdefault(emp, {})
         st.session_state[emp].setdefault("FULL",   {"name": None, "bytes": None})
@@ -59,10 +59,48 @@ with st.sidebar:
     h  = st.selectbox("Horizonte (dias)", [30, 60, 90], index=1, key="h")
     g  = st.number_input("Crescimento % ao mês", value=0.0, step=1.0, key="g")
     LT = st.number_input("Lead time (dias)", value=0, step=1, min_value=0, key="LT")
-    # ... (Restante da lógica do sidebar para carregamento do Google Sheets)
-    
-    # [LÓGICA DE CARREGAMENTO DO PADRÃO (KITS/CAT) VAI AQUI]
 
+    st.markdown("---")
+    st.subheader("Padrão (KITS/CAT) — Google Sheets")
+    st.caption("Carrega **somente** quando você clicar.")
+    
+    # Função para carregar o padrão (necessária para o cache)
+    @st.cache_data(show_spinner="Baixando Planilha de Padrões KITS/CAT...")
+    def get_padrao_from_sheets(sheet_id):
+        # As funções de lógica precisam ser chamadas pelo logica_compra
+        content = logica_compra.baixar_xlsx_do_sheets(sheet_id)
+        return logica_compra._carregar_padrao_de_content(content)
+
+    colA, colB = st.columns([1, 1])
+    with colA:
+        if st.button("Carregar padrão agora", use_container_width=True):
+            try:
+                # Chama a função de cache
+                cat = get_padrao_from_sheets(DEFAULT_SHEET_ID)
+                st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku":"sku"})
+                st.session_state.kits_df = cat.kits_reais
+                st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                st.success("Padrão carregado com sucesso.")
+            except Exception as e:
+                st.session_state.catalogo_df = None; st.session_state.kits_df = None; st.session_state.loaded_at = None
+                st.error(str(e))
+    with colB:
+        st.link_button("🔗 Abrir no Drive (editar)", DEFAULT_SHEET_LINK, use_container_width=True)
+
+    st.text_input("Link alternativo do Google Sheets (opcional)", key="alt_sheet_link",
+                  help="Se necessário, cole o link e use o botão abaixo.")
+    if st.button("Carregar deste link", use_container_width=True):
+        try:
+            content = logica_compra.baixar_xlsx_por_link_google(st.session_state.alt_sheet_link.strip())
+            cat = logica_compra._carregar_padrao_de_content(content)
+            st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku":"sku"})
+            st.session_state.kits_df = cat.kits_reais
+            st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            st.success("Padrão carregado (link alternativo).")
+        except Exception as e:
+            st.session_state.catalogo_df = None; st.session_state.kits_df = None; st.session_state.loaded_at = None
+            st.error(str(e))
+            
 # ===================== TÍTULO E ABAS =====================
 st.title("Reposição Logística — Alivvia")
 if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
@@ -84,7 +122,6 @@ with tab1:
     def render_block(emp: str):
         st.markdown(f"### {emp}")
         
-        # Lógica de Renderização do Bloco (A única que provou ser estável)
         def render_upload_slot(slot: str, label: str, col):
             saved_name = st.session_state[emp][slot]["name"]
             
@@ -136,6 +173,7 @@ with tab1:
 
 # ---------- TAB 2: COMPRA AUTOMÁTICA ----------
 with tab2:
+    # O módulo mod_compra_autom.py agora usa as chaves h, g, LT salvas na sessão
     mod_compra_autom.render_tab2(st.session_state, st.session_state.h, st.session_state.g, st.session_state.LT)
 
 # ---------- TAB 3: ALOCAÇÃO DE COMPRA ----------
@@ -143,3 +181,5 @@ with tab3:
     mod_alocacao.render_tab3(st.session_state)
     
 # ... (Restante das Tabs 4 e 5)
+
+st.caption("© Alivvia — simples, robusto e auditável. (V8.2)")
