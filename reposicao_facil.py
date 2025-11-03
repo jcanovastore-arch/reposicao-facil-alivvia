@@ -1,5 +1,5 @@
-# reposicao_facil.py - CÓDIGO FINAL DE ESTABILIDADE V9.4
-# Implementa a persistência por CACHE (@st.cache_data) para proteger os bytes na memória.
+# reposicao_facil.py - CÓDIGO FINAL DE ESTABILIDADE V10.0
+# Implementa a persistência em DISCO para resolver o problema do sumiço no F5.
 
 import datetime as dt
 import pandas as pd
@@ -7,6 +7,7 @@ import streamlit as st
 import io 
 import re 
 import hashlib 
+import os # NOVO: Para manipulação de arquivos
 from dataclasses import dataclass 
 from typing import Optional, Tuple 
 import numpy as np 
@@ -38,12 +39,35 @@ try:
 except ImportError:
     pass 
 
-VERSION = "v9.4 - PERSISTÊNCIA POR CACHE FINAL"
+VERSION = "v10.0 - PERSISTÊNCIA EM DISCO FINAL"
 
 # ===================== CONFIG E ESTADO =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
 DEFAULT_SHEET_LINK = "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/edit?usp=sharing&ouid=109458533144345974874&rtpof=true&sd=true"
+
+# DIRETÓRIO DE ARMAZENAMENTO EM DISCO (Streamlit Cloud permite escrita)
+UPLOAD_DIR = ".st_uploads" 
+
+# Hashing function
+def hash_bytes(blob: bytes) -> str:
+    return hashlib.sha256(blob).hexdigest()
+
+# Função para salvar o arquivo em disco
+def save_file_to_disk(blob: bytes, file_name: str, file_hash: str) -> str:
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    file_path = os.path.join(UPLOAD_DIR, f"{file_hash}_{file_name}")
+    with open(file_path, "wb") as f:
+        f.write(blob)
+    return file_path
+
+# Função para carregar o arquivo do disco
+def load_file_from_disk(file_path: str) -> Optional[bytes]:
+    if file_path and os.path.exists(file_path):
+        with open(file_path, "rb") as f:
+            return f.read()
+    return None
+
 
 def _ensure_state():
     """Garante que todas as chaves de estado de sessão existam."""
@@ -56,18 +80,12 @@ def _ensure_state():
     
     for emp in ["ALIVVIA", "JCA"]:
         st.session_state.setdefault(emp, {})
-        st.session_state[emp].setdefault("FULL",   {"name": None, "bytes": None})
-        st.session_state[emp].setdefault("VENDAS", {"name": None, "bytes": None})
-        st.session_state[emp].setdefault("ESTOQUE",{"name": None, "bytes": None})
+        # Adicionado 'path' para salvar o caminho no disco
+        st.session_state[emp].setdefault("FULL",   {"name": None, "bytes": None, "path": None})
+        st.session_state[emp].setdefault("VENDAS", {"name": None, "bytes": None, "path": None})
+        st.session_state[emp].setdefault("ESTOQUE",{"name": None, "bytes": None, "path": None})
 
 _ensure_state()
-
-# ===================== FUNÇÃO DE CACHE CRÍTICA (PERSISTÊNCIA GARANTIDA) =====================
-
-@st.cache_data(show_spinner=False)
-def _cache_bytes_for_persistence(blob: bytes, file_name: str) -> bytes:
-    """Força o Streamlit a guardar os bytes do arquivo na memória cache, que é mais resiliente."""
-    return blob
 
 # ===================== UI: SIDEBAR E PARÂMETROS =====================
 with st.sidebar:
@@ -127,37 +145,52 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "✨ Gerenciador de OCs"
 ])
 
-# ---------- TAB 1: UPLOADS (LÓGICA ESTÁVEL INTEGRADA - SALVAMENTO POR CACHE) ----------
+# ---------- TAB 1: UPLOADS (LÓGICA DE PERSISTÊNCIA EM DISCO) ----------
 with tab1:
     st.subheader("Uploads fixos por empresa (os arquivos permanecem salvos após F5)")
-    st.caption("O arquivo é salvo **imediatamente** na sessão após o upload (o box azul confirma a persistência).")
+    st.caption("O arquivo é salvo **em disco** no servidor para garantir a persistência (o box azul confirma).")
 
     def render_block(emp: str):
         st.markdown(f"### {emp}")
         
         def render_upload_slot(slot: str, label: str, col):
             saved_name = st.session_state[emp][slot]["name"]
+            saved_path = st.session_state[emp][slot].get("path")
             
             with col:
                 st.markdown(f"**{label} — {emp}**")
                 
-                up_file = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_{slot}_{emp}")
-                
-                if up_file is not None:
-                    # FIX V9.4: GARANTIA DE PERSISTÊNCIA POR CACHE
-                    if saved_name != up_file.name:
-                        up_file.seek(0)
-                        raw_bytes = up_file.read()
-                        
-                        # Chama a função CACHE para guardar os bytes de forma persistente
-                        cached_bytes = _cache_bytes_for_persistence(raw_bytes, up_file.name)
-                        
-                        st.session_state[emp][slot]["bytes"] = cached_bytes # Salva os bytes AGORA
-                        st.session_state[emp][slot]["name"] = up_file.name
-                        st.rerun() 
+                # 1. VERIFICA E CARREGA DO DISCO SE EXISTIR
+                if saved_path and os.path.exists(saved_path):
+                    # Garante que os bytes estejam no session_state (lê do disco)
+                    if st.session_state[emp][slot]["bytes"] is None:
+                         st.session_state[emp][slot]["bytes"] = load_file_from_disk(saved_path)
+
+                    st.info(f"💾 **Fixo no Disco**: {saved_name}")
                     
-                if st.session_state[emp][slot]["name"]:
-                    st.info(f"💾 **Salvo na Sessão**: {st.session_state[emp][slot]['name']}") 
+                    # --- BOTÃO DE LIMPEZA INDIVIDUAL ---
+                    if st.button(f"🗑️ Limpar {label}", key=f"clr_{slot}_{emp}", use_container_width=True, type="secondary"):
+                        try: os.remove(saved_path)
+                        except OSError: pass # Ignora se falhar
+                        st.session_state[emp][slot] = {"name": None, "bytes": None, "path": None}
+                        st.rerun() 
+                
+                else:
+                    # 2. FILE UPLOADER
+                    up_file = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_{slot}_{emp}")
+                    
+                    if up_file is not None:
+                        # 3. SALVAMENTO AGRESSIVO (DISK)
+                        raw_bytes = up_file.read()
+                        file_hash = hash_bytes(raw_bytes)
+
+                        file_path = save_file_to_disk(raw_bytes, up_file.name, file_hash)
+                        
+                        # Salva o path e o nome no session_state (o path é a chave da persistência)
+                        st.session_state[emp][slot]["bytes"] = raw_bytes 
+                        st.session_state[emp][slot]["name"] = up_file.name
+                        st.session_state[emp][slot]["path"] = file_path 
+                        st.rerun() 
 
         # Renderizar slots
         col_full, col_vendas = st.columns(2)
@@ -174,13 +207,17 @@ with tab1:
 
         with c3:
             if st.button(f"Salvar {emp} (Confirmar)", use_container_width=True, key=f"save_{emp}", type="primary"):
-                st.success(f"Status {emp} confirmado: Arquivos estão na sessão.")
+                st.success(f"Status {emp} confirmado: Arquivos estão na sessão/disco.")
         
         with c4:
             if st.button(f"Limpar {emp}", use_container_width=True, key=f"clr_{emp}", type="secondary"):
-                st.session_state[emp] = {"FULL":{"name":None,"bytes":None},
-                                         "VENDAS":{"name":None,"bytes":None},
-                                         "ESTOQUE":{"name":None,"bytes":None}}
+                for s in ["FULL", "VENDAS", "ESTOQUE"]:
+                    if st.session_state[emp][s].get("path"):
+                        try: os.remove(st.session_state[emp][s]["path"])
+                        except OSError: pass
+                st.session_state[emp] = {"FULL":{"name":None,"bytes":None,"path":None},
+                                         "VENDAS":{"name":None,"bytes":None,"path":None},
+                                         "ESTOQUE":{"name":None,"bytes":None,"path":None}}
                 st.info(f"{emp} limpo.")
                 st.rerun() 
 
@@ -194,9 +231,13 @@ with tab1:
     st.markdown("## ⚠️ Limpeza Total de Dados")
     if st.button("🔴 Limpar TUDO (ALIVVIA e JCA)", key="clr_all_global", type="primary", use_container_width=True):
         for emp in ["ALIVVIA", "JCA"]:
-            st.session_state[emp] = {"FULL":{"name":None,"bytes":None},
-                                     "VENDAS":{"name":None,"bytes":None},
-                                     "ESTOQUE":{"name":None,"bytes":None}}
+            for s in ["FULL", "VENDAS", "ESTOQUE"]:
+                if st.session_state[emp][s].get("path"):
+                    try: os.remove(st.session_state[emp][s]["path"])
+                    except OSError: pass
+            st.session_state[emp] = {"FULL":{"name":None,"bytes":None,"path":None},
+                                     "VENDAS":{"name":None,"bytes":None,"path":None},
+                                     "ESTOQUE":{"name":None,"bytes":None,"path":None}}
         st.info("Todos os dados foram limpos.")
         st.rerun()
 
@@ -210,4 +251,4 @@ with tab3:
     
 # ... (Restante das Tabs 4 e 5)
 
-st.caption("© Alivvia — simples, robusto e auditável. (V9.4)")
+st.caption("© Alivvia — simples, robusto e auditável. (V10.0)")
