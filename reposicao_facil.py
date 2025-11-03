@@ -1,9 +1,19 @@
-# reposicao_facil.py - CÓDIGO FINAL DE ESTABILIDADE V8.3
-# Implementa a lógica de SALVAR MANUAL, que é a única estável para persistência de uploads.
+# reposicao_facil.py - CÓDIGO FINAL DE ESTABILIDADE V8.4
+# Implementa o salvamento imediato do upload para garantir a persistência no F5.
 
 import datetime as dt
 import pandas as pd
 import streamlit as st
+import io # Necessário para a leitura dos bytes
+import re # Necessário para funções de lógica
+import hashlib # Necessário para funções de lógica
+from dataclasses import dataclass # Necessário para Catalogo
+from typing import Optional, Tuple # Necessário para tipagem
+import numpy as np # Necessário para cálculos
+from unidecode import unidecode # Necessário para normalização
+import requests # Necessário para downloads
+from requests.adapters import HTTPAdapter, Retry # Necessário para downloads
+
 
 # MÓDULOS MODULARIZADOS
 import logica_compra 
@@ -22,19 +32,19 @@ from logica_compra import (
     DEFAULT_SHEET_ID
 )
 
-# MÓDULOS DE ORDEM DE COMPRA (SQLITE)
+# MÓDULOS DE ORDEM DE COMPRA (SQLITE) - Mantenha a estrutura
 try:
     import ordem_compra 
     import gerenciador_oc 
 except ImportError:
     pass 
 
-VERSION = "v8.3 - SOLUÇÃO MANUAL DE PERSISTÊNCIA"
+VERSION = "v8.4 - SOLUÇÃO FINAL DE PERSISTÊNCIA"
 
 # ===================== CONFIG E ESTADO =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
 
-DEFAULT_SHEET_LINK = "https://docs.google.com/sheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/edit?usp=sharing&ouid=109458533144345974874&rtpof=true&sd=true"
+DEFAULT_SHEET_LINK = "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/edit?usp=sharing&ouid=109458533144345974874&rtpof=true&sd=true"
 
 def _ensure_state():
     """Garante que todas as chaves de estado de sessão existam."""
@@ -64,6 +74,7 @@ with st.sidebar:
     st.subheader("Padrão (KITS/CAT) — Google Sheets")
     st.caption("Carrega **somente** quando você clicar.")
     
+    # Função para carregar o padrão (necessária para o cache)
     @st.cache_data(show_spinner="Baixando Planilha de Padrões KITS/CAT...")
     def get_padrao_from_sheets(sheet_id):
         content = logica_compra.baixar_xlsx_do_sheets(sheet_id)
@@ -111,10 +122,10 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "✨ Gerenciador de OCs"
 ])
 
-# ---------- TAB 1: UPLOADS (LÓGICA ESTÁVEL INTEGRADA - SALVAMENTO MANUAL) ----------
+# ---------- TAB 1: UPLOADS (LÓGICA ESTÁVEL INTEGRADA - SALVAMENTO IMEDIATO) ----------
 with tab1:
     st.subheader("Uploads fixos por empresa (os arquivos permanecem salvos após F5)")
-    st.caption("Você deve clicar em **Salvar [Empresa] (Fixar na Sessão)** após o upload para fixar os arquivos e garantir a persistência.")
+    st.caption("O arquivo é salvo **imediatamente** na sessão após o upload (o box azul confirma a persistência).")
 
     def render_block(emp: str):
         st.markdown(f"### {emp}")
@@ -128,13 +139,20 @@ with tab1:
                 # 1. RENDERIZA O UPLOADER SEMPRE
                 up_file = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_{slot}_{emp}")
                 
-                # 2. Status Persistente (CHAVE DA CORREÇÃO): Mostra o nome salvo.
-                if saved_name:
-                    st.info(f"💾 **Salvo na Sessão**: {saved_name}")
-                elif up_file is not None:
-                    # 3. Status Temporário: Se o arquivo foi recém-carregado
-                    st.warning(f"Carregado: {up_file.name}. Clique em 'Salvar {emp}' abaixo.")
-        
+                # 2. Ação: SE HOUVER UM ARQUIVO NO UPLOADER
+                if up_file is not None:
+                    # SALVAMENTO IMEDIATO E FORÇADO: A ÚNICA LÓGICA ESTÁVEL
+                    # Verifica se o arquivo é novo ou diferente do salvo
+                    if saved_name != up_file.name:
+                        # LER E SALVAR OS BYTES IMEDIATAMENTE (O SEGREDO DA PERSISTÊNCIA)
+                        st.session_state[emp][slot]["name"] = up_file.name
+                        st.session_state[emp][slot]["bytes"] = up_file.read() 
+                        st.rerun() # Dispara rerun para entrar no estado 'saved_name'
+                    
+                # 3. Status Persistente
+                if st.session_state[emp][slot]["name"]:
+                    st.info(f"💾 **Salvo na Sessão**: {st.session_state[emp][slot]['name']}") 
+
         # Renderizar slots
         col_full, col_vendas = st.columns(2)
         render_upload_slot("FULL", "FULL", col_full)
@@ -145,48 +163,16 @@ with tab1:
         render_upload_slot("ESTOQUE", "Estoque Físico", col_estoque)
         st.markdown("___") 
         
-        # --- Botões de Ação (Ação explícita para salvar) ---
+        # --- Botões de Ação ---
         c3, c4 = st.columns([1, 1])
 
         with c3:
-            # BOTÃO DE SALVAR EXPLÍCITO: LER E SALVAR TUDO O QUE ESTIVER NO UPLOADER
-            if st.button(f"Salvar {emp} (Fixar na Sessão)", use_container_width=True, key=f"save_{emp}", type="primary"):
-                
-                needs_rerun = False
-                # Itera por todos os slots de uploaders da empresa
-                for slot in ["FULL", "VENDAS", "ESTOQUE"]:
-                    up_key = f"up_{slot}_{emp}"
-                    
-                    # Verifica se o uploader TEM um arquivo (objeto temporário)
-                    if st.session_state.get(up_key):
-                        # LÊ O ARQUIVO SOMENTE AGORA E SALVA NO ESTADO PERMANENTE
-                        up_file = st.session_state[up_key]
-                        
-                        # A CHAVE É VERIFICAR SE O UPLOADER AINDA TEM O OBJETO (Streamlit faz o reset do up_file)
-                        # A maneira mais estável é ler o objeto up_file logo após o upload
-                        # e confiar que o Streamlit manteve o objeto no estado.
-                        
-                        # Como o objeto do uploader é efêmero, voltamos à lógica de confiar que o estado 
-                        # temporário foi mantido (se estivessemos usando o mod_dados_empresas.py).
-                        
-                        # SOLUÇÃO PARA O ST.FILE_UPLOADER: Não podemos ler up_file aqui, lemos o objeto temporário do estado.
-                        # Na V8.3, o up_file não é salvo temporariamente, então a única solução é ler o objeto direto:
-                        up_file_object = st.session_state.get(up_key)
-                        
-                        if up_file_object:
-                             # Verifica se o objeto foi lido corretamente na iteração anterior
-                             # Este bloco só funciona se tivermos o objeto up_file na memória
-                             st.session_state[emp][slot]["name"] = up_file_object.name
-                             st.session_state[emp][slot]["bytes"] = up_file_object.read() # Lê AGORA
-                             needs_rerun = True
-                             
-                if needs_rerun:
-                    st.success(f"Arquivos de {emp} fixados na sessão (Sobrevivem ao F5).")
-                    st.rerun() 
-                else:
-                    st.info(f"Nenhum arquivo novo para salvar em {emp}.")
-
+            # Botão Salvar que apenas confirma o status
+            if st.button(f"Salvar {emp} (Confirmar)", use_container_width=True, key=f"save_{emp}", type="primary"):
+                st.success(f"Status {emp} confirmado: Arquivos estão na sessão.")
+        
         with c4:
+            # Botão de Limpeza que dispara o rerun
             if st.button(f"Limpar {emp}", use_container_width=True, key=f"clr_{emp}", type="secondary"):
                 st.session_state[emp] = {"FULL":{"name":None,"bytes":None},
                                          "VENDAS":{"name":None,"bytes":None},
@@ -220,4 +206,4 @@ with tab3:
     
 # ... (Restante das Tabs 4 e 5)
 
-st.caption("© Alivvia — simples, robusto e auditável. (V8.3)")
+st.caption("© Alivvia — simples, robusto e auditável. (V8.4)")

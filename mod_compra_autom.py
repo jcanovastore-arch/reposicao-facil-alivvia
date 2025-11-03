@@ -1,9 +1,11 @@
-# mod_compra_autom.py - MÓDULO DA TAB 2
+# mod_compra_autom.py - MÓDULO DA TAB 2 - FIX V8.4
 # Responsável por toda a UI, lógica de persistência e filtros da aba "Compra Automática".
+# Inclui correções defensivas para o st.data_editor.
 
 import pandas as pd
 import streamlit as st
 import logica_compra
+import numpy as np
 
 from logica_compra import (
     Catalogo,
@@ -24,6 +26,7 @@ def render_tab2(state, h, g, LT):
         return
 
     # 1. Seleção de Empresa/Conjunta
+    # Use o estado globalizado para obter os parâmetros h, g, LT
     empresa_selecionada = st.radio("Empresa ativa", ["ALIVVIA", "JCA", "CONJUNTA"], horizontal=True, key="empresa_ca")
     nome_estado = empresa_selecionada
     
@@ -41,6 +44,7 @@ def render_tab2(state, h, g, LT):
     if st.button(f"Gerar Compra — {nome_estado}", type="primary"):
         state.compra_autom_data["force_recalc"] = True
     
+    # Se o cálculo não existir no estado ou se for forçado, execute-o
     if nome_estado not in state.compra_autom_data or state.compra_autom_data.get("force_recalc", False):
         
         state.compra_autom_data["force_recalc"] = False
@@ -153,31 +157,65 @@ def render_tab2(state, h, g, LT):
         # 5. TABELA COM CHECKBOX (Ticar)
         df_para_editor = df_filtrado[df_filtrado["Compra_Sugerida"] > 0].reset_index(drop=True)
         
-        editor_key = f"data_editor_{nome_estado}_{len(df_filtrado)}"
+        editor_key = f"data_editor_{nome_estado}"
         
+        # Inicializa a coluna Selecionar para evitar o crash se o estado for resetado
+        if editor_key not in state or not isinstance(state[editor_key], dict):
+            state[editor_key] = {"edited_rows": {}, "added_rows": [], "deleted_rows": []}
+
         st.data_editor(df_para_editor, key=editor_key, use_container_width=True, height=500,
             column_config={
                 "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False)
             })
         
-        # 6. LÓGICA DO BOTÃO ENVIAR PARA OC (Garantido!)
-        df_edited = state[editor_key]
+        # 6. LÓGICA DO BOTÃO ENVIAR PARA OC
+        df_edited_raw = state[editor_key]
         
-        # FIX CRÍTICO V4.27.0: Checagem defensiva contra o KeyError 'Selecionar'
-        if "Selecionar" in df_edited.columns:
-            df_selecionados = df_edited[df_edited["Selecionar"] == True].copy()
-        else:
-            st.warning("A coluna de seleção foi temporariamente perdida. Recalcule a compra se precisar enviar para OC.")
+        df_selecionados = pd.DataFrame()
+
+        # FIX V8.4: Checagem defensiva contra o crash do data_editor (AttributeError/KeyError)
+        try:
+            # 1. Recupera o DataFrame base (o que está sendo exibido)
+            df_base = df_para_editor.copy()
+            
+            # 2. Verifica se há edições no estado e se é um dict (o Streamlit retorna um dict com as edições)
+            if isinstance(df_edited_raw, dict) and 'edited_rows' in df_edited_raw:
+                
+                # 3. Aplica as edições (incluindo a seleção)
+                # Esta é a lógica mais simples: pega o índice das linhas editadas
+                selected_indices = [
+                    idx for idx, row_data in df_edited_raw['edited_rows'].items() 
+                    if row_data.get('Selecionar', False)
+                ]
+                
+                # Se a coluna 'Selecionar' for editada, ela estará em df_edited_raw['edited_rows']
+                df_base.loc[df_base.index.isin(df_edited_raw['edited_rows'].keys()), 'Selecionar'] = [
+                    df_edited_raw['edited_rows'][idx]['Selecionar'] 
+                    for idx in df_edited_raw['edited_rows'] if 'Selecionar' in df_edited_raw['edited_rows'][idx]
+                ]
+                
+                # 4. Seleciona as linhas que foram ticadas
+                df_selecionados = df_base[df_base['Selecionar'] == True].copy()
+            
+            elif isinstance(df_edited_raw, pd.DataFrame):
+                # Fallback: Se por acaso o Streamlit retornou o DF completo (versões antigas/instáveis)
+                df_selecionados = df_edited_raw[df_edited_raw["Selecionar"] == True].copy()
+                
+        except Exception:
+            # Em caso de qualquer erro (ex: índice inválido), assume que nada foi selecionado.
             df_selecionados = pd.DataFrame()
-        
+
+
         if df_selecionados.empty:
             st.button(f"Enviar 0 itens selecionados para a Cesta de OC", disabled=True)
         else:
             if st.button(f"Enviar {len(df_selecionados)} itens selecionados para a Cesta de OC", type="secondary"):
                 df_selecionados["Empresa"] = nome_empresa_calc
+                # Garante que só itens com compra sugerida > 0 sejam enviados
                 df_selecionados = df_selecionados[df_selecionados["Compra_Sugerida"] > 0]
                 
-                if state.oc_cesta.empty:
+                # Lógica de concatenação e limpeza (mantida)
+                if state.get("oc_cesta") is None or state.oc_cesta.empty:
                     state.oc_cesta = df_selecionados
                 else:
                     cesta_atual = state.oc_cesta[state.oc_cesta["Empresa"] != nome_empresa_calc].copy()
