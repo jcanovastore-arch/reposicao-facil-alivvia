@@ -1,5 +1,5 @@
-# reposicao_facil.py - CÓDIGO FINAL DE ESTABILIDADE V8.5
-# Fixa o erro de cálculo (AttributeError) e garante o salvamento imediato do upload.
+# reposicao_facil.py - CÓDIGO FINAL DE ESTABILIDADE V9.0
+# Implementa a persistência robusta via CALLBACK (on_change).
 
 import datetime as dt
 import pandas as pd
@@ -39,7 +39,7 @@ try:
 except ImportError:
     pass 
 
-VERSION = "v8.5 - SOLUÇÃO FINAL DE PERSISTÊNCIA E CRASH"
+VERSION = "v9.0 - PERSISTÊNCIA VIA CALLBACK"
 
 # ===================== CONFIG E ESTADO =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -62,6 +62,25 @@ def _ensure_state():
         st.session_state[emp].setdefault("ESTOQUE",{"name": None, "bytes": None})
 
 _ensure_state()
+
+# ===================== CALLBACK DE PERSISTÊNCIA =====================
+def _save_uploaded_file_callback(empresa, slot):
+    """Função que salva os bytes do upload no session_state de forma garantida."""
+    up_key = f"up_{slot}_{empresa}"
+    
+    # O objeto do uploader está no st.session_state[key]
+    uploaded_file = st.session_state.get(up_key)
+    
+    if uploaded_file is not None:
+        # LÊ E SALVA IMEDIATAMENTE OS BYTES NO ESTADO PERMANENTE
+        st.session_state[empresa][slot]["name"] = uploaded_file.name
+        uploaded_file.seek(0) # Reseta o ponteiro de leitura
+        st.session_state[empresa][slot]["bytes"] = uploaded_file.read()
+    else:
+        # Se o usuário limpou o uploader
+        st.session_state[empresa][slot]["name"] = None
+        st.session_state[empresa][slot]["bytes"] = None
+        # st.rerun() # Não precisamos de rerun aqui, o callback já causou um
 
 # ===================== UI: SIDEBAR E PARÂMETROS =====================
 with st.sidebar:
@@ -121,7 +140,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "✨ Gerenciador de OCs"
 ])
 
-# ---------- TAB 1: UPLOADS (LÓGICA ESTÁVEL INTEGRADA - SALVAMENTO IMEDIATO) ----------
+# ---------- TAB 1: UPLOADS (LÓGICA ESTÁVEL INTEGRADA - SALVAMENTO IMEDIATO VIA CALLBACK) ----------
 with tab1:
     st.subheader("Uploads fixos por empresa (os arquivos permanecem salvos após F5)")
     st.caption("O arquivo é salvo **imediatamente** na sessão após o upload (o box azul confirma a persistência).")
@@ -135,18 +154,14 @@ with tab1:
             with col:
                 st.markdown(f"**{label} — {emp}**")
                 
-                # 1. RENDERIZA O UPLOADER SEMPRE
-                up_file = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_{slot}_{emp}")
-                
-                # 2. Ação: SE HOUVER UM ARQUIVO NO UPLOADER
-                if up_file is not None:
-                    if saved_name != up_file.name:
-                        # LER E SALVAR OS BYTES IMEDIATAMENTE
-                        st.session_state[emp][slot]["name"] = up_file.name
-                        st.session_state[emp][slot]["bytes"] = up_file.read() 
-                        st.rerun() # Dispara rerun para entrar no estado 'saved_name'
+                # 1. RENDERIZA O UPLOADER USANDO O CALLBACK DE SALVAMENTO
+                st.file_uploader("CSV/XLSX/XLS", 
+                                 type=["csv","xlsx","xls"], 
+                                 key=f"up_{slot}_{emp}",
+                                 on_change=_save_uploaded_file_callback,
+                                 args=(emp, slot))
                     
-                # 3. Status Persistente
+                # 2. Status Persistente
                 if st.session_state[emp][slot]["name"]:
                     st.info(f"💾 **Salvo na Sessão**: {st.session_state[emp][slot]['name']}") 
 
@@ -164,7 +179,7 @@ with tab1:
         c3, c4 = st.columns([1, 1])
 
         with c3:
-            # Botão Salvar que apenas confirma o status
+            # Botão Salvar que apenas confirma o status (Mantido para compatibilidade visual)
             if st.button(f"Salvar {emp} (Confirmar)", use_container_width=True, key=f"save_{emp}", type="primary"):
                 st.success(f"Status {emp} confirmado: Arquivos estão na sessão.")
         
@@ -195,7 +210,6 @@ with tab1:
 
 # ---------- TAB 2: COMPRA AUTOMÁTICA ----------
 with tab2:
-    # O módulo mod_compra_autom.py agora usa as chaves h, g, LT salvas na sessão
     mod_compra_autom.render_tab2(st.session_state, st.session_state.h, st.session_state.g, st.session_state.LT)
 
 # ---------- TAB 3: ALOCAÇÃO DE COMPRA ----------
@@ -204,4 +218,4 @@ with tab3:
     
 # ... (Restante das Tabs 4 e 5)
 
-st.caption("© Alivvia — simples, robusto e auditável. (V8.5)")
+st.caption("© Alivvia — simples, robusto e auditável. (V9.0)")
