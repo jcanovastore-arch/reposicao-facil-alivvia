@@ -1,11 +1,14 @@
-# reposicao_facil.py - ESTABILIDADE V10.0
-# Persistência em disco (.uploads), manifesto por empresa, reidratação automática,
-# correção de conflito de estado e integração com abas 2/3.
+# reposicao_facil.py - ESTABILIDADE V10.3 (Anti-Flicker)
+# - Persistência em disco (.uploads) + manifesto + reidratação automática
+# - Upload sem st.rerun() (evita "tela piscando")
+# - Prévia sob demanda (expander) + parsing cacheado
+# - Sidebar sem conflito de estado
+# - Tabs 2/3/4/5 compatíveis com seus módulos existentes
 
 import datetime as dt
 import json
+import io
 import hashlib
-from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
@@ -28,15 +31,18 @@ from logica_compra import (
     DEFAULT_SHEET_ID,
 )
 
-# MÓDULOS DE OC (opcional)
+# MÓDULOS DE OC (opcionais)
 try:
     import ordem_compra
-    import gerenciador_oc
 except Exception:
     ordem_compra = None
+
+try:
+    import gerenciador_oc
+except Exception:
     gerenciador_oc = None
 
-VERSION = "v10.0 – Sessão + Disco (.uploads) + Reidratação"
+VERSION = "v10.3 – Disco + Anti-Flicker + Cache de parsing"
 
 # ===================== CONFIG PÁGINA =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -67,7 +73,8 @@ BASE_DIR = Path(".uploads")
 BASE_DIR.mkdir(exist_ok=True)
 
 def _slug(s: str) -> str:
-    return "".join(c if c.isalnum() or c in ("-", "_") else "-" for c in (s or "").upper())
+    s = (s or "").strip()
+    return "".join(c if c.isalnum() or c in ("-", "_") else "-" for c in s.upper())
 
 def _empresa_dir(empresa: str) -> Path:
     p = BASE_DIR / _slug(empresa)
@@ -92,7 +99,10 @@ def _load_manifest(empresa: str) -> dict:
     return {}
 
 def _save_manifest(empresa: str, manifest: dict) -> None:
-    _manifest_path(empresa).write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    _manifest_path(empresa).write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
 
 def persist_to_disk(empresa: str, tipo: str, name: str, mime: str, data: bytes) -> Path:
     ext = Path(name).suffix or ""
@@ -155,21 +165,40 @@ def preload_persisted_uploads():
 
 preload_persisted_uploads()
 
-# ===================== HELPERS DE DATAFRAME =====================
-def set_upload(empresa: str, tipo: str, uploaded_file) -> None:
-    if uploaded_file is None:
-        return
-    st.session_state[empresa][tipo]["name"] = uploaded_file.name
-    st.session_state[empresa][tipo]["bytes"] = uploaded_file.getbuffer().tobytes()
+# ===================== HELPERS DE DATAFRAME / PARSING CACHEADO =====================
+@st.cache_data(show_spinner=False)
+def _parse_table_cached(name_lower: str, raw_bytes: bytes) -> Optional[pd.DataFrame]:
+    """
+    Lê o arquivo em memória de forma cacheada (chave: name_lower + sha1 dos bytes).
+    """
+    if not name_lower or not raw_bytes:
+        return None
 
-def clear_upload(empresa: str, tipo: str, also_disk: bool = True) -> None:
-    st.session_state[empresa][tipo] = {"name": None, "bytes": None}
-    if also_disk:
-        remove_from_disk(empresa, tipo)
+    # sha1 compõe a chave de cache interna do Streamlit
+    _ = hashlib.sha1(raw_bytes).hexdigest()
 
-def df_from_saved(empresa: str, tipo: str) -> Optional[pd.DataFrame]:
+    bio = io.BytesIO(raw_bytes)
+    try:
+        if name_lower.endswith(".csv"):
+            try:
+                return pd.read_csv(bio)
+            except Exception:
+                bio.seek(0)
+                return pd.read_csv(bio, sep=";")
+        elif name_lower.endswith(".xlsx") or name_lower.endswith(".xls"):
+            return pd.read_excel(bio, engine="openpyxl")
+        else:
+            return None
+    except Exception:
+        return None
+
+def df_from_saved_cached(empresa: str, tipo: str) -> Optional[pd.DataFrame]:
+    """
+    Igual ao df_from_saved, mas usando o cache de parsing + reidratação automática de disco.
+    """
     item_name = st.session_state[empresa][tipo]["name"]
     item_bytes = st.session_state[empresa][tipo]["bytes"]
+
     if not item_name or not item_bytes:
         disk_item = load_from_disk_if_any(empresa, tipo)
         if not disk_item:
@@ -179,28 +208,17 @@ def df_from_saved(empresa: str, tipo: str) -> Optional[pd.DataFrame]:
         st.session_state[empresa][tipo]["name"] = item_name
         st.session_state[empresa][tipo]["bytes"] = item_bytes
 
-    name = (item_name or "").lower()
-    bio = BytesIO(item_bytes)
-    try:
-        if name.endswith(".csv"):
-            try:
-                return pd.read_csv(bio)
-            except Exception:
-                bio.seek(0)
-                return pd.read_csv(bio, sep=";")
-        elif name.endswith(".xlsx") or name.endswith(".xls"):
-            return pd.read_excel(bio, engine="openpyxl")
-        else:
-            st.error(f"{empresa}/{tipo}: formato não suportado ({item_name}).")
-            return None
-    except Exception as e:
-        st.error(f"{empresa}/{tipo}: falha ao ler arquivo — {e}")
-        return None
+    return _parse_table_cached((item_name or "").lower(), item_bytes)
+
+def clear_upload(empresa: str, tipo: str, also_disk: bool = True) -> None:
+    st.session_state[empresa][tipo] = {"name": None, "bytes": None}
+    if also_disk:
+        remove_from_disk(empresa, tipo)
 
 # ===================== SIDEBAR / PARÂMETROS =====================
 with st.sidebar:
     st.subheader("Parâmetros")
-    # NUNCA atribuir o valor do widget diretamente ao session_state (evita APIException)
+    # Importante: não atribuir widgets a st.session_state manualmente; use key
     h  = st.selectbox("Horizonte (dias)", [30, 60, 90], index=1, key="h")
     g  = st.number_input("Crescimento % ao mês", value=0.0, step=1.0, key="g")
     LT = st.number_input("Lead time (dias)", value=0, step=1, min_value=0, key="LT")
@@ -260,7 +278,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
     ["📂 Dados das Empresas", "🧮 Compra Automática", "📦 Alocação de Compra", "🛒 Ordem de Compra (OC)", "✨ Gerenciador de OCs"]
 )
 
-# ===================== TAB 1 — UPLOADS COM PERSISTÊNCIA =====================
+# ===================== TAB 1 — UPLOADS COM PERSISTÊNCIA (ANTI-FLICKER) =====================
 with tab1:
     st.subheader("Uploads fixos por empresa (sessão + disco)")
     st.caption("Após **Salvar (Confirmar)**, o arquivo fica gravado em .uploads/ e volta sozinho após F5/restart.")
@@ -268,18 +286,21 @@ with tab1:
     def render_upload_slot(emp: str, slot: str, label: str, col):
         with col:
             st.markdown(f"**{label} — {emp}**")
-            saved_name = st.session_state[emp][slot]["name"]
 
             # Uploader sempre visível (keys estáveis)
-            up_file = st.file_uploader("CSV/XLSX/XLS", type=["csv", "xlsx", "xls"], key=f"up_{slot}_{emp}")
+            up_file = st.file_uploader(
+                "CSV/XLSX/XLS",
+                type=["csv", "xlsx", "xls"],
+                key=f"up_{slot}_{emp}"
+            )
+
+            # 1) Salva na sessão SEM chamar st.rerun() (evita flicker duplo)
             if up_file is not None:
-                set_upload(emp, slot, up_file)
-                st.rerun()
+                st.session_state[emp][slot]["name"] = up_file.name
+                st.session_state[emp][slot]["bytes"] = up_file.getbuffer().tobytes()
+                st.info(f"💾 Salvo na sessão: {up_file.name}")
 
-            # Status atual (sessão)
-            if saved_name:
-                st.info(f"💾 Salvo na sessão: {saved_name}")
-
+            # 2) Botões de ação
             c1, c2 = st.columns(2)
             with c1:
                 if st.button(f"Salvar {label} (Confirmar)", key=f"btn_save_{slot}_{emp}", use_container_width=True):
@@ -294,14 +315,22 @@ with tab1:
                 if st.button(f"Limpar {label}", key=f"btn_clear_{slot}_{emp}", use_container_width=True):
                     clear_upload(emp, slot, also_disk=True)
                     st.info("Removido da sessão e do disco.")
-                    st.rerun()
 
-            # Status de disco (se houver)
+            # 3) Status de disco (se houver)
             disk_info = load_from_disk_if_any(emp, slot)
             if disk_info:
                 short_sha = (disk_info.get("sha1") or "")[:8]
                 when = disk_info.get("saved_at") or "-"
                 st.caption(f"📦 Disco: {disk_info['name']} • {short_sha} • {when}")
+
+            # 4) Prévia só quando o usuário quiser (reduz custo de reruns)
+            with st.expander("Prévia (opcional)"):
+                dfp = df_from_saved_cached(emp, slot)
+                if dfp is not None:
+                    st.caption(f"{label}: {dfp.shape[0]} linhas / {dfp.shape[1]} colunas")
+                    st.dataframe(dfp.head(5), use_container_width=True, hide_index=True)
+                else:
+                    st.caption("(vazio)")
 
     def render_block(emp: str):
         st.markdown(f"### {emp}")
@@ -334,7 +363,6 @@ with tab1:
                 for slot in ("FULL", "VENDAS", "ESTOQUE"):
                     clear_upload(emp, slot, also_disk=True)
                 st.info(f"{emp}: sessão e disco limpos.")
-                st.rerun()
 
     # Render
     render_block("ALIVVIA")
@@ -346,25 +374,14 @@ with tab1:
             for slot in ("FULL", "VENDAS", "ESTOQUE"):
                 clear_upload(emp, slot, also_disk=True)
         st.info("Todos os dados foram limpos (sessão + disco).")
-        st.rerun()
-
-    with st.expander("Prévia (opcional)"):
-        for emp in ("ALIVVIA", "JCA"):
-            st.caption(f"Arquivos de {emp}")
-            c1, c2, c3 = st.columns(3)
-            for col, slot in zip((c1, c2, c3), ("FULL", "VENDAS", "ESTOQUE")):
-                with col:
-                    dfp = df_from_saved(emp, slot)
-                    if dfp is not None:
-                        st.caption(f"{slot}: {dfp.shape[0]} linhas / {dfp.shape[1]} colunas")
-                        st.dataframe(dfp.head(5), use_container_width=True, hide_index=True)
-                    else:
-                        st.caption(f"{slot}: (vazio)")
 
 # ===================== TAB 2 — COMPRA AUTOMÁTICA =====================
 with tab2:
-    # Passe variáveis locais (não atribua widgets a session_state)
-    mod_compra_autom.render_tab2(st.session_state, h, g, LT)
+    # Passe variáveis locais (não atribua widgets ao session_state)
+    h_val = h
+    g_val = g
+    lt_val = LT
+    mod_compra_autom.render_tab2(st.session_state, h_val, g_val, lt_val)
 
 # ===================== TAB 3 — ALOCAÇÃO DE COMPRA =====================
 with tab3:
