@@ -163,7 +163,6 @@ def render_tab2(state, h, g, LT):
         
         # FIX V8.5: Inicialização DEFENSIVA do estado do editor
         if editor_key not in state or not isinstance(state[editor_key], dict):
-            # Assegura que o estado seja inicializado como um dicionário vazio
             state[editor_key] = {} 
 
         st.data_editor(df_para_editor, key=editor_key, use_container_width=True, height=500,
@@ -182,30 +181,23 @@ def render_tab2(state, h, g, LT):
             
             if isinstance(df_edited_raw, dict) and 'edited_rows' in df_edited_raw:
                 
-                # Aplica as edições (focando apenas no que foi editado para 'Selecionar')
                 edited_indices = df_edited_raw['edited_rows'].keys()
                 
-                # Se houver linhas editadas, atualiza a coluna 'Selecionar' no DF base
                 if edited_indices:
-                    # Cria uma série booleana baseada nas edições
                     selecao_editada = pd.Series([False] * len(df_base), index=df_base.index)
                     
                     for idx, row_data in df_edited_raw['edited_rows'].items():
                         if 'Selecionar' in row_data:
                             selecao_editada.loc[idx] = row_data['Selecionar']
                     
-                    # Atualiza a coluna Selecionar no DF base
                     df_base['Selecionar'] = selecao_editada.combine_first(df_base['Selecionar'])
                 
-                # 4. Seleciona as linhas que foram ticadas
                 df_selecionados = df_base[df_base['Selecionar'] == True].copy()
             
             else:
-                # Caso o estado do editor seja vazio ou não contenha 'edited_rows'
                 df_selecionados = pd.DataFrame()
                 
         except Exception:
-            # Em caso de qualquer erro no processamento, assume que nada foi selecionado
             df_selecionados = pd.DataFrame()
 
 

@@ -1,19 +1,18 @@
-# reposicao_facil.py - CÓDIGO FINAL DE ESTABILIDADE V9.0
-# Implementa a persistência robusta via CALLBACK (on_change).
+# reposicao_facil.py - CÓDIGO FINAL DE ESTABILIDADE V9.1
+# Implementa a persistência síncrona (leitura e salvamento imediato) para o upload.
 
 import datetime as dt
 import pandas as pd
 import streamlit as st
-import io # Necessário para a leitura dos bytes
-import re # Necessário para funções de lógica
-import hashlib # Necessário para funções de lógica
-from dataclasses import dataclass # Necessário para Catalogo
-from typing import Optional, Tuple # Necessário para tipagem
-import numpy as np # Necessário para cálculos
-from unidecode import unidecode # Necessário para normalização
-import requests # Necessário para downloads
-from requests.adapters import HTTPAdapter, Retry # Necessário para downloads
-
+import io 
+import re 
+import hashlib 
+from dataclasses import dataclass 
+from typing import Optional, Tuple 
+import numpy as np 
+from unidecode import unidecode 
+import requests 
+from requests.adapters import HTTPAdapter, Retry 
 
 # MÓDULOS MODULARIZADOS
 import logica_compra 
@@ -39,7 +38,7 @@ try:
 except ImportError:
     pass 
 
-VERSION = "v9.0 - PERSISTÊNCIA VIA CALLBACK"
+VERSION = "v9.1 - PERSISTÊNCIA SÍNCRONA FINAL"
 
 # ===================== CONFIG E ESTADO =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -62,25 +61,6 @@ def _ensure_state():
         st.session_state[emp].setdefault("ESTOQUE",{"name": None, "bytes": None})
 
 _ensure_state()
-
-# ===================== CALLBACK DE PERSISTÊNCIA =====================
-def _save_uploaded_file_callback(empresa, slot):
-    """Função que salva os bytes do upload no session_state de forma garantida."""
-    up_key = f"up_{slot}_{empresa}"
-    
-    # O objeto do uploader está no st.session_state[key]
-    uploaded_file = st.session_state.get(up_key)
-    
-    if uploaded_file is not None:
-        # LÊ E SALVA IMEDIATAMENTE OS BYTES NO ESTADO PERMANENTE
-        st.session_state[empresa][slot]["name"] = uploaded_file.name
-        uploaded_file.seek(0) # Reseta o ponteiro de leitura
-        st.session_state[empresa][slot]["bytes"] = uploaded_file.read()
-    else:
-        # Se o usuário limpou o uploader
-        st.session_state[empresa][slot]["name"] = None
-        st.session_state[empresa][slot]["bytes"] = None
-        # st.rerun() # Não precisamos de rerun aqui, o callback já causou um
 
 # ===================== UI: SIDEBAR E PARÂMETROS =====================
 with st.sidebar:
@@ -140,7 +120,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "✨ Gerenciador de OCs"
 ])
 
-# ---------- TAB 1: UPLOADS (LÓGICA ESTÁVEL INTEGRADA - SALVAMENTO IMEDIATO VIA CALLBACK) ----------
+# ---------- TAB 1: UPLOADS (LÓGICA ESTÁVEL INTEGRADA - SALVAMENTO IMEDIATO) ----------
 with tab1:
     st.subheader("Uploads fixos por empresa (os arquivos permanecem salvos após F5)")
     st.caption("O arquivo é salvo **imediatamente** na sessão após o upload (o box azul confirma a persistência).")
@@ -154,14 +134,20 @@ with tab1:
             with col:
                 st.markdown(f"**{label} — {emp}**")
                 
-                # 1. RENDERIZA O UPLOADER USANDO O CALLBACK DE SALVAMENTO
-                st.file_uploader("CSV/XLSX/XLS", 
-                                 type=["csv","xlsx","xls"], 
-                                 key=f"up_{slot}_{emp}",
-                                 on_change=_save_uploaded_file_callback,
-                                 args=(emp, slot))
+                # 1. RENDERIZA O UPLOADER SEMPRE
+                up_file = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_{slot}_{emp}")
+                
+                # 2. Ação: SE HOUVER UM ARQUIVO NO UPLOADER
+                if up_file is not None:
+                    # FIX V9.1: GARANTIA DE PERSISTÊNCIA SÍNCRONA
+                    if saved_name != up_file.name:
+                        # Reseta o ponteiro de leitura e garante que os bytes sejam lidos AGORA
+                        up_file.seek(0)
+                        st.session_state[emp][slot]["bytes"] = up_file.read() 
+                        st.session_state[emp][slot]["name"] = up_file.name
+                        st.rerun() # Dispara rerun para entrar no estado 'saved_name'
                     
-                # 2. Status Persistente
+                # 3. Status Persistente
                 if st.session_state[emp][slot]["name"]:
                     st.info(f"💾 **Salvo na Sessão**: {st.session_state[emp][slot]['name']}") 
 
@@ -179,7 +165,7 @@ with tab1:
         c3, c4 = st.columns([1, 1])
 
         with c3:
-            # Botão Salvar que apenas confirma o status (Mantido para compatibilidade visual)
+            # Botão Salvar que apenas confirma o status
             if st.button(f"Salvar {emp} (Confirmar)", use_container_width=True, key=f"save_{emp}", type="primary"):
                 st.success(f"Status {emp} confirmado: Arquivos estão na sessão.")
         
@@ -218,4 +204,4 @@ with tab3:
     
 # ... (Restante das Tabs 4 e 5)
 
-st.caption("© Alivvia — simples, robusto e auditável. (V9.0)")
+st.caption("© Alivvia — simples, robusto e auditável. (V9.1)")
