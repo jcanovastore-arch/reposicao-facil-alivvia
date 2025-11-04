@@ -1,6 +1,7 @@
-# reposicao_facil.py - ESTABILIDADE V10.9 (Fix Cesta + Reativa Tab 3)
-# - Corrige o bug da cesta (oc_cesta -> oc_cesta_itens)
-# - Reativa o nome da Tab 3 ("Alocação de Compra")
+# reposicao_facil.py - ESTABILIDADE V10.10
+# - FIX: Corrige o bug da cesta (oc_cesta -> oc_cesta_itens)
+# - FIX: Reativa o nome da Tab 3 ("Alocação de Compra")
+# - Mantém o V10.3 (persistência, anti-flicker)
 
 import datetime as dt
 import json
@@ -39,7 +40,7 @@ try:
 except Exception:
     gerenciador_oc = None
 
-VERSION = "v10.9 – Crash Fix + Fluxo Alocação Correto"
+VERSION = "v10.10 – Crash Fix + Fluxo Conjunta/Alocação Correto"
 
 # ===================== CONFIG PÁGINA =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -49,15 +50,18 @@ DEFAULT_SHEET_LINK = (
     "edit?usp=sharing&ouid=109458533144345974874&rtpof=true&sd=true"
 )
 
-# ===================== ESTADO INICIAL (CORRIGIDO V10.9) =====================
+# ===================== ESTADO INICIAL (CORRIGIDO V10.10) =====================
 def _ensure_state():
     st.session_state.setdefault("catalogo_df", None)
     st.session_state.setdefault("kits_df", None)
     st.session_state.setdefault("loaded_at", None)
     st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK)
     
-    # CHAVE CORRETA (Fix V10.7)
+    # =====================================================================
+    # >> INÍCIO DA CORREÇÃO (V10.10) - O Bug da Cesta <<
+    # A chave correta é 'oc_cesta_itens' (um dict), não 'oc_cesta' (um df).
     st.session_state.setdefault("oc_cesta_itens", {"ALIVVIA": [], "JCA": []})
+    # =====================================================================
     
     st.session_state.setdefault("compra_autom_data", {})
     for emp in ("ALIVVIA", "JCA"):
@@ -69,6 +73,7 @@ def _ensure_state():
 _ensure_state()
 
 # ===================== PERSISTÊNCIA LOCAL (.uploads) =====================
+# (Esta seção V10.3 permanece inalterada)
 BASE_DIR = Path(".uploads")
 BASE_DIR.mkdir(exist_ok=True)
 
@@ -154,7 +159,6 @@ def load_from_disk_if_any(empresa: str, tipo: str) -> Optional[dict]:
         return None
 
 def preload_persisted_uploads():
-    """Se sessão estiver vazia, carrega do disco para sessão (ao iniciar/entrar na Tab 1)."""
     for emp in ("ALIVVIA", "JCA"):
         for tipo in ("FULL", "VENDAS", "ESTOQUE"):
             if not st.session_state[emp][tipo]["name"]:
@@ -259,22 +263,22 @@ with st.sidebar:
             st.session_state.loaded_at = None
             st.error(f"Erro ao carregar do link: {str(e)}")
 
-# ===================== TÍTULO E ABAS (CORRIGIDO V10.9) =====================
+# ===================== TÍTULO E ABAS (CORRIGIDO V10.10) =====================
 st.title("Reposição Logística — Alivvia")
 if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
     st.warning("► Carregue o **Padrão (KITS/CAT)** no sidebar antes de usar as abas.")
 
 # =================================================================
-# >> INÍCIO DA CORREÇÃO (V10.9) - Reativa Tab 3 <<
+# >> INÍCIO DA CORREÇÃO (V10.10) - Reativa Tab 3 <<
 # =================================================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     ["📂 Dados das Empresas", "🧮 Compra Automática", "📦 Alocação de Compra", "🛒 Ordem de Compra (OC)", "✨ Gerenciador de OCs"]
 )
 # =================================================================
-# >> FIM DA CORREÇÃO (V10.9) <<
+# >> FIM DA CORREÇÃO (V10.10) <<
 # =================================================================
 
-# ===================== TAB 1 — UPLOADS COM PERSISTÊNCIA (ANTI-FLICKER) =====================
+# ===================== TAB 1 — UPLOADS (V10.3) =====================
 with tab1:
     st.subheader("Uploads fixos por empresa (sessão + disco)")
     st.caption("Após **Salvar (Confirmar)**, o arquivo fica gravado em .uploads/ e volta sozinho após F5/restart.")
