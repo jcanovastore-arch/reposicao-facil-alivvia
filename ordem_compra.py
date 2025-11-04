@@ -2,8 +2,8 @@
 # - FIX: (V10.14) Corrige KeyError: 'Compra_Sugerida' (cesta vazia)
 # - NOVO: (V10.15) Formulário "Adicionar Item Manual" com auto-preço
 # - NOVO: (V10.15) Lógica de "Auto-Download" (botão aparece após salvar)
-# - FIX: (V10.15) Move seletor de Fornecedor para fora do form (corrige bug)
-# - INFO: Explica a limitação da data (requisitado em)
+# - FIX: (V10.15) Move seletor de Fornecedor para fora do form
+# - INFO: Explica a limitação da data
 # - Mantém (V10.8) Persistência via SQLite
 
 import json
@@ -246,7 +246,7 @@ def gerar_html_oc(oc_data: Dict[str, Any]) -> str:
 def display_oc_interface(state):
     _init_cesta()
     
-    # (Req 7) Lógica de Auto-Download
+    # Lógica de Auto-Download
     if state.oc_just_saved_html:
         oc_id = state.oc_just_saved_id
         html_content = state.oc_just_saved_html
@@ -259,7 +259,6 @@ def display_oc_interface(state):
                 file_name=f"OC_{oc_id}.html",
                 mime="text/html",
             )
-            # st.button("Imprimir") # (Requer componente extra, omitido por simplicidade)
         
         # Limpa o estado
         state.oc_just_saved_html = None
@@ -286,7 +285,7 @@ def display_oc_interface(state):
     
     
     # =================================================================
-    # >> INÍCIO (V10.15) - (Req 6) Adicionar Item Manual <<
+    # >> INÍCIO (V10.15) - Adicionar Item Manual
     # =================================================================
     with st.expander("Adicionar Item Manual (Auto-Preço)"):
         with st.form(key="form_add_manual"):
@@ -340,10 +339,9 @@ def display_oc_interface(state):
     st.subheader(f"Cesta de Itens para {empresa} ({len(df_cesta_display)} SKUs)")
 
     # =================================================================
-    # >> INÍCIO (V10.15) - (Fix) Move Seletor para Fora do Form <<
+    # >> INÍCIO (V10.15) - Move Seletor para Fora do Form
     # =================================================================
     
-    # Filtra o DF *antes* de passar para o editor, para o selectbox de fornecedor
     df_final_para_salvar = df_cesta_display.copy()
     df_final_para_salvar["Qtd_Comprar"] = pd.to_numeric(df_final_para_salvar["Qtd_Comprar"], errors="coerce").fillna(0).astype(int)
     df_final_para_salvar["Preco"] = pd.to_numeric(df_final_para_salvar["Preco"], errors="coerce").fillna(0.0)
@@ -402,7 +400,6 @@ def display_oc_interface(state):
         col1, col2 = st.columns(2)
         condicao_pgto = col1.selectbox("Condição de Pagamento", ["À Vista", "Boleto 30/60/90", "Outra"], key=f"pgto_{empresa}")
         
-        # (Req 5) Data
         data_prevista = col2.date_input("Data Prevista de Entrega", value=dt.date.today() + dt.timedelta(days=15), key=f"data_prev_{empresa}")
         st.caption("Nota: O seletor de data usa o formato AAAA/MM/DD, mas a OC será salva e impressa como DD/MM/AAAA.")
 
@@ -428,13 +425,12 @@ def display_oc_interface(state):
                         oc_id_final = salvar_oc(oc_data)
                         oc_data["OC_ID"] = oc_id_final # Atualiza com o ID real
                         
-                        # (Req 7) Prepara o Auto-Download
+                        # Prepara o Auto-Download
                         html_para_download = gerar_html_oc(oc_data)
                         state.oc_just_saved_html = html_para_download
                         state.oc_just_saved_id = oc_id_final
                         
                         # Limpa os itens salvos da cesta
-                        # (df_final é o DF completo do editor)
                         state.oc_cesta_itens[empresa] = df_final[
                             df_final["fornecedor"] != fornec_selecionado
                         ].to_dict("records")

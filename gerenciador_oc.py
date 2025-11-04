@@ -154,13 +154,9 @@ def display_gerenciador_interface(state):
     # --- PAINEL DE AÇÕES (SELECIONAR OC) ---
     st.subheader("Ações e Detalhes da OC")
     
-    # Pega o ID da OC da(s) linha(s) selecionada(s) no editor
-    # (data_editor retorna uma lista de dicts das linhas editadas, 
-    # mas para seleção, precisamos de um workaround ou usar st.selectbox)
-    
     oc_id_selecionada = st.selectbox(
         "Selecione uma OC para ver detalhes ou dar baixa:",
-        options=df_ocs["OC Nº"].unique().tolist() # Usa a coluna renomeada
+        options=df_ocs["OC_ID"].unique().tolist()
     )
 
     if not oc_id_selecionada:
@@ -200,12 +196,8 @@ def display_gerenciador_interface(state):
         df_itens = pd.DataFrame()
 
     # =================================================================
-    # >> INÍCIO DA CORREÇÃO (V10.15) - (Fix) <<
+    # >> INÍCIO DA CORREÇÃO (V10.15)
     # =================================================================
-    # O erro é 'VALOR_TOTAL_R$ duplicado'.
-    # O merge abaixo estava causando isso. Renomeando colunas.
-    
-    # Tenta fundir com o catálogo para obter fornecedor (se estiver faltando)
     if state.catalogo_df is not None:
         df_cat = state.catalogo_df[["sku", "fornecedor"]].rename(columns={"sku": "SKU"})
         df_itens = df_itens.merge(df_cat, on="SKU", how="left", suffixes=("_oc", "_cat"))
@@ -215,14 +207,11 @@ def display_gerenciador_interface(state):
             df_itens["fornecedor_oc"]
         )
     
-    # Colunas esperadas pelo editor
     cols_editor_baixa = [
         "fornecedor", "SKU", "Compra_Sugerida", "Preco", "Valor_Compra_R$",
         "Qtd_Recebida", "NF_OK"
     ]
-    # Garante que colunas_editor só tenha colunas que *realmente* existem no df_itens
-    cols_existentes = [col for col in cols_editor_baixa if col in df_itens.columns]
-    df_itens_display = df_itens[cols_existentes].copy()
+    df_itens_display = df_itens[[col for col in cols_editor_baixa if col in df_itens.columns]].copy()
     # =================================================================
     # >> FIM DA CORREÇÃO (V10.15) <<
     # =================================================================

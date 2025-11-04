@@ -1,4 +1,4 @@
-# mod_compra_autom.py - TAB 2 - V10.12 (Reemissão V10.15)
+# mod_compra_autom.py - TAB 2 - V10.12
 # - FIX: Corrige o KeyError: 'fornecedor - ALIVVIA' (V10.10) na lógica de merge.
 # - Mantém o Novo Fluxo Conjunta (Mesclado + Botão Inteligente)
 # - Mantém o Fix do @st.cache_data (V10.9)
@@ -268,7 +268,7 @@ def renderizar_painel_conjunta(df_conjunta_mesclada, state):
                 st.error(f"Erro ao enviar para a cesta: {e}")
 
 
-# Função principal (Render) - V10.12 (com fix V10.11)
+# Função principal (Render)
 def render_tab2(state, h, g, LT):
     st.subheader("Gerar Compra (por empresa ou conjunta) — lógica original")
 
@@ -363,7 +363,7 @@ def render_tab2(state, h, g, LT):
             st.error(str(e))
             return
 
-    # Renderização (V10.11 - Stale Cache Fix)
+    # Renderização de resultados (V10.11 - Stale Cache Fix)
     if nome_estado in state.compra_autom_data and "df" in state.compra_autom_data[nome_estado]:
         data_fixa = state.compra_autom_data[nome_estado]
         
@@ -373,8 +373,8 @@ def render_tab2(state, h, g, LT):
             
             if coluna_necessaria_v10_10 not in df_cache_conjunta.columns:
                 st.warning("Detectamos uma mudança de versão. Limpando cache de 'Compra Conjunta' e recarregando...")
-                del state.compra_autom_data["CONJUNTA"]
-                st.rerun()
+                del state.compra_autom_data["CONJUNTA"] # Limpa o cache
+                st.rerun() # Força o recalculo
             else:
                 renderizar_painel_conjunta(df_cache_conjunta.copy(), state)
         

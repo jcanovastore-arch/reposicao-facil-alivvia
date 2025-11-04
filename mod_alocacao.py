@@ -1,4 +1,4 @@
-# mod_alocacao.py - TAB 3 - V10.12 (Reemissão V10.15)
+# mod_alocacao.py - TAB 3 - V10.12
 # - FIX: Corrige o KeyError: "'Preco' not in index" (V10.10)
 # - FIX: A função 'calcular_proporcoes_venda' agora lê os arquivos de ESTOQUE
 #   para obter o "Preco", em vez de procurar no Catálogo.
@@ -33,6 +33,9 @@ def _get_bytes_from_state(state, emp, k):
         return slot_data["name"], slot_data["bytes"]
     return None, None
 
+# =================================================================
+# >> INÍCIO DA CORREÇÃO (V10.12) - KeyError 'Preco' <<
+# =================================================================
 @st.cache_data(show_spinner="Calculando proporções de venda...")
 def calcular_proporcoes_venda(_state): # FIX V10.9: _state
     """
@@ -131,6 +134,9 @@ def calcular_proporcoes_venda(_state): # FIX V10.9: _state
     demandas_finais["Preco"] = pd.to_numeric(demandas_finais["Preco"], errors='coerce').fillna(0.0)
     
     return demandas_finais
+# =================================================================
+# >> FIM DA CORREÇÃO (V10.12) <<
+# =================================================================
 
 
 def render_tab3(state):

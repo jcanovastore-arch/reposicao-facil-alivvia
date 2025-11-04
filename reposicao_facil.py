@@ -68,7 +68,6 @@ _ensure_state()
 BASE_DIR = Path(".uploads")
 BASE_DIR.mkdir(exist_ok=True)
 
-# (Funções de persistência _slug, _empresa_dir, etc... idênticas V10.16)
 def _slug(s: str) -> str:
     s = (s or "").strip()
     return "".join(c if c.isalnum() or c in ("-", "_") else "-" for c in s.upper())
@@ -143,7 +142,6 @@ preload_persisted_uploads()
 # ===================== HELPERS DE DATAFRAME / PARSING CACHEADO =====================
 @st.cache_data(show_spinner=False)
 def _parse_table_cached(name_lower: str, raw_bytes: bytes) -> Optional[pd.DataFrame]:
-    # (Função idêntica à V10.16)
     if not name_lower or not raw_bytes: return None
     _ = hashlib.sha1(raw_bytes).hexdigest()
     bio = io.BytesIO(raw_bytes)
@@ -157,7 +155,6 @@ def _parse_table_cached(name_lower: str, raw_bytes: bytes) -> Optional[pd.DataFr
     except Exception: return None
 
 def df_from_saved_cached(empresa: str, tipo: str) -> Optional[pd.DataFrame]:
-    # (Função idêntica à V10.16)
     item_name = st.session_state[empresa][tipo]["name"]
     item_bytes = st.session_state[empresa][tipo]["bytes"]
     if not item_name or not item_bytes:
@@ -273,7 +270,6 @@ with st.sidebar:
     with colB:
         st.link_button("🔗 Abrir no Drive (editar)", DEFAULT_SHEET_LINK, use_container_width=True)
 
-    # (Lógica do link alternativo idêntica V10.16)
     st.text_input(
         "Link alternativo do Google Sheets (opcional)",
         key="alt_sheet_link",
@@ -311,7 +307,6 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 
 # ===================== TAB 1 — UPLOADS (V10.3) =====================
 with tab1:
-    # (Código da Tab 1 idêntico V10.16)
     st.subheader("Uploads fixos por empresa (sessão + disco)")
     st.caption("Após **Salvar (Confirmar)**, o arquivo fica gravado em .uploads/ e volta sozinho após F5/restart.")
 
