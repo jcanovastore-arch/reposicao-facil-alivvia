@@ -1,9 +1,7 @@
-# ordem_compra.py - Módulo de Lógica de Ordem de Compra (V10.15)
-# - FIX: (V10.14) Corrige KeyError: 'Compra_Sugerida' (cesta vazia)
-# - NOVO: (V10.15) Formulário "Adicionar Item Manual" com auto-preço
-# - NOVO: (V10.15) Lógica de "Auto-Download" (botão aparece após salvar)
-# - FIX: (V10.15) Move seletor de Fornecedor para fora do form
-# - INFO: Explica a limitação da data
+# ordem_compra.py - Módulo de Lógica de Ordem de Compra (V11.0 - Sincronização Total)
+# - FIX: Corrige KeyError: 'Compra_Sugerida' (cesta vazia) (V10.14)
+# - NOVO: Formulário "Adicionar Item Manual" com auto-preço (V10.15)
+# - NOVO: Lógica de "Auto-Download" (botão aparece após salvar)
 # - Mantém (V10.8) Persistência via SQLite
 
 import json
@@ -55,7 +53,8 @@ def _get_db_connection() -> sqlite3.Connection:
         return conn
     except Exception as e:
         st.error(f"Erro Crítico de Conexão com o Banco de Dados: {e}")
-        st.stop()
+        # Não faz st.stop() para permitir testes offline/sem DB
+        raise RuntimeError(f"Erro no DB: {e}")
 
 
 # --- GESTÃO DA CESTA (RAM) ---
@@ -69,6 +68,12 @@ def adicionar_itens_cesta(empresa: str, df: pd.DataFrame):
     """Adiciona itens à cesta (lógica V10.10)."""
     _init_cesta()
     cesta_atual = st.session_state.oc_cesta_itens.get(empresa, [])
+    # Garante que df contenha as colunas essenciais
+    COLUNAS_ESSENCIAIS = ["SKU", "fornecedor", "Preco", "Compra_Sugerida", "Valor_Compra_R$"]
+    for col in COLUNAS_ESSENCIAIS:
+        if col not in df.columns:
+            raise ValueError(f"DF de itens da cesta deve ter a coluna '{col}'.")
+
     itens_para_processar = df.to_dict("records")
     sku_existente_map = {item["SKU"]: item for item in cesta_atual}
 
@@ -97,7 +102,6 @@ def adicionar_item_manual_cesta(empresa: str, fornecedor: str, sku: str, preco: 
     _init_cesta()
     cesta_atual = st.session_state.oc_cesta_itens.get(empresa, [])
     
-    # Verifica se já existe
     item_existente = next((item for item in cesta_atual if item["SKU"] == sku), None)
     
     if item_existente:
@@ -143,8 +147,8 @@ def salvar_oc(oc_data: Dict[str, Any]):
             oc_data["OC_ID"],
             oc_data["EMPRESA"],
             oc_data["FORNECEDOR"],
-            oc_data["DATA_OC"].strftime("%Y-%m-%d"), # Salva no DB em formato ISO
-            oc_data["DATA_PREVISTA"].strftime("%Y-%m-%d"), # Salva no DB em formato ISO
+            oc_data["DATA_OC"].strftime("%Y-%m-%d"),
+            oc_data["DATA_PREVISTA"].strftime("%Y-%m-%d"),
             oc_data["CONDICAO_PGTO"],
             oc_data["VALOR_TOTAL_R$"],
             oc_data["STATUS"],
@@ -160,19 +164,23 @@ def salvar_oc(oc_data: Dict[str, Any]):
         conn.close()
 
 
-# --- FUNÇÃO DE IMPRESSÃO (V10.15 - Limpeza) ---
+# --- FUNÇÃO DE IMPRESSÃO ---
 def gerar_html_oc(oc_data: Dict[str, Any]) -> str:
     """Gera o HTML de uma OC para impressão/download."""
-    itens = json.loads(oc_data.get("ITENS_JSON", "[]"))
+    itens = oc_data.get("ITENS_JSON", []) # Assume que é uma lista de dicts
+    if isinstance(itens, str):
+        try: itens = json.loads(itens)
+        except: itens = []
+        
     itens_html = ""
     for item in itens:
         itens_html += f"""
         <tr>
             <td style="width: 15%;">{item.get('SKU', '-')}</td>
             <td style="width: 30%;">{item.get('fornecedor', '-')}</td>
-            <td style="width: 10%; text-align: center;">{item.get('Compra_Sugerida', 0)}</td>
-            <td style="width: 15%; text-align: right;">R$ {item.get('Preco', 0.0):.2f}</td>
-            <td style="width: 15%; text-align: right; font-weight: bold;">R$ {item.get('Valor_Compra_R$', 0.0):.2f}</td>
+            <td style="width: 10%; text-align: center;">{int(item.get('Compra_Sugerida', 0))}</td>
+            <td style="width: 15%; text-align: right;">R$ {float(item.get('Preco', 0.0)):.2f}</td>
+            <td style="width: 15%; text-align: right; font-weight: bold;">R$ {float(item.get('Valor_Compra_R$', 0.0)):.2f}</td>
             <td style="width: 10%; background: #ddd;"></td>
             <td style="width: 10%; background: #ddd;"></td>
         </tr>
@@ -181,23 +189,18 @@ def gerar_html_oc(oc_data: Dict[str, Any]) -> str:
     empresa = oc_data.get("EMPRESA", "ALIVVIA")
     
     # Formato de Data BR (V10.8)
-    try:
-        data_oc_obj = oc_data["DATA_OC"]
-        if isinstance(data_oc_obj, str): data_oc_obj = dt.datetime.strptime(data_oc_obj, "%Y-%m-%d")
-        data_oc_str = data_oc_obj.strftime("%d/%m/%Y")
-    except Exception:
-        data_oc_str = str(oc_data.get("DATA_OC", "-"))
-        
-    try:
-        data_prev_obj = oc_data["DATA_PREVISTA"]
-        if isinstance(data_prev_obj, str): data_prev_obj = dt.datetime.strptime(data_prev_obj, "%Y-%m-%d")
-        data_prev_str = data_prev_obj.strftime("%d/%m/%Y")
-    except Exception:
-        data_prev_str = str(oc_data.get("DATA_PREVISTA", "-"))
+    def _formatar_data(data):
+        if isinstance(data, dt.date): return data.strftime("%d/%m/%Y")
+        if isinstance(data, str):
+            try: return dt.datetime.strptime(data, "%Y-%m-%d").strftime("%d/%m/%Y")
+            except: pass
+        return str(data or "-")
+
+    data_oc_str = _formatar_data(oc_data.get("DATA_OC"))
+    data_prev_str = _formatar_data(oc_data.get("DATA_PREVISTA"))
 
     html = f"""
     <style>
-        /* (Estilos CSS omitidos para brevidade) */
         @media print {{ @page {{ size: A4; margin: 1cm; }} }}
         .oc-container {{ font-family: Arial, sans-serif; font-size: 10pt; border: 1px solid black; padding: 10px; }}
         .oc-header {{ border-bottom: 2px solid black; display: flex; justify-content: space-between; margin-bottom: 15px; }}
@@ -211,7 +214,7 @@ def gerar_html_oc(oc_data: Dict[str, Any]) -> str:
         <div class='oc-header'>
             <div style="width: 50%;">
                 <img src="{LOGO_URLS.get(empresa, '')}" alt="Logo Empresa">
-                <p style="font-size: 8pt;">{DADOS_EMPRESAS[empresa]['nome']}<br>CNPJ: {DADOS_EMPRESAS[empresa]['cnpj']}</p>
+                <p style="font-size: 8pt;">{DADOS_EMPRESAS.get(empresa, {}).get('nome', 'N/A')}<br>CNPJ: {DADOS_EMPRESAS.get(empresa, {}).get('cnpj', 'N/A')}</p>
             </div>
             <div style="text-align: right; width: 50%;">
                 <h2 style="margin: 0;">ORDEM DE COMPRA</h2>
@@ -219,7 +222,7 @@ def gerar_html_oc(oc_data: Dict[str, Any]) -> str:
                 <p>Data Emissão: {data_oc_str}</p>
             </div>
         </div>
-        <p><strong>FORNECEDOR:</strong> {oc_data["FORNECEDOR"]}</p>
+        <p><strong>FORNECEDOR:</strong> {oc_data.get("FORNECEDOR", '-')}</p>
         <p><strong>DATA PREVISTA:</strong> {data_prev_str}</p>
         <div class='oc-items'>
             <table>
@@ -235,18 +238,18 @@ def gerar_html_oc(oc_data: Dict[str, Any]) -> str:
             </table>
         </div>
         <div class='oc-footer'>
-            <p style="text-align: right; font-weight: bold;">TOTAL OC: R$ {oc_data["VALOR_TOTAL_R$"]:,.2f}</p>
+            <p style="text-align: right; font-weight: bold;">TOTAL OC: R$ {float(oc_data.get('VALOR_TOTAL_R$', 0.0)):,.2f}</p>
             <p>Assinatura Recebedor: _________________________</p>
         </div>
     </div>
     """
     return html
 
-# --- FUNÇÃO PRINCIPAL DA ABA DE GERAÇÃO OC (FIX V10.15) ---
+# --- FUNÇÃO PRINCIPAL DA ABA DE GERAÇÃO OC ---
 def display_oc_interface(state):
     _init_cesta()
     
-    # Lógica de Auto-Download
+    # Lógica de Auto-Download (V10.15)
     if state.oc_just_saved_html:
         oc_id = state.oc_just_saved_id
         html_content = state.oc_just_saved_html
@@ -260,12 +263,10 @@ def display_oc_interface(state):
                 mime="text/html",
             )
         
-        # Limpa o estado
         state.oc_just_saved_html = None
         state.oc_just_saved_id = None
     
     empresa = st.radio("Empresa para OC", ["ALIVVIA", "JCA"], horizontal=True, key="oc_emp_radio")
-    
     cesta_itens = state.oc_cesta_itens.get(empresa, [])
 
     if state.catalogo_df is None or state.catalogo_df.empty:
@@ -276,7 +277,6 @@ def display_oc_interface(state):
     if "Preco" not in df_catalogo.columns: df_catalogo["Preco"] = 0.0
     if "fornecedor" not in df_catalogo.columns: df_catalogo["fornecedor"] = "N/A"
     
-    # Limpa dados nulos para os seletores
     df_catalogo["fornecedor"] = df_catalogo["fornecedor"].fillna("N/A").astype(str)
     df_catalogo["Preco"] = pd.to_numeric(df_catalogo["Preco"], errors='coerce').fillna(0.0)
     
@@ -284,17 +284,13 @@ def display_oc_interface(state):
     cat_fornecedores = [f for f in cat_fornecedores if f and f != "N/A"]
     
     
-    # =================================================================
-    # >> INÍCIO (V10.15) - Adicionar Item Manual
-    # =================================================================
+    # Adicionar Item Manual
     with st.expander("Adicionar Item Manual (Auto-Preço)"):
         with st.form(key="form_add_manual"):
             c1, c2, c3, c4 = st.columns([2, 3, 1, 1])
             
-            # 1. Seleciona Fornecedor
             forn_manual = c1.selectbox("Fornecedor", options=cat_fornecedores, key="manual_forn")
             
-            # 2. Filtra SKUs por Fornecedor
             if forn_manual:
                 skus_do_forn = df_catalogo[df_catalogo["fornecedor"] == forn_manual]["sku"].unique().tolist()
             else:
@@ -302,7 +298,6 @@ def display_oc_interface(state):
             
             sku_manual = c2.selectbox("SKU (filtrado por fornecedor)", options=skus_do_forn, key="manual_sku")
             
-            # 3. Puxa Preço
             preco_manual = 0.0
             if sku_manual:
                 preco_manual = df_catalogo[df_catalogo["sku"] == sku_manual]["Preco"].values[0]
@@ -318,19 +313,17 @@ def display_oc_interface(state):
                 else:
                     adicionar_item_manual_cesta(empresa, forn_manual, sku_manual, preco_manual, qtd_manual)
                     st.success(f"Adicionado: {qtd_manual}x {sku_manual}")
-                    st.rerun() # Recarrega para atualizar a cesta
-    # =================================================================
-    # >> FIM (V10.15) - Adicionar Item Manual <<
-    # =================================================================
+                    st.rerun()
 
-    # (Fix V10.14) - Corrige KeyError 'Compra_Sugerida'
+    # Cesta de Itens
     df_cesta = pd.DataFrame(cesta_itens)
     colunas_editor = ["fornecedor", "SKU", "Qtd_Comprar", "Preco", "Valor_Total"]
 
     if not df_cesta.empty:
-        df_cesta["Qtd_Comprar"] = df_cesta["Compra_Sugerida"]
-        df_cesta["Valor_Total"] = (df_cesta["Qtd_Comprar"] * df_cesta["Preco"]).round(2)
-        df_cesta = df_cesta.fillna({"fornecedor": "", "SKU": ""})
+        # Prepara colunas para o editor (FIX V10.14)
+        df_cesta["Qtd_Comprar"] = df_cesta.get("Compra_Sugerida", 0) # Usa .get para evitar KeyError se coluna sumir
+        df_cesta["Valor_Total"] = df_cesta.get("Valor_Compra_R$", 0.0) # Usa .get para evitar KeyError
+        df_cesta = df_cesta.fillna({"fornecedor": "", "SKU": "", "Qtd_Comprar": 0, "Preco": 0.0, "Valor_Total": 0.0})
         df_cesta_display = df_cesta[[col for col in colunas_editor if col in df_cesta.columns]].copy()
     else:
         st.info("🛒 A Cesta está vazia. Adicione itens (manualmente acima) ou nas abas 2 e 3.")
@@ -338,14 +331,9 @@ def display_oc_interface(state):
 
     st.subheader(f"Cesta de Itens para {empresa} ({len(df_cesta_display)} SKUs)")
 
-    # =================================================================
-    # >> INÍCIO (V10.15) - Move Seletor para Fora do Form
-    # =================================================================
-    
+    # Seleção de Fornecedor para a OC (V10.15)
     df_final_para_salvar = df_cesta_display.copy()
-    df_final_para_salvar["Qtd_Comprar"] = pd.to_numeric(df_final_para_salvar["Qtd_Comprar"], errors="coerce").fillna(0).astype(int)
-    df_final_para_salvar["Preco"] = pd.to_numeric(df_final_para_salvar["Preco"], errors="coerce").fillna(0.0)
-    df_final_para_salvar["Valor_Total"] = (df_final_para_salvar["Qtd_Comprar"] * df_final_para_salvar["Preco"]).round(2)
+    df_final_para_salvar["fornecedor"] = df_final_para_salvar["fornecedor"].astype(str)
     
     fornecedores_cesta = sorted(df_final_para_salvar["fornecedor"].astype(str).str.strip().unique().tolist())
     fornecedores_cesta = [f for f in fornecedores_cesta if f and f != "N/A"]
@@ -359,18 +347,14 @@ def display_oc_interface(state):
             options=fornecedores_cesta,
             key=f"fornec_select_{empresa}"
         )
-    # =================================================================
-    # >> FIM (V10.15) - Move Seletor <<
-    # =================================================================
 
     with st.form(key="form_gerar_oc"):
         st.markdown("### 1. Revisão e Detalhes")
-        st.caption("Você pode: **Editar** 'Qtd. Comprar'/'Preço', ou **Excluir** (ícone de lixeira ao lado da linha).")
 
         df_editado = st.data_editor(
-            df_cesta_display, # Mostra todos os itens
+            df_cesta_display,
             use_container_width=True, hide_index=True,
-            num_rows="dynamic", # Permite deletar
+            num_rows="dynamic",
             column_config={
                 "fornecedor": st.column_config.TextColumn("Fornecedor", disabled=True),
                 "SKU": st.column_config.TextColumn("SKU", disabled=True),
@@ -381,13 +365,12 @@ def display_oc_interface(state):
             key=f"editor_cesta_final_{empresa}"
         )
     
-        # Recalcula o valor total com base nos dados ATUAIS do editor
+        # Recalcula e filtra os dados do editor
         df_final = df_editado.copy()
         df_final["Qtd_Comprar"] = pd.to_numeric(df_final["Qtd_Comprar"], errors="coerce").fillna(0).astype(int)
         df_final["Preco"] = pd.to_numeric(df_final["Preco"], errors="coerce").fillna(0.0)
         df_final["Valor_Total"] = (df_final["Qtd_Comprar"] * df_final["Preco"]).round(2)
         
-        # Filtra apenas os itens do fornecedor selecionado (V10.15)
         if fornec_selecionado:
             df_oc_final = df_final[df_final["fornecedor"] == fornec_selecionado].copy()
             valor_total_oc_final = df_oc_final["Valor_Total"].sum()
@@ -399,43 +382,38 @@ def display_oc_interface(state):
         
         col1, col2 = st.columns(2)
         condicao_pgto = col1.selectbox("Condição de Pagamento", ["À Vista", "Boleto 30/60/90", "Outra"], key=f"pgto_{empresa}")
-        
         data_prevista = col2.date_input("Data Prevista de Entrega", value=dt.date.today() + dt.timedelta(days=15), key=f"data_prev_{empresa}")
-        st.caption("Nota: O seletor de data usa o formato AAAA/MM/DD, mas a OC será salva e impressa como DD/MM/AAAA.")
 
-        submitted = st.form_submit_button(f"💾 SALVAR OC PARA {fornec_selecionado}", type="primary", disabled=(not fornec_selecionado))
+        submitted = st.form_submit_button(f"💾 SALVAR OC PARA {fornec_selecionado}", type="primary", disabled=(not fornec_selecionado or valor_total_oc_final <= 0))
 
         if submitted:
-            if valor_total_oc_final <= 0:
-                st.error("Valor total da OC é R$ 0,00. Nada foi salvo.")
-            else:
-                with st.spinner("Gerando ID e salvando OC no Banco de Dados..."):
-                    itens_json = df_oc_final.rename(
-                        columns={"Qtd_Comprar": "Compra_Sugerida", "Valor_Total": "Valor_Compra_R$"}
+            with st.spinner("Gerando ID e salvando OC no Banco de Dados..."):
+                itens_json = df_oc_final.rename(
+                    columns={"Qtd_Comprar": "Compra_Sugerida", "Valor_Total": "Valor_Compra_R$"}
+                ).to_dict("records")
+                
+                oc_data = {
+                    "OC_ID": "TEMP", "EMPRESA": empresa, "FORNECEDOR": fornec_selecionado,
+                    "DATA_OC": dt.date.today(), "DATA_PREVISTA": data_prevista,
+                    "CONDICAO_PGTO": condicao_pgto, "VALOR_TOTAL_R$": valor_total_oc_final,
+                    "STATUS": STATUS_PENDENTE, "ITENS_JSON": itens_json, "ITENS_COUNT": len(df_oc_final)
+                }
+                
+                try:
+                    oc_id_final = salvar_oc(oc_data)
+                    oc_data["OC_ID"] = oc_id_final
+                    
+                    html_para_download = gerar_html_oc(oc_data)
+                    state.oc_just_saved_html = html_para_download
+                    state.oc_just_saved_id = oc_id_final
+                    
+                    # Limpa os itens salvos da cesta
+                    df_restante = df_final[df_final["fornecedor"] != fornec_selecionado].copy()
+                    state.oc_cesta_itens[empresa] = df_restante.rename(
+                         columns={"Qtd_Comprar": "Compra_Sugerida", "Valor_Total": "Valor_Compra_R$"}
                     ).to_dict("records")
                     
-                    oc_data = {
-                        "OC_ID": "TEMP", "EMPRESA": empresa, "FORNECEDOR": fornec_selecionado,
-                        "DATA_OC": dt.date.today(), "DATA_PREVISTA": data_prevista,
-                        "CONDICAO_PGTO": condicao_pgto, "VALOR_TOTAL_R$": valor_total_oc_final,
-                        "STATUS": STATUS_PENDENTE, "ITENS_JSON": itens_json, "ITENS_COUNT": len(df_oc_final)
-                    }
-                    
-                    try:
-                        oc_id_final = salvar_oc(oc_data)
-                        oc_data["OC_ID"] = oc_id_final # Atualiza com o ID real
-                        
-                        # Prepara o Auto-Download
-                        html_para_download = gerar_html_oc(oc_data)
-                        state.oc_just_saved_html = html_para_download
-                        state.oc_just_saved_id = oc_id_final
-                        
-                        # Limpa os itens salvos da cesta
-                        state.oc_cesta_itens[empresa] = df_final[
-                            df_final["fornecedor"] != fornec_selecionado
-                        ].to_dict("records")
-                        
-                        st.balloons()
-                        st.rerun() # Recarrega a página para limpar o form e mostrar o download
-                    except Exception as e:
-                        st.error(f"Falha ao salvar a OC: {e}")
+                    st.balloons()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Falha ao salvar a OC: {e}")

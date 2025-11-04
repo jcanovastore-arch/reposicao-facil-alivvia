@@ -1,30 +1,29 @@
-# mod_compra_autom.py - TAB 2 - V10.12
-# - FIX: Corrige o KeyError: 'fornecedor - ALIVVIA' (V10.10) na lógica de merge.
-# - Mantém o Novo Fluxo Conjunta (Mesclado + Botão Inteligente)
-# - Mantém o Fix do @st.cache_data (V10.9)
-# - Mantém o Fix do Stale Cache (V10.11)
+# mod_compra_autom.py - TAB 2 - V11.0 (Sincronização Total)
+# - FIX: Contém a lógica de cálculo conjunta corrigida (V10.12).
+# - Mantém o Novo Fluxo Conjunta (Mesclado + Botão Inteligente).
+# - Usa as novas funções de logica_compra.py (V11.0).
 
 import pandas as pd
 import streamlit as st
 import numpy as np
-from unidecode import unidecode # Necessário para norm_sku
+from unidecode import unidecode
 
+# ====== MÓdulos DO PROJETO (Importação Corrigida) ======
 import logica_compra
 from logica_compra import (
     Catalogo,
     load_any_table_from_bytes,
     mapear_colunas,
     mapear_tipo,
-    exportar_xlsx,
-    calcular as calcular_compra,
+    calcular as calcular_compra, # Importa o 'calcular' do logica_compra.py
 )
-
 # IMPORTAÇÃO CRÍTICA
 try:
     from ordem_compra import adicionar_itens_cesta
 except ImportError:
     def adicionar_itens_cesta(empresa: str, df: pd.DataFrame):
         st.error("Falha crítica: Função 'adicionar_itens_cesta' não encontrada em ordem_compra.py")
+# ======================================================
 
 def norm_sku(x: str) -> str:
     if pd.isna(x): return ""
@@ -43,7 +42,7 @@ def _safe_contains_series(series: pd.Series, text: str) -> pd.Series:
 
 
 @st.cache_data(show_spinner="Calculando Compra para _empresa_...")
-def calcular_compra_para_empresa(_empresa_, _state, h, g, LT): # FIX V10.9: _state
+def calcular_compra_para_empresa(_empresa_, _state, h, g, LT):
     """
     Função cacheada que executa a lógica de cálculo para UMA empresa.
     O argumento '_state' é ignorado pelo cache.
@@ -60,13 +59,13 @@ def calcular_compra_para_empresa(_empresa_, _state, h, g, LT): # FIX V10.9: _sta
             f"Vá em **Dados das Empresas** e confirme o upload."
         )
 
+    # Lógica de carregamento de arquivos (usando os helpers do logica_compra.py)
     full_raw   = load_any_table_from_bytes(dados["FULL"]["name"],    dados["FULL"]["bytes"])
     vendas_raw = load_any_table_from_bytes(dados["VENDAS"]["name"],  dados["VENDAS"]["bytes"])
     fisico_raw = load_any_table_from_bytes(dados["ESTOQUE"]["name"], dados["ESTOQUE"]["bytes"])
 
-    t_full = mapear_tipo(full_raw)
-    t_v    = mapear_tipo(vendas_raw)
-    t_f    = mapear_tipo(fisico_raw)
+    # Tipagem e Mapeamento
+    t_full = mapear_tipo(full_raw); t_v = mapear_tipo(vendas_raw); t_f = mapear_tipo(fisico_raw)
     if t_full != "FULL" or t_v != "VENDAS" or t_f != "FISICO":
         raise RuntimeError(f"Um ou mais arquivos (FULL/VENDAS/FISICO) de {_empresa_} estão com formato incorreto.")
 
@@ -74,11 +73,13 @@ def calcular_compra_para_empresa(_empresa_, _state, h, g, LT): # FIX V10.9: _sta
     vendas_df = mapear_colunas(vendas_raw, t_v)
     fisico_df = mapear_colunas(fisico_raw, t_f)
     
+    # Catálogo
     cat = Catalogo(
         catalogo_simples=_state.catalogo_df.rename(columns={"sku": "component_sku"}),
         kits_reais=_state.kits_df
     )
     
+    # Cálculo
     df_final, painel = calcular_compra(full_df, fisico_df, vendas_df, cat, h=h, g=g, LT=LT)
     
     for col_req in ("SKU", "fornecedor", "Compra_Sugerida", "Preco"):
@@ -166,8 +167,10 @@ def renderizar_painel_individual(df_final, painel, nome_empresa_calc, state):
             df_para_cesta = df_selecionados[df_selecionados["Compra_Sugerida"] > 0].copy()
             if not df_para_cesta.empty:
                 try:
-                    adicionar_itens_cesta(nome_empresa_calc, df_para_cesta)
-                    st.success(f"{len(df_para_cesta)} itens de {nome_empresa_calc} enviados para a Cesta de OC (Tab 4).")
+                    # Garantindo as colunas necessárias para a cesta (V10.15)
+                    df_cesta = df_para_cesta[["SKU", "fornecedor", "Preco", "Compra_Sugerida", "Valor_Compra_R$"]].copy()
+                    adicionar_itens_cesta(nome_empresa_calc, df_cesta)
+                    st.success(f"{len(df_cesta)} itens de {nome_empresa_calc} enviados para a Cesta de OC (Tab 4).")
                 except Exception as e:
                     st.error(f"Erro ao enviar para a cesta: {e}")
             else:
@@ -194,30 +197,38 @@ def renderizar_painel_conjunta(df_conjunta_mesclada, state):
     
     # Apenas linhas onde *alguma* compra é sugerida
     base_para_editor = df_filtrado[
-        (df_filtrado["Compra (Unid) - ALIVVIA"] > 0) | (df_filtrado["Compra (Unid) - JCA"] > 0)
+        (df_filtrado.get("Compra (Unid) - ALIVVIA", 0) > 0) | (df_filtrado.get("Compra (Unid) - JCA", 0) > 0)
     ].reset_index(drop=True).copy()
     
     if "Selecionar" not in base_para_editor.columns:
         base_para_editor["Selecionar"] = False
 
     editor_key = "data_editor_CONJUNTA"
+    
+    cols_display = [
+        "Selecionar", "SKU", "fornecedor", "Preco",
+        "Vendas 60d - ALIVVIA", "Estoque Físico - ALIVVIA", "Compra (Unid) - ALIVVIA", "Compra (R$) - ALIVVIA",
+        "Vendas 60d - JCA", "Estoque Físico - JCA", "Compra (Unid) - JCA", "Compra (R$) - JCA"
+    ]
+    df_display = base_para_editor[[col for col in cols_display if col in base_para_editor.columns]].copy()
+
 
     edited_df = st.data_editor(
-        base_para_editor,
+        df_display,
         key=editor_key,
         use_container_width=True,
         height=600,
         column_config={
             "Selecionar": st.column_config.CheckboxColumn("Selecionar", default=False),
-            "Vendas 60d - ALIVVIA": st.column_config.NumberColumn(format="%d"),
-            "Vendas 60d - JCA": st.column_config.NumberColumn(format="%d"),
-            "Estoque Físico - ALIVVIA": st.column_config.NumberColumn(format="%d"),
-            "Estoque Físico - JCA": st.column_config.NumberColumn(format="%d"),
-            "Compra (Unid) - ALIVVIA": st.column_config.NumberColumn(format="%d"),
-            "Compra (Unid) - JCA": st.column_config.NumberColumn(format="%d"),
-            "Compra (R$) - ALIVVIA": st.column_config.NumberColumn(format="R$ %.2f"),
-            "Compra (R$) - JCA": st.column_config.NumberColumn(format="R$ %.2f"),
             "Preco": st.column_config.NumberColumn("Preço Único", format="R$ %.2f"),
+            "Vendas 60d - ALIVVIA": st.column_config.NumberColumn(format="%d"),
+            "Estoque Físico - ALIVVIA": st.column_config.NumberColumn(format="%d"),
+            "Compra (Unid) - ALIVVIA": st.column_config.NumberColumn(format="%d"),
+            "Compra (R$) - ALIVVIA": st.column_config.NumberColumn(format="R$ %.2f"),
+            "Vendas 60d - JCA": st.column_config.NumberColumn(format="%d"),
+            "Estoque Físico - JCA": st.column_config.NumberColumn(format="%d"),
+            "Compra (Unid) - JCA": st.column_config.NumberColumn(format="%d"),
+            "Compra (R$) - JCA": st.column_config.NumberColumn(format="R$ %.2f"),
         }
     )
 
@@ -244,14 +255,14 @@ def renderizar_painel_conjunta(df_conjunta_mesclada, state):
             
             # Prepara o DF para ALIVVIA
             df_para_alivvia = df_selecionados.rename(
-                columns={"Compra (Unid) - ALIVVIA": "Compra_Sugerida"}
-            )[["SKU", "fornecedor", "Preco", "Compra_Sugerida"]].copy()
+                columns={"Compra (Unid) - ALIVVIA": "Compra_Sugerida", "Compra (R$) - ALIVVIA": "Valor_Compra_R$"}
+            )[["SKU", "fornecedor", "Preco", "Compra_Sugerida", "Valor_Compra_R$"]].copy()
             df_para_alivvia = df_para_alivvia[df_para_alivvia["Compra_Sugerida"] > 0]
             
             # Prepara o DF para JCA
             df_para_jca = df_selecionados.rename(
-                columns={"Compra (Unid) - JCA": "Compra_Sugerida"}
-            )[["SKU", "fornecedor", "Preco", "Compra_Sugerida"]].copy()
+                columns={"Compra (Unid) - JCA": "Compra_Sugerida", "Compra (R$) - JCA": "Valor_Compra_R$"}
+            )[["SKU", "fornecedor", "Preco", "Compra_Sugerida", "Valor_Compra_R$"]].copy()
             df_para_jca = df_para_jca[df_para_jca["Compra_Sugerida"] > 0]
             
             try:
@@ -268,7 +279,6 @@ def renderizar_painel_conjunta(df_conjunta_mesclada, state):
                 st.error(f"Erro ao enviar para a cesta: {e}")
 
 
-# Função principal (Render)
 def render_tab2(state, h, g, LT):
     st.subheader("Gerar Compra (por empresa ou conjunta) — lógica original")
 
@@ -280,31 +290,23 @@ def render_tab2(state, h, g, LT):
     nome_estado = empresa_selecionada
     
     if st.button(f"Gerar Compra — {nome_estado}", type="primary"):
+        # Força o recálculo e limpa o cache de cálculo
         state.compra_autom_data["force_recalc"] = True
-        if nome_estado == "CONJUNTA":
-             calcular_compra_para_empresa.clear()
+        calcular_compra_para_empresa.clear() # Limpa o cache para todos os modos
 
     if nome_estado not in state.compra_autom_data or state.compra_autom_data.get("force_recalc", False):
         state.compra_autom_data["force_recalc"] = False
         
         try:
             if nome_estado == "CONJUNTA":
-                # Calcula ALIVVIA (usando cache)
+                # Calcula ALIVVIA
                 df_alivvia, painel_a = calcular_compra_para_empresa("ALIVVIA", state, h, g, LT)
                 df_a = df_alivvia[["SKU", "fornecedor", "Preco", "TOTAL_60d", "Estoque_Fisico", "Compra_Sugerida", "Valor_Compra_R$"]].copy()
                 
-                # Calcula JCA (usando cache)
+                # Calcula JCA
                 df_jca, painel_j = calcular_compra_para_empresa("JCA", state, h, g, LT)
-                
-                # =================================================================
-                # >> INÍCIO DA CORREÇÃO (V10.12) - KeyError 'fornecedor - ALIVVIA' <<
-                # =================================================================
-                # O bug estava aqui. Esquecemos de selecionar 'fornecedor' e 'Preco' da JCA.
                 df_j = df_jca[["SKU", "fornecedor", "Preco", "TOTAL_60d", "Estoque_Fisico", "Compra_Sugerida", "Valor_Compra_R$"]].copy()
-                # =================================================================
-                # >> FIM DA CORREÇÃO (V10.12) <<
-                # =================================================================
-
+                
                 # Mescla os dois
                 df_conjunta = pd.merge(
                     df_a, df_j,
@@ -314,9 +316,16 @@ def render_tab2(state, h, g, LT):
                 )
                 
                 df_conjunta = df_conjunta.fillna(0)
+                
                 # Lógica de merge de fornecedor/preço
-                df_conjunta["fornecedor"] = np.where(df_conjunta["fornecedor - ALIVVIA"] != 0, df_conjunta["fornecedor - ALIVVIA"], df_conjunta["fornecedor - JCA"])
-                df_conjunta["Preco"] = np.where(df_conjunta["Preco - ALIVVIA"] != 0, df_conjunta["Preco - ALIVVIA"], df_conjunta["Preco - JCA"])
+                # Garantir que as colunas 'fornecedor - ALIVVIA' e 'Preco - ALIVVIA' existam
+                forn_a = df_conjunta.get("fornecedor - ALIVVIA", df_conjunta.get("fornecedor - JCA", pd.Series(0)))
+                forn_j = df_conjunta.get("fornecedor - JCA", df_conjunta.get("fornecedor - ALIVVIA", pd.Series(0)))
+                preco_a = df_conjunta.get("Preco - ALIVVIA", df_conjunta.get("Preco - JCA", pd.Series(0.0)))
+                preco_j = df_conjunta.get("Preco - JCA", df_conjunta.get("Preco - ALIVVIA", pd.Series(0.0)))
+
+                df_conjunta["fornecedor"] = np.where(forn_a != 0, forn_a, forn_j)
+                df_conjunta["Preco"] = np.where(preco_a != 0.0, preco_a, preco_j)
                 
                 df_conjunta = df_conjunta.rename(columns={
                     "TOTAL_60d - ALIVVIA": "Vendas 60d - ALIVVIA",
@@ -336,7 +345,6 @@ def render_tab2(state, h, g, LT):
                     "Compra (Unid) - ALIVVIA", "Compra (Unid) - JCA",
                     "Compra (R$) - ALIVVIA", "Compra (R$) - JCA"
                 ]
-                # Garante que as colunas existem antes de filtrar
                 df_conjunta = df_conjunta[[col for col in cols_finais if col in df_conjunta.columns]].copy()
                 
                 state.compra_autom_data[nome_estado] = {"df": df_conjunta, "empresa": "CONJUNTA"}
@@ -363,20 +371,13 @@ def render_tab2(state, h, g, LT):
             st.error(str(e))
             return
 
-    # Renderização de resultados (V10.11 - Stale Cache Fix)
+    # Renderização de resultados
     if nome_estado in state.compra_autom_data and "df" in state.compra_autom_data[nome_estado]:
         data_fixa = state.compra_autom_data[nome_estado]
         
         if nome_estado == "CONJUNTA":
             df_cache_conjunta = data_fixa["df"]
-            coluna_necessaria_v10_10 = "Compra (Unid) - ALIVVIA" 
-            
-            if coluna_necessaria_v10_10 not in df_cache_conjunta.columns:
-                st.warning("Detectamos uma mudança de versão. Limpando cache de 'Compra Conjunta' e recarregando...")
-                del state.compra_autom_data["CONJUNTA"] # Limpa o cache
-                st.rerun() # Força o recalculo
-            else:
-                renderizar_painel_conjunta(df_cache_conjunta.copy(), state)
+            renderizar_painel_conjunta(df_cache_conjunta.copy(), state)
         
         else: # Se for ALIVVIA ou JCA (individual)
             renderizar_painel_individual(
