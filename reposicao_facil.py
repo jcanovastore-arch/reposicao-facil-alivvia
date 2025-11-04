@@ -1,7 +1,7 @@
-# reposicao_facil.py - V10.15 (Sincronização)
-# - FIX: Chama as funções corretas (display_..._interface) para Tab 4 e 5.
-# - FIX: Carrega o 'Preco' do Google Sheets para o catalogo_df (para a Tab 4 usar).
-# - Mantém V10.10 (5 abas, persistência V10.3)
+# reposicao_facil.py - V10.16 (Sincronização)
+# - FIX: Corrige "The truth value of a Series is ambiguous" (V10.15)
+# - FIX: Converte preços para numérico ANTES de usar np.where
+# - Mantém V10.15 (5 abas, persistência V10.3, OC Auto-Preço)
 
 import datetime as dt
 import json
@@ -34,7 +34,7 @@ from logica_compra import (
     br_to_float # Importa o helper de R$
 )
 
-VERSION = "v10.15 – Sincronização Total + OC Manual Auto-Preço"
+VERSION = "v10.16 – Sincronização Total + Fix Preço Ambiguous"
 
 # ===================== CONFIG PÁGINA =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -200,7 +200,7 @@ def clear_upload(empresa: str, tipo: str, also_disk: bool = True) -> None:
     if also_disk:
         remove_from_disk(empresa, tipo)
 
-# ===================== SIDEBAR / PARÂMETROS (FIX V10.15 - Carrega Preço) =====================
+# ===================== SIDEBAR / PARÂMETROS (FIX V10.16) =====================
 with st.sidebar:
     st.subheader("Parâmetros")
     h  = st.selectbox("Horizonte (dias)", [30, 60, 90], index=1, key="h")
@@ -216,16 +216,13 @@ with st.sidebar:
         content = logica_compra.baixar_xlsx_do_sheets(sheet_id)
         
         # =================================================================
-        # >> INÍCIO DA CORREÇÃO (V10.15) - Carrega 'Preco' no Catálogo <<
+        # >> INÍCIO DA CORREÇÃO (V10.16) - "Ambiguous" Error <<
         # =================================================================
-        # Tenta carregar o Preço junto com o Catálogo
         cat = logica_compra._carregar_padrao_de_content(content)
         df_cat = cat.catalogo_simples.rename(columns={"component_sku":"sku"})
         df_kits = cat.kits_reais
         
-        # Lógica para tentar buscar o preço (do Estoque) e fundir no catálogo
         try:
-            # Tenta ler os arquivos de estoque (se existirem) para pegar preços
             df_precos_list = []
             for emp in ("ALIVVIA", "JCA"):
                 disk_item = load_from_disk_if_any(emp, "ESTOQUE")
@@ -238,30 +235,40 @@ with st.sidebar:
             
             if df_precos_list:
                 df_precos_all = pd.concat(df_precos_list, ignore_index=True)
-                # Pega o último preço (mais recente) em caso de duplicatas
                 df_precos_final = df_precos_all.drop_duplicates(subset=["SKU"], keep="last")
                 
-                # Funde com o catálogo, mantendo o preço do catálogo se já existir
+                # Funde com o catálogo
                 df_cat = df_cat.merge(df_precos_final, on="SKU", how="left", suffixes=("_cat", "_est"))
+
+                # FIX V10.16: Converte para numérico *ANTES* de comparar
+                preco_cat_num = br_to_float(df_cat.get("Preco_cat")).fillna(0.0)
+                preco_est_num = br_to_float(df_cat.get("Preco_est")).fillna(0.0)
                 
-                # Usa 'Preco_cat' se existir e não for 0, senão usa 'Preco_est'
+                # Agora a comparação (np.where) é segura
                 df_cat["Preco"] = np.where(
-                    (pd.isna(df_cat["Preco_cat"])) | (df_cat["Preco_cat"] == 0),
-                    df_cat["Preco_est"],
-                    df_cat["Preco_cat"]
+                    (preco_cat_num == 0.0), # Se o preço do catálogo é 0 (ou NaN)
+                    preco_est_num,          # Usa o preço do estoque
+                    preco_cat_num           # Senão, usa o preço do catálogo
                 )
                 
-                df_cat["Preco"] = br_to_float(df_cat["Preco"]).fillna(0.0)
                 df_cat = df_cat.drop(columns=["Preco_cat", "Preco_est"], errors="ignore")
-        except Exception:
-            # Se falhar em ler os estoques, apenas usa o Preço do catálogo (se houver)
+            
+            else:
+                # Se não há arquivos de estoque, apenas usa o Preço do catálogo (se houver)
+                if "Preco" not in df_cat.columns:
+                    df_cat["Preco"] = 0.0
+                df_cat["Preco"] = br_to_float(df_cat["Preco"]).fillna(0.0)
+
+        except Exception as e:
+            # Se falhar em ler os estoques, apenas usa o Preço do catálogo
+            st.warning(f"Não foi possível carregar preços dos estoques (usando Padrão): {e}")
             if "Preco" not in df_cat.columns:
                 df_cat["Preco"] = 0.0
             df_cat["Preco"] = br_to_float(df_cat["Preco"]).fillna(0.0)
             
         return df_cat, df_kits
         # =================================================================
-        # >> FIM DA CORREÇÃO (V10.15) <<
+        # >> FIM DA CORREÇÃO (V10.16) <<
         # =================================================================
 
     colA, colB = st.columns([1, 1])
