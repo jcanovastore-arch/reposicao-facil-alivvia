@@ -1,7 +1,6 @@
-# reposicao_facil.py - V11.0 (Principal - Sincronização Total)
-# - FIX: Reestrutura para sincronia total com os 5 módulos V11.0.
-# - FIX: Contém a lógica de carregamento robusta que chama logica_compra (V10.17/V10.20).
-# - NOVO: Garante as 5 abas (Dados, Compra Automática, Alocação, OC, Gerenciador de OCs).
+# reposicao_facil.py - V11.1 (Principal - Hyper-Defensive Price Merge)
+# - FIX: Reestrutura a lógica de merge de preços em get_padrao_from_sheets para
+#   eliminar a causa-raiz do erro "The truth value of a Series is ambiguous".
 
 import datetime as dt
 import json
@@ -15,7 +14,7 @@ import streamlit as st
 import numpy as np
 
 # ====== MÓDulos DO PROJETO (IMPORTAÇÃO CORRETA) ======
-import logica_compra # Contém o cérebro (cálculo, mapeamento, sheets)
+import logica_compra 
 import mod_compra_autom
 import mod_alocacao
 import ordem_compra
@@ -31,10 +30,10 @@ from logica_compra import (
     extract_sheet_id_from_url,
     DEFAULT_SHEET_ID,
     br_to_float,
-    _carregar_padrao_de_content # Função de carregamento interna que será usada no cache
+    _carregar_padrao_de_content
 )
 
-VERSION = "v11.0 – Estabilidade Total + Fix Final Ambiguous/Aba"
+VERSION = "v11.1 – Hyper-Defensive Fix Ambiguous"
 
 # ===================== CONFIG PÁGINA =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -157,7 +156,7 @@ def clear_upload(empresa: str, tipo: str, also_disk: bool = True) -> None:
     st.session_state[empresa][tipo] = {"name": None, "bytes": None}
     if also_disk: remove_from_disk(empresa, tipo)
 
-# ===================== SIDEBAR / PARÂMETROS (Lógica de Carregamento V11.0) =====================
+# ===================== SIDEBAR / PARÂMETROS (Lógica de Carregamento V11.1) =====================
 with st.sidebar:
     st.subheader("Parâmetros")
     h  = st.selectbox("Horizonte (dias)", [30, 60, 90], index=1, key="h")
@@ -172,12 +171,12 @@ with st.sidebar:
     def get_padrao_from_sheets(sheet_id):
         # 1. Baixa o conteúdo
         content = baixar_xlsx_do_sheets(sheet_id)
-        # 2. Processa o Catálogo/Kits (V10.20 com correção de Aba/Case-Insensitive)
+        # 2. Processa o Catálogo/Kits (FIX V10.20 para Aba/Case-Insensitive em logica_compra.py)
         cat = _carregar_padrao_de_content(content)
         df_cat = cat.catalogo_simples.rename(columns={"component_sku":"sku"})
         df_kits = cat.kits_reais
         
-        # 3. Lógica de Carregamento de Preço (FIX Robusto V10.17)
+        # 3. Lógica de Carregamento de Preço (FIX Hyper-Defensive V11.1)
         try:
             df_precos_list = []
             for emp in ("ALIVVIA", "JCA"):
@@ -193,31 +192,35 @@ with st.sidebar:
                 df_precos_all = pd.concat(df_precos_list, ignore_index=True)
                 df_precos_final = df_precos_all.drop_duplicates(subset=["SKU"], keep="last")
                 
-                # Se o Catálogo já tem coluna 'Preco', funde com sufixos
-                if "Preco" in df_cat.columns:
-                    df_cat = df_cat.merge(df_precos_final, on="SKU", how="left", suffixes=("_cat", "_est"))
-                    preco_cat_num = br_to_float(df_cat.get("Preco_cat")).fillna(0.0)
-                    preco_est_num = br_to_float(df_cat.get("Preco_est")).fillna(0.0)
-                    
-                    # Usa preço do catálogo se for > 0, senão usa do estoque (ou 0.0)
-                    df_cat["Preco"] = np.where(
-                        preco_cat_num > 0.0,
-                        preco_cat_num,
-                        preco_est_num
-                    )
-                    df_cat = df_cat.drop(columns=["Preco_cat", "Preco_est"], errors="ignore")
+                # PREPARAÇÃO DEFENSIVA
                 
+                # 1. Renomeia e limpa o preço do Catálogo (Preco_Cat)
+                if 'Preco' in df_cat.columns:
+                    df_cat = df_cat.rename(columns={'Preco': 'Preco_Cat'}).copy()
+                    df_cat['Preco_Cat'] = br_to_float(df_cat['Preco_Cat']).fillna(0.0)
                 else:
-                    # Se Catálogo não tinha Preço, apenas usa o Preço do estoque
-                    df_cat = df_cat.merge(df_precos_final, on="SKU", how="left")
-                    df_cat["Preco"] = br_to_float(df_cat["Preco"]).fillna(0.0)
+                    df_cat['Preco_Cat'] = 0.0
+                    
+                # 2. Mescla o preço do Estoque (Preco_Estoque)
+                df_cat = df_cat.merge(df_precos_final, on="SKU", how="left")
+                df_cat['Preco_Estoque'] = br_to_float(df_cat.get('Preco', df_cat.get('Preco_Estoque'))).fillna(0.0)
+                df_cat = df_cat.drop(columns=['Preco'], errors='ignore') # Remove a coluna 'Preco' intermediária
+                
+                # 3. SELEÇÃO FINAL: Catálogo > Estoque (usando np.where em colunas pré-limpas)
+                df_cat['Preco'] = np.where(
+                    df_cat['Preco_Cat'] > 0.0,
+                    df_cat['Preco_Cat'],
+                    df_cat['Preco_Estoque']
+                )
+                df_cat = df_cat.drop(columns=['Preco_Cat', 'Preco_Estoque'], errors='ignore')
 
             else:
-                # Se não há arquivos de estoque, apenas garante que 'Preco' seja 0.0
-                if "Preco" not in df_cat.columns: df_cat["Preco"] = 0.0
+                # Se não há preço de estoque, usa o Catálogo e garante limpeza
+                if 'Preco' not in df_cat.columns: df_cat["Preco"] = 0.0
                 df_cat["Preco"] = br_to_float(df_cat["Preco"]).fillna(0.0)
 
         except Exception as e:
+            # Caso o erro ainda ocorra, garante que o preço seja 0.0
             st.warning(f"Não foi possível carregar preços dos estoques (usando Padrão): {e}")
             if "Preco" not in df_cat.columns: df_cat["Preco"] = 0.0
             df_cat["Preco"] = br_to_float(df_cat["Preco"]).fillna(0.0)
@@ -353,7 +356,6 @@ with tab3:
     mod_alocacao.render_tab3(st.session_state)
 
 # ===================== TAB 4 / TAB 5 =====================
-# Chamadas corrigidas para os nomes de funções corretos (V10.15)
 with tab4:
     if ordem_compra:
         try:
