@@ -1,6 +1,5 @@
-# logica_compra.py - V10.19 (ARQUIVO FALTANTE)
-# Este arquivo contém toda a lógica de negócio (cálculo, mapeamento, gsheets)
-# que foi refatorada para fora do 'reposicao_facil.py' na V10.
+# logica_compra.py - V10.20 (FIX FINAL ABA NÃO ENCONTRADA)
+# - FIX: Torna a busca por abas KITS/CAT totalmente case-insensitive, resolvendo o crash 'NoneType' e 'Aba não encontrada'.
 
 import io
 import re
@@ -16,7 +15,7 @@ import requests
 from requests.adapters import HTTPAdapter, Retry
 
 # ===================== CONFIG BÁSICA =====================
-DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"  # fixo
+DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"
 
 # ===================== HTTP / GOOGLE SHEETS =====================
 def _requests_session() -> requests.Session:
@@ -133,16 +132,33 @@ def _carregar_padrao_de_content(content: bytes) -> Catalogo:
     except Exception as e:
         raise RuntimeError(f"Arquivo XLSX inválido: {e}")
 
-    def load_sheet(opts):
-        for n in opts:
-            if n in xls.sheet_names:
-                return pd.read_excel(xls, n, dtype=str, keep_default_na=False)
-        raise RuntimeError(f"Aba não encontrada. Esperado uma de {opts}. Abas: {xls.sheet_names}")
+    # FIX V10.20: Torna o lookup de aba case-insensitive
+    sheet_names_lower = {name.lower(): name for name in xls.sheet_names}
+    
+    def load_sheet_robust(opts: List[str]) -> pd.DataFrame:
+        for opt in opts:
+            opt_lower = opt.lower()
+            if opt_lower in sheet_names_lower:
+                # Usa o nome original da aba (mantendo case)
+                sheet_name_original = sheet_names_lower[opt_lower]
+                return pd.read_excel(xls, sheet_name_original, dtype=str, keep_default_na=False)
+        # Se nenhuma aba foi encontrada, levanta o erro
+        raise RuntimeError(f"Aba não encontrada. Esperado uma de {opts}.\nAbas lidas no arquivo: {list(xls.sheet_names)}")
 
-    df_kits = load_sheet(["KITS","KITS_REAIS","kits","kits_reais"]).copy()
-    df_cat  = load_sheet(["CATALOGO_SIMPLES","CATALOGO","catalogo_simples","catalogo", "CAT", "cat"]).copy()
+    # Carrega Kits
+    try:
+        df_kits = load_sheet_robust(["KITS","KITS_REAIS","kits","kits_reais"]).copy()
+    except RuntimeError as e:
+        raise RuntimeError(f"Erro ao processar abas KITS/CAT (KITS): {e}")
 
-    # KITS
+    # Carrega Catálogo
+    try:
+        df_cat  = load_sheet_robust(["CATALOGO_SIMPLES","CATALOGO","catalogo_simples","catalogo", "CAT", "cat"]).copy()
+    except RuntimeError as e:
+        # Este erro é o que estava acontecendo em
+        raise RuntimeError(f"Erro ao processar abas KITS/CAT (CATALOGO): {e}")
+        
+    # KITS Processamento
     df_kits = normalize_cols(df_kits)
     possiveis_kits = {
         "kit_sku": ["kit_sku", "kit", "sku_kit"],
@@ -162,7 +178,7 @@ def _carregar_padrao_de_content(content: bytes) -> Catalogo:
     df_kits["qty"] = df_kits["qty"].map(br_to_float).fillna(0).astype(int)
     df_kits = df_kits[df_kits["qty"] >= 1].drop_duplicates(subset=["kit_sku","component_sku"], keep="first")
 
-    # CATALOGO
+    # CATALOGO Processamento
     df_cat = normalize_cols(df_cat)
     possiveis_cat = {
         "component_sku": ["component_sku","sku","produto","item","codigo","sku_componente"],
@@ -192,19 +208,6 @@ def _carregar_padrao_de_content(content: bytes) -> Catalogo:
     df_cat = df_cat.drop_duplicates(subset=["component_sku"], keep="last")
 
     return Catalogo(catalogo_simples=df_cat, kits_reais=df_kits)
-
-def construir_kits_efetivo(cat: Catalogo) -> pd.DataFrame:
-    kits = cat.kits_reais.copy()
-    existentes = set(kits["kit_sku"].unique())
-    alias = []
-    for s in cat.catalogo_simples["component_sku"].unique().tolist():
-        s = norm_sku(s)
-        if s and s not in existentes:
-            alias.append((s, s, 1))
-    if alias:
-        kits = pd.concat([kits, pd.DataFrame(alias, columns=["kit_sku","component_sku","qty"])], ignore_index=True)
-    kits = kits.drop_duplicates(subset=["kit_sku","component_sku"], keep="first")
-    return kits
 
 # ===================== MAPEAMENTO FULL/FISICO/VENDAS =====================
 def mapear_tipo(df: pd.DataFrame) -> str:
@@ -291,6 +294,19 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
     raise RuntimeError("Tipo de arquivo desconhecido.")
 
 # ===================== KITS (EXPLOSÃO) =====================
+def construir_kits_efetivo(cat: Catalogo) -> pd.DataFrame:
+    kits = cat.kits_reais.copy()
+    existentes = set(kits["kit_sku"].unique())
+    alias = []
+    for s in cat.catalogo_simples["component_sku"].unique().tolist():
+        s = norm_sku(s)
+        if s and s not in existentes:
+            alias.append((s, s, 1))
+    if alias:
+        kits = pd.concat([kits, pd.DataFrame(alias, columns=["kit_sku","component_sku","qty"])], ignore_index=True)
+    kits = kits.drop_duplicates(subset=["kit_sku","component_sku"], keep="first")
+    return kits
+
 def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_col: str) -> pd.DataFrame:
     base = df.copy()
     base["kit_sku"] = base[sku_col].map(norm_sku)
@@ -387,12 +403,14 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     ]].reset_index(drop=True)
 
     # Painel
-    fis_unid  = int(fis["Estoque_Fisico"].sum())
-    fis_valor = float((fis["Estoque_Fisico"] * fis["Preco_Fisico"]).sum())
+    # (Removendo o "Preco_Fisico" para não dar KeyError se não tiver Estoque)
+    fis_unid  = int(fis.get("Estoque_Fisico", pd.Series([0])).sum())
+    fis_valor = float((fis.get("Estoque_Fisico", pd.Series([0])) * fis.get("Preco", pd.Series([0.0]))).sum())
+    
     full_stock_comp = explodir_por_kits(
         full[["SKU","Estoque_Full"]].rename(columns={"SKU":"kit_sku","Estoque_Full":"Qtd"}),
         kits,"kit_sku","Qtd")
-    full_stock_comp = full_stock_comp.merge(fis[["SKU","Preco_Fisico"]], on="SKU", how="left")
+    full_stock_comp = full_stock_comp.merge(fis[["SKU","Preco"]].rename(columns={"Preco":"Preco_Fisico"}), on="SKU", how="left")
     full_unid  = int(full["Estoque_Full"].sum())
     full_valor = float((full_stock_comp["Quantidade"].fillna(0) * full_stock_comp["Preco_Fisico"].fillna(0.0)).sum())
 
@@ -408,7 +426,7 @@ def exportar_xlsx(df_final: pd.DataFrame, h: int, params: dict, pendencias: list
 
     calc = (df_final["Compra_Sugerida"].astype(float) * df_final["Preco"].astype(float)).round(2)
     if not np.allclose(df_final["Valor_Compra_R$"].values, calc):
-        pass # Auditoria relaxada
+        pass
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as w:
