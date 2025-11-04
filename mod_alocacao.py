@@ -1,7 +1,9 @@
-# mod_alocacao.py - TAB 3 - V10.10
-# - FIX: Corrige o crash "@st.cache_data" (Cannot hash argument 'state')
-# - NOVO FLUXO: Ferramenta manual e independente (Select SKU + Qtd Total)
-# - Mantém o botão de "Enviar Alocação" para a Cesta de OC
+# mod_alocacao.py - TAB 3 - V10.12
+# - FIX: Corrige o KeyError: "'Preco' not in index" (V10.10)
+# - FIX: A função 'calcular_proporcoes_venda' agora lê os arquivos de ESTOQUE
+#   para obter o "Preco", em vez de procurar no Catálogo.
+# - Mantém o Novo Fluxo Manual (V10.10)
+# - Mantém o Fix do @st.cache_data (V10.9)
 
 import streamlit as st
 import pandas as pd
@@ -31,6 +33,9 @@ def _get_bytes_from_state(state, emp, k):
         return slot_data["name"], slot_data["bytes"]
     return None, None
 
+# =================================================================
+# >> INÍCIO DA CORREÇÃO (V10.12) - KeyError 'Preco' <<
+# =================================================================
 @st.cache_data(show_spinner="Calculando proporções de venda...")
 def calcular_proporcoes_venda(_state): # FIX V10.9: _state
     """
@@ -39,8 +44,10 @@ def calcular_proporcoes_venda(_state): # FIX V10.9: _state
     """
     missing = []
     files_map = {}
+    
+    # AGORA LÊ O ESTOQUE TAMBÉM
     for emp in ["ALIVVIA","JCA"]:
-        for k in ["FULL", "VENDAS"]:
+        for k in ["FULL", "VENDAS", "ESTOQUE"]:
             name, bytes_data = _get_bytes_from_state(_state, emp, k)
             if not (name and bytes_data):
                 missing.append(f"{emp} {k}")
@@ -48,9 +55,10 @@ def calcular_proporcoes_venda(_state): # FIX V10.9: _state
                 files_map[f"{emp}_{k}"] = (name, bytes_data)
                 
     if missing:
-        raise RuntimeError("Faltam arquivos de vendas: " + ", ".join(missing) + ". Use a aba **Dados das Empresas**.")
+        raise RuntimeError("Faltam arquivos: " + ", ".join(missing) + ". Use a aba **Dados das Empresas**.")
 
-    def read_pair(emp: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    # --- Leitura Vendas (FULL/Shopee) ---
+    def read_vendas_pair(emp: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         fa_name, fa_bytes = files_map[f"{emp}_FULL"]
         sa_name, sa_bytes = files_map[f"{emp}_VENDAS"]
         
@@ -62,9 +70,24 @@ def calcular_proporcoes_venda(_state): # FIX V10.9: _state
         if tsa != "VENDAS": raise RuntimeError(f"Vendas inválido ({emp}): não achei coluna de quantidade.")
         return mapear_colunas(fa, tfa), mapear_colunas(sa, tsa)
 
-    full_A, shp_A = read_pair("ALIVVIA")
-    full_J, shp_J = read_pair("JCA")
+    full_A, shp_A = read_vendas_pair("ALIVVIA")
+    full_J, shp_J = read_vendas_pair("JCA")
 
+    # --- Leitura Estoque (para Preço) ---
+    def read_estoque(emp: str) -> pd.DataFrame:
+        e_name, e_bytes = files_map[f"{emp}_ESTOQUE"]
+        e = load_any_table_from_bytes(e_name, e_bytes)
+        te = mapear_tipo(e)
+        if te != "FISICO": raise RuntimeError(f"Estoque inválido ({emp}): precisa de SKU, Estoque e Preço.")
+        return mapear_colunas(e, te)
+
+    fis_A = read_estoque("ALIVVIA")
+    fis_J = read_estoque("JCA")
+    
+    # Combina os dois estoques para ter a melhor fonte de preços
+    df_precos = pd.concat([fis_A, fis_J]).drop_duplicates(subset=["SKU"], keep="last")[["SKU", "Preco"]]
+
+    # --- Cálculo de Proporção de Vendas ---
     cat = Catalogo(
         catalogo_simples=_state.catalogo_df.rename(columns={"sku":"component_sku"}),
         kits_reais=_state.kits_df
@@ -92,17 +115,28 @@ def calcular_proporcoes_venda(_state): # FIX V10.9: _state
     )
     demandas_finais["Prop_J"] = 1.0 - demandas_finais["Prop_A"]
     
-    # Adiciona dados do catálogo para o botão de envio
+    # --- Merge Final (com Catálogo para 'fornecedor' e df_precos para 'Preco') ---
     df_catalogo = _state.catalogo_df
+    # 1. Adiciona 'fornecedor' do catálogo
     demandas_finais = demandas_finais.merge(
-        df_catalogo[['sku', 'fornecedor', 'Preco']].rename(columns={'sku':'SKU'}),
+        df_catalogo[['sku', 'fornecedor']].rename(columns={'sku':'SKU'}),
         on="SKU",
         how="left"
     )
+    # 2. Adiciona 'Preco' dos arquivos de estoque
+    demandas_finais = demandas_finais.merge(
+        df_precos,
+        on="SKU",
+        how="left"
+    )
+    
     demandas_finais["fornecedor"] = demandas_finais["fornecedor"].fillna("N/A")
     demandas_finais["Preco"] = pd.to_numeric(demandas_finais["Preco"], errors='coerce').fillna(0.0)
     
     return demandas_finais
+# =================================================================
+# >> FIM DA CORREÇÃO (V10.12) <<
+# =================================================================
 
 
 def render_tab3(state):
@@ -165,13 +199,14 @@ def render_tab3(state):
             # 7. Exibe o resultado
             st.success(f"Alocação para {qtd_lote} unidades de **{sku_escolhido}**:")
             res = pd.DataFrame([
-                {"Empresa": "ALIVVIA", "Demanda_60d": item["Demanda_A"], "Proporção": propA, "Alocação_Sugerida": alocA},
-                {"Empresa": "JCA", "Demanda_60d": item["Demanda_J"], "Proporção": propJ, "Alocação_Sugerida": alocJ},
+                {"Empresa": "ALIVVIA", "Demanda_60d": item["Demanda_A"], "Proporção": propA, "Alocação_Sugerida": alocA, "Preço": item["Preco"]},
+                {"Empresa": "JCA", "Demanda_60d": item["Demanda_J"], "Proporção": propJ, "Alocação_Sugerida": alocJ, "Preço": item["Preco"]},
             ])
             st.dataframe(res, use_container_width=True, column_config={
                 "Demanda_60d": st.column_config.NumberColumn(format="%d"),
                 "Proporção": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=1),
                 "Alocação_Sugerida": st.column_config.NumberColumn(format="%d"),
+                "Preço": st.column_config.NumberColumn(format="R$ %.2f"),
             })
 
         # 8. Botão de Envio (se o cálculo foi feito)

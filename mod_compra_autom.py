@@ -1,7 +1,8 @@
-# mod_compra_autom.py - TAB 2 - V10.11
-# - FIX: Corrige o crash 'KeyError' (Stale Cache)
-# - Mantém o Novo Fluxo Conjunta (V10.10 - Mesclado + Botão Inteligente)
+# mod_compra_autom.py - TAB 2 - V10.12
+# - FIX: Corrige o KeyError: 'fornecedor - ALIVVIA' (V10.10) na lógica de merge.
+# - Mantém o Novo Fluxo Conjunta (Mesclado + Botão Inteligente)
 # - Mantém o Fix do @st.cache_data (V10.9)
+# - Mantém o Fix do Stale Cache (V10.11)
 
 import pandas as pd
 import streamlit as st
@@ -11,7 +12,6 @@ from unidecode import unidecode # Necessário para norm_sku
 import logica_compra
 from logica_compra import (
     Catalogo,
-    # aggregate_data_for_conjunta_clean, # Não é mais usado
     load_any_table_from_bytes,
     mapear_colunas,
     mapear_tipo,
@@ -289,12 +289,23 @@ def render_tab2(state, h, g, LT):
         
         try:
             if nome_estado == "CONJUNTA":
+                # Calcula ALIVVIA (usando cache)
                 df_alivvia, painel_a = calcular_compra_para_empresa("ALIVVIA", state, h, g, LT)
                 df_a = df_alivvia[["SKU", "fornecedor", "Preco", "TOTAL_60d", "Estoque_Fisico", "Compra_Sugerida", "Valor_Compra_R$"]].copy()
                 
+                # Calcula JCA (usando cache)
                 df_jca, painel_j = calcular_compra_para_empresa("JCA", state, h, g, LT)
-                df_j = df_jca[["SKU", "TOTAL_60d", "Estoque_Fisico", "Compra_Sugerida", "Valor_Compra_R$"]].copy()
+                
+                # =================================================================
+                # >> INÍCIO DA CORREÇÃO (V10.12) - KeyError 'fornecedor - ALIVVIA' <<
+                # =================================================================
+                # O bug estava aqui. Esquecemos de selecionar 'fornecedor' e 'Preco' da JCA.
+                df_j = df_jca[["SKU", "fornecedor", "Preco", "TOTAL_60d", "Estoque_Fisico", "Compra_Sugerida", "Valor_Compra_R$"]].copy()
+                # =================================================================
+                # >> FIM DA CORREÇÃO (V10.12) <<
+                # =================================================================
 
+                # Mescla os dois
                 df_conjunta = pd.merge(
                     df_a, df_j,
                     on="SKU",
@@ -352,15 +363,11 @@ def render_tab2(state, h, g, LT):
             st.error(str(e))
             return
 
-    # =================================================================
-    # >> INÍCIO DA CORREÇÃO (V10.11) - Stale Cache Fix <<
-    # =================================================================
+    # Renderização de resultados (V10.11 - Stale Cache Fix)
     if nome_estado in state.compra_autom_data and "df" in state.compra_autom_data[nome_estado]:
         data_fixa = state.compra_autom_data[nome_estado]
         
         if nome_estado == "CONJUNTA":
-            # Verifica se o cache (df) tem o schema novo (V10.10).
-            # Se não tiver (ex: é um cache do V10.9), limpa e recarrega.
             df_cache_conjunta = data_fixa["df"]
             coluna_necessaria_v10_10 = "Compra (Unid) - ALIVVIA" 
             
@@ -369,7 +376,6 @@ def render_tab2(state, h, g, LT):
                 del state.compra_autom_data["CONJUNTA"] # Limpa o cache
                 st.rerun() # Força o recalculo
             else:
-                # O cache é válido, renderiza o painel mesclado
                 renderizar_painel_conjunta(df_cache_conjunta.copy(), state)
         
         else: # Se for ALIVVIA ou JCA (individual)
@@ -379,6 +385,3 @@ def render_tab2(state, h, g, LT):
                 data_fixa["empresa"],
                 state
             )
-    # =================================================================
-    # >> FIM DA CORREÇÃO (V10.11) <<
-    # =================================================================
