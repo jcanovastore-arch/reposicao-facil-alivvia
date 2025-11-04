@@ -1,8 +1,7 @@
-# mod_compra_autom.py - TAB 2 - V10.10
-# - FIX: Corrige o crash "@st.cache_data" (Cannot hash argument 'state')
-# - NOVO FLUXO CONJUNTA: Tabela única mesclada (lado a lado)
-# - NOVO FLUXO CONJUNTA: Botão "Enviar" inteligente que divide para as duas cestas
-# - Mantém Formatação (V10.7) e Fix da Cesta (V10.6)
+# mod_compra_autom.py - TAB 2 - V10.11
+# - FIX: Corrige o crash 'KeyError' (Stale Cache)
+# - Mantém o Novo Fluxo Conjunta (V10.10 - Mesclado + Botão Inteligente)
+# - Mantém o Fix do @st.cache_data (V10.9)
 
 import pandas as pd
 import streamlit as st
@@ -175,9 +174,6 @@ def renderizar_painel_individual(df_final, painel, nome_empresa_calc, state):
                 st.warning("Nada foi enviado (nenhum item válido selecionado).")
 
 
-# =================================================================
-# >> INÍCIO DA CORREÇÃO (V10.10) - Novo Fluxo "CONJUNTA" <<
-# =================================================================
 def renderizar_painel_conjunta(df_conjunta_mesclada, state):
     """
     Renderiza a tabela CONJUNTA (mesclada) e o botão de envio inteligente.
@@ -270,9 +266,6 @@ def renderizar_painel_conjunta(df_conjunta_mesclada, state):
                 )
             except Exception as e:
                 st.error(f"Erro ao enviar para a cesta: {e}")
-# =================================================================
-# >> FIM DA CORREÇÃO (V10.10) <<
-# =================================================================
 
 
 # Função principal (Render)
@@ -288,26 +281,20 @@ def render_tab2(state, h, g, LT):
     
     if st.button(f"Gerar Compra — {nome_estado}", type="primary"):
         state.compra_autom_data["force_recalc"] = True
-        # Limpa o cache dos cálculos individuais se for CONJUNTA
         if nome_estado == "CONJUNTA":
              calcular_compra_para_empresa.clear()
 
-    # Se o cálculo não existir no estado ou se for forçado, execute-o
     if nome_estado not in state.compra_autom_data or state.compra_autom_data.get("force_recalc", False):
         state.compra_autom_data["force_recalc"] = False
         
         try:
-            # FLUXO CONJUNTA (Mesclado - V10.10)
             if nome_estado == "CONJUNTA":
-                # Calcula ALIVVIA (usando cache)
                 df_alivvia, painel_a = calcular_compra_para_empresa("ALIVVIA", state, h, g, LT)
                 df_a = df_alivvia[["SKU", "fornecedor", "Preco", "TOTAL_60d", "Estoque_Fisico", "Compra_Sugerida", "Valor_Compra_R$"]].copy()
                 
-                # Calcula JCA (usando cache)
                 df_jca, painel_j = calcular_compra_para_empresa("JCA", state, h, g, LT)
                 df_j = df_jca[["SKU", "TOTAL_60d", "Estoque_Fisico", "Compra_Sugerida", "Valor_Compra_R$"]].copy()
 
-                # Mescla os dois
                 df_conjunta = pd.merge(
                     df_a, df_j,
                     on="SKU",
@@ -315,10 +302,10 @@ def render_tab2(state, h, g, LT):
                     suffixes=(" - ALIVVIA", " - JCA")
                 )
                 
-                # Limpa e renomeia
                 df_conjunta = df_conjunta.fillna(0)
-                df_conjunta["fornecedor"] = df_conjunta["fornecedor - ALIVVIA"].replace(0, "")
-                df_conjunta["Preco"] = df_conjunta["Preco - ALIVVIA"].replace(0, df_conjunta["Preco - JCA"])
+                # Lógica de merge de fornecedor/preço
+                df_conjunta["fornecedor"] = np.where(df_conjunta["fornecedor - ALIVVIA"] != 0, df_conjunta["fornecedor - ALIVVIA"], df_conjunta["fornecedor - JCA"])
+                df_conjunta["Preco"] = np.where(df_conjunta["Preco - ALIVVIA"] != 0, df_conjunta["Preco - ALIVVIA"], df_conjunta["Preco - JCA"])
                 
                 df_conjunta = df_conjunta.rename(columns={
                     "TOTAL_60d - ALIVVIA": "Vendas 60d - ALIVVIA",
@@ -331,7 +318,6 @@ def render_tab2(state, h, g, LT):
                     "Valor_Compra_R$ - JCA": "Compra (R$) - JCA",
                 })
                 
-                # Colunas Finais
                 cols_finais = [
                     "SKU", "fornecedor", "Preco",
                     "Vendas 60d - ALIVVIA", "Vendas 60d - JCA",
@@ -339,12 +325,11 @@ def render_tab2(state, h, g, LT):
                     "Compra (Unid) - ALIVVIA", "Compra (Unid) - JCA",
                     "Compra (R$) - ALIVVIA", "Compra (R$) - JCA"
                 ]
-                df_conjunta = df_conjunta[cols_finais].copy()
+                # Garante que as colunas existem antes de filtrar
+                df_conjunta = df_conjunta[[col for col in cols_finais if col in df_conjunta.columns]].copy()
                 
-                # Salva no estado
                 state.compra_autom_data[nome_estado] = {"df": df_conjunta, "empresa": "CONJUNTA"}
             
-            # FLUXO INDIVIDUAL (ALIVVIA ou JCA)
             else:
                 dados_display = state.get(nome_estado, {})
                 col = st.columns(3)
@@ -367,18 +352,33 @@ def render_tab2(state, h, g, LT):
             st.error(str(e))
             return
 
-    # Renderização de resultados (usando o estado salvo)
+    # =================================================================
+    # >> INÍCIO DA CORREÇÃO (V10.11) - Stale Cache Fix <<
+    # =================================================================
     if nome_estado in state.compra_autom_data and "df" in state.compra_autom_data[nome_estado]:
         data_fixa = state.compra_autom_data[nome_estado]
         
         if nome_estado == "CONJUNTA":
-            # Renderiza o novo painel mesclado
-            renderizar_painel_conjunta(data_fixa["df"].copy(), state)
-        else:
-            # Renderiza o painel individual (como antes)
+            # Verifica se o cache (df) tem o schema novo (V10.10).
+            # Se não tiver (ex: é um cache do V10.9), limpa e recarrega.
+            df_cache_conjunta = data_fixa["df"]
+            coluna_necessaria_v10_10 = "Compra (Unid) - ALIVVIA" 
+            
+            if coluna_necessaria_v10_10 not in df_cache_conjunta.columns:
+                st.warning("Detectamos uma mudança de versão. Limpando cache de 'Compra Conjunta' e recarregando...")
+                del state.compra_autom_data["CONJUNTA"] # Limpa o cache
+                st.rerun() # Força o recalculo
+            else:
+                # O cache é válido, renderiza o painel mesclado
+                renderizar_painel_conjunta(df_cache_conjunta.copy(), state)
+        
+        else: # Se for ALIVVIA ou JCA (individual)
             renderizar_painel_individual(
                 data_fixa["df"].copy(), 
                 data_fixa["painel"], 
                 data_fixa["empresa"],
                 state
             )
+    # =================================================================
+    # >> FIM DA CORREÇÃO (V10.11) <<
+    # =================================================================
