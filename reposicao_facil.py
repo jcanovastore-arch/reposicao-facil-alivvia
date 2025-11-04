@@ -1,9 +1,6 @@
-# reposicao_facil.py - ESTABILIDADE V10.3 (Anti-Flicker)
-# - Persistência em disco (.uploads) + manifesto + reidratação automática
-# - Upload sem st.rerun() (evita "tela piscando")
-# - Prévia sob demanda (expander) + parsing cacheado
-# - Sidebar sem conflito de estado
-# - Tabs 2/3/4/5 compatíveis com seus módulos existentes
+# reposicao_facil.py - ESTABILIDADE V10.7 (Fix Cesta)
+# - Corrige o bug da cesta (oc_cesta -> oc_cesta_itens)
+# - Mantém o V10.3 (persistência, anti-flicker)
 
 import datetime as dt
 import json
@@ -15,7 +12,7 @@ from typing import Optional
 import pandas as pd
 import streamlit as st
 
-# ====== MÓDULOS DO PROJETO ======
+# ====== MÓDulos DO PROJETO ======
 import logica_compra
 import mod_compra_autom
 import mod_alocacao
@@ -42,7 +39,7 @@ try:
 except Exception:
     gerenciador_oc = None
 
-VERSION = "v10.3 – Disco + Anti-Flicker + Cache de parsing"
+VERSION = "v10.7 – Disco + Anti-Flicker + Fix Cesta + Fluxo Conjunta"
 
 # ===================== CONFIG PÁGINA =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -52,13 +49,20 @@ DEFAULT_SHEET_LINK = (
     "edit?usp=sharing&ouid=109458533144345974874&rtpof=true&sd=true"
 )
 
-# ===================== ESTADO INICIAL =====================
+# ===================== ESTADO INICIAL (CORRIGIDO V10.7) =====================
 def _ensure_state():
     st.session_state.setdefault("catalogo_df", None)
     st.session_state.setdefault("kits_df", None)
     st.session_state.setdefault("loaded_at", None)
     st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK)
-    st.session_state.setdefault("oc_cesta", pd.DataFrame())
+    
+    # =====================================================================
+    # >> INÍCIO DA CORREÇÃO (V10.7) <<
+    # O bug estava aqui. A cesta de OCs deve ser um dict (conforme V10.5)
+    # e não um DataFrame (como estava no V10.3).
+    st.session_state.setdefault("oc_cesta_itens", {"ALIVVIA": [], "JCA": []})
+    # =====================================================================
+    
     st.session_state.setdefault("compra_autom_data", {})
     for emp in ("ALIVVIA", "JCA"):
         st.session_state.setdefault(emp, {})
@@ -168,15 +172,9 @@ preload_persisted_uploads()
 # ===================== HELPERS DE DATAFRAME / PARSING CACHEADO =====================
 @st.cache_data(show_spinner=False)
 def _parse_table_cached(name_lower: str, raw_bytes: bytes) -> Optional[pd.DataFrame]:
-    """
-    Lê o arquivo em memória de forma cacheada (chave: name_lower + sha1 dos bytes).
-    """
     if not name_lower or not raw_bytes:
         return None
-
-    # sha1 compõe a chave de cache interna do Streamlit
     _ = hashlib.sha1(raw_bytes).hexdigest()
-
     bio = io.BytesIO(raw_bytes)
     try:
         if name_lower.endswith(".csv"):
@@ -193,9 +191,6 @@ def _parse_table_cached(name_lower: str, raw_bytes: bytes) -> Optional[pd.DataFr
         return None
 
 def df_from_saved_cached(empresa: str, tipo: str) -> Optional[pd.DataFrame]:
-    """
-    Igual ao df_from_saved, mas usando o cache de parsing + reidratação automática de disco.
-    """
     item_name = st.session_state[empresa][tipo]["name"]
     item_bytes = st.session_state[empresa][tipo]["bytes"]
 
@@ -218,7 +213,6 @@ def clear_upload(empresa: str, tipo: str, also_disk: bool = True) -> None:
 # ===================== SIDEBAR / PARÂMETROS =====================
 with st.sidebar:
     st.subheader("Parâmetros")
-    # Importante: não atribuir widgets a st.session_state manualmente; use key
     h  = st.selectbox("Horizonte (dias)", [30, 60, 90], index=1, key="h")
     g  = st.number_input("Crescimento % ao mês", value=0.0, step=1.0, key="g")
     LT = st.number_input("Lead time (dias)", value=0, step=1, min_value=0, key="LT")
@@ -237,7 +231,7 @@ with st.sidebar:
         if st.button("Carregar padrão agora", use_container_width=True):
             try:
                 cat = get_padrao_from_sheets(DEFAULT_SHEET_ID)
-                st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku": "sku"})
+                st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku":"sku"})
                 st.session_state.kits_df = cat.kits_reais
                 st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 st.success("Padrão carregado com sucesso.")
@@ -259,7 +253,7 @@ with st.sidebar:
         try:
             content = logica_compra.baixar_xlsx_por_link_google(st.session_state.alt_sheet_link.strip())
             cat = logica_compra._carregar_padrao_de_content(content)
-            st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku": "sku"})
+            st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku":"sku"})
             st.session_state.kits_df = cat.kits_reais
             st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             st.success("Padrão carregado (link alternativo).")
@@ -275,7 +269,7 @@ if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
     st.warning("► Carregue o **Padrão (KITS/CAT)** no sidebar antes de usar as abas.")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["📂 Dados das Empresas", "🧮 Compra Automática", "📦 Alocação de Compra", "🛒 Ordem de Compra (OC)", "✨ Gerenciador de OCs"]
+    ["📂 Dados das Empresas", "🧮 Compra Automática", "📦 Alocação (Desativado)", "🛒 Ordem de Compra (OC)", "✨ Gerenciador de OCs"]
 )
 
 # ===================== TAB 1 — UPLOADS COM PERSISTÊNCIA (ANTI-FLICKER) =====================
@@ -286,21 +280,15 @@ with tab1:
     def render_upload_slot(emp: str, slot: str, label: str, col):
         with col:
             st.markdown(f"**{label} — {emp}**")
-
-            # Uploader sempre visível (keys estáveis)
             up_file = st.file_uploader(
                 "CSV/XLSX/XLS",
                 type=["csv", "xlsx", "xls"],
                 key=f"up_{slot}_{emp}"
             )
-
-            # 1) Salva na sessão SEM chamar st.rerun() (evita flicker duplo)
             if up_file is not None:
                 st.session_state[emp][slot]["name"] = up_file.name
                 st.session_state[emp][slot]["bytes"] = up_file.getbuffer().tobytes()
                 st.info(f"💾 Salvo na sessão: {up_file.name}")
-
-            # 2) Botões de ação
             c1, c2 = st.columns(2)
             with c1:
                 if st.button(f"Salvar {label} (Confirmar)", key=f"btn_save_{slot}_{emp}", use_container_width=True):
@@ -315,15 +303,11 @@ with tab1:
                 if st.button(f"Limpar {label}", key=f"btn_clear_{slot}_{emp}", use_container_width=True):
                     clear_upload(emp, slot, also_disk=True)
                     st.info("Removido da sessão e do disco.")
-
-            # 3) Status de disco (se houver)
             disk_info = load_from_disk_if_any(emp, slot)
             if disk_info:
                 short_sha = (disk_info.get("sha1") or "")[:8]
                 when = disk_info.get("saved_at") or "-"
                 st.caption(f"📦 Disco: {disk_info['name']} • {short_sha} • {when}")
-
-            # 4) Prévia só quando o usuário quiser (reduz custo de reruns)
             with st.expander("Prévia (opcional)"):
                 dfp = df_from_saved_cached(emp, slot)
                 if dfp is not None:
@@ -337,11 +321,9 @@ with tab1:
         c1, c2 = st.columns(2)
         render_upload_slot(emp, "FULL", "FULL", c1)
         render_upload_slot(emp, "VENDAS", "Shopee/MT (Vendas)", c2)
-
         st.markdown("---")
         c3, _ = st.columns([1, 1])
         render_upload_slot(emp, "ESTOQUE", "Estoque Físico", c3)
-
         st.markdown("---")
         b1, b2 = st.columns(2)
         with b1:
@@ -363,8 +345,7 @@ with tab1:
                 for slot in ("FULL", "VENDAS", "ESTOQUE"):
                     clear_upload(emp, slot, also_disk=True)
                 st.info(f"{emp}: sessão e disco limpos.")
-
-    # Render
+    
     render_block("ALIVVIA")
     render_block("JCA")
 
@@ -377,7 +358,6 @@ with tab1:
 
 # ===================== TAB 2 — COMPRA AUTOMÁTICA =====================
 with tab2:
-    # Passe variáveis locais (não atribua widgets ao session_state)
     h_val = h
     g_val = g
     lt_val = LT
