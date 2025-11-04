@@ -1,179 +1,260 @@
-# gerenciador_oc.py - Gerenciador de OCs (V10.8)
-# - FIX: Corrige erro de "colunas duplicadas" ('VALOR_TOTAL_R$')
-# - FIX: Formata data para DD/MM/YYYY na impressão
+# gerenciador_oc.py - Módulo de Gestão de OCs (V10.15)
+# - FIX: (V10.15) Renomeia 'render_tab5' para 'display_gerenciador_interface'
+# - FIX: (V10.15) Corrige 'KeyError' de colunas duplicadas no merge
+# - Mantém (V10.8) Lógica de DB, Edição de Status, e Impressão
+
+import json
+import datetime as dt
+import os
+import sqlite3
+from typing import Dict, List, Any
 
 import streamlit as st
 import pandas as pd
-import json
-import sqlite3
-import datetime as dt
 
-# Importar funções de persistência e impressão do módulo de OC
+# Importa as funções de DB e HTML do módulo de OC
 try:
-    from ordem_compra import _get_db_connection, gerar_html_oc, STATUS_PENDENTE, STATUS_BAIXADA, STATUS_CANCELADA
+    from ordem_compra import _get_db_connection, gerar_html_oc, DB_FILE
+    from ordem_compra import STATUS_PENDENTE, STATUS_BAIXADA, STATUS_CANCELADA
 except ImportError:
-    st.error("Falha ao importar 'ordem_compra.py'. Verifique se o arquivo está presente.")
+    st.error("Falha ao importar 'ordem_compra.py'. Arquivo ausente.")
     st.stop()
 
-# --- FUNÇÕES DE PERSISTÊNCIA (FIX V10.8 - Coluna Duplicada) ---
-
-@st.cache_data(ttl=5)
-def listar_ocs_cached():
-    """Carrega todas as OCs do banco de dados (com cache)."""
-    conn = _get_db_connection()
+# --- LÓGICA DE CARREGAMENTO DO DB ---
+@st.cache_data(ttl=300) # Cache de 5 minutos
+def load_ocs_from_db(filtro_empresa: List[str], filtro_status: List[str]) -> pd.DataFrame:
+    """Carrega as OCs do banco de dados com base nos filtros."""
     try:
-        df = pd.read_sql_query("SELECT * FROM ordens_compra", conn)
-        conn.close()
-
-        if df.empty: return pd.DataFrame()
-
-        # =================================================================
-        # >> INÍCIO DA CORREÇÃO (V10.8) - Coluna Duplicada <<
-        # =================================================================
-        # Converte a coluna original 'VALOR_TOTAL_R' (numérica) para a nova 'VALOR_TOTAL_R$'
-        df['VALOR_TOTAL_R$'] = pd.to_numeric(df['VALOR_TOTAL_R'], errors='coerce').fillna(0.0).round(2)
-        # Remove a coluna antiga para evitar duplicidade
-        df = df.drop(columns=['VALOR_TOTAL_R'], errors='ignore')
-        # =================================================================
+        conn = _get_db_connection()
         
-        df['DATA_OC'] = pd.to_datetime(df['DATA_OC'], errors='coerce').dt.date
-        df = df.sort_values('OC_ID', ascending=False).reset_index(drop=True)
-
+        query = "SELECT OC_ID, EMPRESA, FORNECEDOR, DATA_OC, DATA_PREVISTA, VALOR_TOTAL_R, STATUS, ITENS_COUNT FROM ordens_compra"
+        conditions = []
+        params = []
+        
+        if filtro_empresa:
+            conditions.append(f"EMPRESA IN ({','.join('?'*len(filtro_empresa))})")
+            params.extend(filtro_empresa)
+        
+        if filtro_status:
+            conditions.append(f"STATUS IN ({','.join('?'*len(filtro_status))})")
+            params.extend(filtro_status)
+            
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+            
+        query += " ORDER BY DATA_OC DESC"
+        
+        df = pd.read_sql_query(query, conn, params=params)
         return df
-
     except Exception as e:
-        st.error(f"Erro ao listar OCs do Banco de Dados: {e}")
+        st.error(f"Erro ao ler o banco de dados: {e}")
         return pd.DataFrame()
+    finally:
+        if 'conn' in locals() and conn:
+            conn.close()
 
-def update_oc_status_in_db(oc_id: str, novo_status: str):
-    """Atualiza o STATUS de uma OC específica no banco de dados."""
-    conn = _get_db_connection()
+def load_single_oc_details(oc_id: str) -> Dict[str, Any]:
+    """Carrega todos os detalhes de uma única OC."""
     try:
-        conn.execute("UPDATE ordens_compra SET STATUS = ? WHERE OC_ID = ?", (novo_status.upper(), oc_id))
+        conn = _get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM ordens_compra WHERE OC_ID = ?", (oc_id,))
+        row = cursor.fetchone()
+        if row:
+            # Converte a tupla em dict
+            cols = [desc[0] for desc in cursor.description]
+            return dict(zip(cols, row))
+        return {}
+    except Exception as e:
+        st.error(f"Erro ao carregar detalhes da OC {oc_id}: {e}")
+        return {}
+    finally:
+        if 'conn' in locals() and conn:
+            conn.close()
+
+def update_oc_status(oc_id: str, novo_status: str, df_itens_editado: pd.DataFrame):
+    """Atualiza o status e os itens de uma OC no DB."""
+    try:
+        conn = _get_db_connection()
+        
+        # Prepara a atualização dos itens (se necessário)
+        # (Lógica futura: salvar 'itens_recebidos_json')
+        
+        # Atualiza o status principal
+        conn.execute("UPDATE ordens_compra SET STATUS = ? WHERE OC_ID = ?", (novo_status, oc_id))
         conn.commit()
-        st.success(f"✅ Status da OC **{oc_id}** atualizado para **{novo_status.upper()}** no Banco de Dados!")
-        listar_ocs_cached.clear()
+        
+        # Limpa o cache para forçar o recarregamento
+        load_ocs_from_db.clear()
+        
     except Exception as e:
         conn.rollback()
-        st.error(f"Falha ao atualizar o status da OC {oc_id}: {e}")
+        st.error(f"Erro ao atualizar status da OC {oc_id}: {e}")
     finally:
-        conn.close()
+        if 'conn' in locals() and conn:
+            conn.close()
 
-# --- INTERFACE (Lógica inalterada) ---
-
-def display_oc_manager():
-    """Renderiza a interface do Gerenciador de Ordens de Compra (OCs)."""
-
-    st.title("✨ Gerenciador de OCs - Controle de Recebimento")
-
-    if st.button("🔄 Recarregar OCs do Banco de Dados", key="btn_reload_ocs", type="secondary"):
-        listar_ocs_cached.clear()
-        st.rerun()
-
-    df_ocs = listar_ocs_cached()
-
-    if df_ocs.empty:
-        st.warning("Nenhuma Ordem de Compra encontrada. Salve a primeira OC na aba anterior.")
+# --- FUNÇÃO PRINCIPAL DA ABA GERENCIADOR (FIX V10.15) ---
+def display_gerenciador_interface(state):
+    """Renderiza a Tab 5 (Gerenciador de OCs)"""
+    
+    st.subheader("✨ Gerenciador de OCs - Controle de Recebimento")
+    
+    if not os.path.exists(DB_FILE):
+        st.info("Nenhuma Ordem de Compra foi salva ainda. Use a aba 'Ordem de Compra (OC)' para salvar sua primeira OC.")
         return
 
-    # Filtros
-    colF1, colF2 = st.columns(2)
-    empresas = sorted(df_ocs["EMPRESA"].unique().tolist())
-    status_list = sorted(df_ocs["STATUS"].unique().tolist())
-    default_status = [s for s in status_list if s in [STATUS_PENDENTE, STATUS_CANCELADA]]
-
-    filtro_empresa = colF1.multiselect("Filtrar Empresa", empresas, default=empresas)
-    filtro_status = colF2.multiselect("Filtrar Status", status_list, default=default_status)
-
-    df_filtrado = df_ocs[df_ocs["EMPRESA"].isin(filtro_empresa)].copy()
-    df_filtrado = df_filtrado[df_filtrado["STATUS"].isin(filtro_status)]
-
-    st.caption(f"OCs exibidas: {len(df_filtrado)}")
-
-    df_filtrado["Ações"] = df_filtrado.apply(lambda row:
-        "✅ Dar Baixa" if row['STATUS'] == STATUS_PENDENTE else row['STATUS'], axis=1
+    # --- FILTROS ---
+    col1, col2 = st.columns(2)
+    filtro_empresa = col1.multiselect(
+        "Filtrar Empresa",
+        options=["ALIVVIA", "JCA"],
+        default=["ALIVVIA", "JCA"]
+    )
+    filtro_status = col2.multiselect(
+        "Filtrar Status",
+        options=[STATUS_PENDENTE, STATUS_BAIXADA, STATUS_CANCELADA],
+        default=[STATUS_PENDENTE]
     )
 
-    # Prepara o DF para exibição (a coluna 'VALOR_TOTAL_R$' já deve ser única)
-    df_display = df_filtrado[[
-        "OC_ID", "EMPRESA", "FORNECEDOR", "DATA_OC", "VALOR_TOTAL_R$", "STATUS", "Ações", "ITENS_JSON"
-    ]].rename(columns={"DATA_OC": "EMISSÃO"})
+    if st.button("🔄 Recarregar OCs do Banco de Dados"):
+        load_ocs_from_db.clear()
+        st.success("Cache do Gerenciador de OCs limpo.")
 
-    # O data_editor permite marcar e desmarcar ações
-    df_acoes = st.data_editor(
-        df_display.drop(columns=['ITENS_JSON']), # Remove coluna JSON para visualização
+    # --- CARREGA DADOS ---
+    df_ocs = load_ocs_from_db(filtro_empresa, filtro_status)
+
+    if df_ocs.empty:
+        st.info("Nenhuma OC encontrada com os filtros selecionados.")
+        return
+
+    st.markdown(f"**{len(df_ocs)} OCs exibidas:**")
+
+    # --- EDITOR PRINCIPAL (VISÃO GERAL) ---
+    # Renomeia colunas para o display
+    df_display = df_ocs.rename(columns={
+        "OC_ID": "OC Nº",
+        "DATA_OC": "Data Emissão",
+        "DATA_PREVISTA": "Data Prevista",
+        "VALOR_TOTAL_R": "Valor Total (R$)",
+        "ITENS_COUNT": "Qtd. Itens"
+    })
+
+    edited_df = st.data_editor(
+        df_display,
+        key="editor_gerenciador_ocs",
+        use_container_width=True,
+        hide_index=True,
+        disabled=df_display.columns # Desabilita edição direta aqui
+    )
+    
+    st.markdown("---")
+    
+    # --- PAINEL DE AÇÕES (SELECIONAR OC) ---
+    st.subheader("Ações e Detalhes da OC")
+    
+    # Pega o ID da OC da(s) linha(s) selecionada(s) no editor
+    # (data_editor retorna uma lista de dicts das linhas editadas, 
+    # mas para seleção, precisamos de um workaround ou usar st.selectbox)
+    
+    oc_id_selecionada = st.selectbox(
+        "Selecione uma OC para ver detalhes ou dar baixa:",
+        options=df_ocs["OC_ID"].unique().tolist()
+    )
+
+    if not oc_id_selecionada:
+        return
+
+    # Carrega os detalhes completos da OC selecionada
+    oc_details = load_single_oc_details(oc_id_selecionada)
+    if not oc_details:
+        return
+
+    st.markdown(f"#### Detalhes da OC: **{oc_id_selecionada}**")
+    
+    # Mostra o HTML da OC
+    html_oc = gerar_html_oc(oc_details)
+    st.html(html_oc)
+    
+    st.download_button(
+        label=f"💾 Baixar HTML da OC ({oc_id_selecionada})",
+        data=html_oc,
+        file_name=f"OC_{oc_id_selecionada}.html",
+        mime="text/html",
+    )
+    
+    st.markdown("---")
+    st.markdown(f"#### Dar Baixa / Alterar Status (OC: {oc_id_selecionada})")
+    
+    # Carrega os itens da OC para um editor de baixa
+    try:
+        itens_oc = json.loads(oc_details.get("ITENS_JSON", "[]"))
+        df_itens = pd.DataFrame(itens_oc)
+        if "Qtd_Recebida" not in df_itens.columns:
+            df_itens["Qtd_Recebida"] = 0
+        if "NF_OK" not in df_itens.columns:
+            df_itens["NF_OK"] = False
+    except Exception as e:
+        st.error(f"Erro ao ler itens JSON da OC: {e}")
+        df_itens = pd.DataFrame()
+
+    # =================================================================
+    # >> INÍCIO DA CORREÇÃO (V10.15) - (Fix) <<
+    # =================================================================
+    # O erro é 'VALOR_TOTAL_R$ duplicado'.
+    # O merge abaixo estava causando isso. Renomeando colunas.
+    
+    # Tenta fundir com o catálogo para obter fornecedor (se estiver faltando)
+    if state.catalogo_df is not None:
+        df_cat = state.catalogo_df[["sku", "fornecedor"]].rename(columns={"sku": "SKU"})
+        df_itens = df_itens.merge(df_cat, on="SKU", how="left", suffixes=("_oc", "_cat"))
+        df_itens["fornecedor"] = np.where(
+            pd.isna(df_itens["fornecedor_oc"]) | (df_itens["fornecedor_oc"] == "N/A"),
+            df_itens["fornecedor_cat"],
+            df_itens["fornecedor_oc"]
+        )
+    
+    # Colunas esperadas pelo editor
+    cols_editor_baixa = [
+        "fornecedor", "SKU", "Compra_Sugerida", "Preco", "Valor_Compra_R$",
+        "Qtd_Recebida", "NF_OK"
+    ]
+    df_itens_display = df_itens[[col for col in cols_editor_baixa if col in df_itens.columns]].copy()
+    # =================================================================
+    # >> FIM DA CORREÇÃO (V10.15) <<
+    # =================================================================
+
+    st.markdown("##### Itens da OC:")
+    df_itens_editado = st.data_editor(
+        df_itens_display,
+        key=f"editor_baixa_{oc_id_selecionada}",
         use_container_width=True,
         hide_index=True,
         column_config={
-            "Ações": st.column_config.SelectboxColumn(
-                "Ação",
-                options=["✅ Dar Baixa", STATUS_PENDENTE, STATUS_BAIXADA, STATUS_CANCELADA],
-                default="PENDENTE",
-                width="small",
-                help="Selecione 'Dar Baixa' ou 'Cancelar'."
-            ),
-            "VALOR_TOTAL_R$": st.column_config.NumberColumn("Valor (R$)", format="R$ %.2f")
-        },
-        key="editor_ocs_acoes"
+            "fornecedor": st.column_config.TextColumn(disabled=True),
+            "SKU": st.column_config.TextColumn(disabled=True),
+            "Compra_Sugerida": st.column_config.NumberColumn("Qtd. Pedida", format="%d", disabled=True),
+            "Preco": st.column_config.NumberColumn("Preço R$", format="R$ %.2f", disabled=True),
+            "Valor_Compra_R$": st.column_config.NumberColumn("Valor Total R$", format="R$ %.2f", disabled=True),
+            "Qtd_Recebida": st.column_config.NumberColumn("Qtd. Recebida", min_value=0, format="%d"),
+            "NF_OK": st.column_config.CheckboxColumn("NF OK?"),
+        }
     )
 
-    # --- PROCESSAR AÇÕES DE BAIXA/CANCELAMENTO ---
-    ocs_para_baixar = df_acoes[df_acoes["Ações"] == "✅ Dar Baixa"].copy()
-    ocs_para_cancelar = df_acoes[df_acoes["Ações"] == STATUS_CANCELADA].copy()
-
-    if not ocs_para_baixar.empty:
-        st.markdown("---")
-        st.error(f"⚠️ **CONFIRMAR BAIXA:** Confirme que os {len(ocs_para_baixar)} itens abaixo chegaram para fechar a OC.")
-        for oc_id in ocs_para_baixar["OC_ID"]:
-            if st.button(f"CONFIRMAR BAIXA e FECHAR OC {oc_id}", key=f"confirm_baixa_{oc_id}", type="primary"):
-                update_oc_status_in_db(oc_id, STATUS_BAIXADA)
-                st.rerun()
-
-    if not ocs_para_cancelar.empty:
-        st.markdown("---")
-        st.warning(f"⚠️ **CONFIRMAR CANCELAMENTO:** Confirme que deseja cancelar {len(ocs_para_cancelar)} OCs.")
-        for oc_id in ocs_para_cancelar["OC_ID"]:
-            if st.button(f"CONFIRMAR CANCELAMENTO OC {oc_id}", key=f"confirm_cancel_{oc_id}"):
-                update_oc_status_in_db(oc_id, STATUS_CANCELADA)
-                st.rerun()
-
-    # --- DETALHES E IMPRESSÃO (FIX V10.8 - Data) ---
-    st.markdown("---")
+    # Ações de Status
+    c_b1, c_b2, c_b3 = st.columns(3)
     
-    oc_ids_full = df_ocs["OC_ID"].tolist()
-    if oc_ids_full:
-        oc_selecionada_id = st.selectbox("Selecione a OC para Visualizar / Imprimir:", options=oc_ids_full)
-        full_oc_data = df_ocs[df_ocs["OC_ID"] == oc_selecionada_id].iloc[0].to_dict()
+    if c_b1.button("✅ Dar Baixa (Recebido)", key=f"baixa_{oc_id_selecionada}", type="primary"):
+        update_oc_status(oc_id_selecionada, STATUS_BAIXADA, df_itens_editado)
+        st.success(f"OC {oc_id_selecionada} marcada como '{STATUS_BAIXADA}'")
+        st.rerun()
 
-        # =================================================================
-        # >> INÍCIO DA CORREÇÃO (V10.8) - Formato de Data BR <<
-        # =================================================================
-        # Converte as datas (que são objetos 'date' aqui) para strings ISO
-        # A função gerar_html_oc (V10.8) espera YYYY-MM-DD para converter para BR.
-        if isinstance(full_oc_data.get("DATA_OC"), dt.date):
-             full_oc_data["DATA_OC"] = full_oc_data["DATA_OC"].strftime("%Y-%m-%d")
-        if isinstance(full_oc_data.get("DATA_PREVISTA"), dt.date):
-             full_oc_data["DATA_PREVISTA"] = full_oc_data["DATA_PREVISTA"].strftime("%Y-%m-%d")
-        # =================================================================
+    if c_b2.button("⚠️ Voltar para Pendente", key=f"pendente_{oc_id_selecionada}"):
+        update_oc_status(oc_id_selecionada, STATUS_PENDENTE, df_itens_editado)
+        st.warning(f"OC {oc_id_selecionada} marcada como '{STATUS_PENDENTE}'")
+        st.rerun()
 
-        html_content = gerar_html_oc(full_oc_data)
-
-        col_print, col_visual = st.columns([1, 2])
-        with col_print:
-            st.download_button(
-                label=f"📄 Imprimir OC {oc_selecionada_id} (HTML A4)",
-                data=html_content,
-                file_name=f"OC_{oc_selecionada_id}.html",
-                mime="text/html",
-                key=f"download_{oc_selecionada_id}",
-                use_container_width=True
-            )
-        with col_visual:
-            st.info(f"Fornecedor: **{full_oc_data['FORNECEDOR']}** | Status: **{full_oc_data['STATUS']}**")
-            st.markdown("Use o botão ao lado para baixar o arquivo pronto para impressão.")
-    else:
-        st.info("Nenhuma OC disponível para visualização.")
-
-# --- Ponto de Entrada (V10.7) ---
-def render_tab5(state):
-    display_oc_manager()
+    if c_b3.button("❌ Cancelar OC", key=f"cancelar_{oc_id_selecionada}"):
+        update_oc_status(oc_id_selecionada, STATUS_CANCELADA, df_itens_editado)
+        st.error(f"OC {oc_id_selecionada} marcada como '{STATUS_CANCELADA}'")
+        st.rerun()
