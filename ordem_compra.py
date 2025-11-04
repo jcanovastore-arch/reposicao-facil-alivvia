@@ -1,7 +1,8 @@
-# ordem_compra.py - Módulo de Lógica de Ordem de Compra (V10.8)
-# - FIX: Habilita edição de Preço no data_editor (permite inclusão manual)
-# - FIX: Corrige cálculo de Valor_Total pós-edição
-# - FIX: Formata data para DD/MM/YYYY na impressão
+# ordem_compra.py - Módulo de Lógica de Ordem de Compra (V10.14)
+# - FIX: Corrige KeyError: 'Compra_Sugerida' (V10.13) ao carregar Tab 4 com cesta vazia.
+# - Mantém (Req 1) Selectbox (autoselect) do Catálogo (V10.13)
+# - Mantém (Req 2) num_rows="dynamic" (V10.13)
+# - Mantém (Req 3-6) Persistência via SQLite (V10.8)
 
 import json
 import datetime as dt
@@ -58,7 +59,7 @@ def _init_cesta():
     st.session_state.setdefault("oc_cesta_itens", {"ALIVVIA": [], "JCA": []})
 
 def adicionar_itens_cesta(empresa: str, df: pd.DataFrame):
-    """Adiciona itens à cesta (lógica V10.7)."""
+    """Adiciona itens à cesta (lógica V10.10)."""
     _init_cesta()
     cesta_atual = st.session_state.oc_cesta_itens.get(empresa, [])
     itens_para_processar = df.to_dict("records")
@@ -127,7 +128,7 @@ def salvar_oc(oc_data: Dict[str, Any]):
     finally:
         conn.close()
 
-# --- FUNÇÃO DE IMPRESSÃO (FIX V10.8 - Data) ---
+# --- FUNÇÃO DE IMPRESSÃO (FIX V10.8 - Data BR) ---
 def gerar_html_oc(oc_data: Dict[str, Any]) -> str:
     itens = json.loads(oc_data.get("ITENS_JSON", "[]"))
     itens_html = ""
@@ -146,22 +147,15 @@ def gerar_html_oc(oc_data: Dict[str, Any]) -> str:
 
     empresa = oc_data.get("EMPRESA", "ALIVVIA")
     
-    # =================================================================
-    # >> INÍCIO DA CORREÇÃO (V10.8) - Formato de Data BR <<
-    # =================================================================
+    # (Req 3) Formato de Data BR (V10.8)
     try:
-        # Tenta converter data (que vem como string YYYY-MM-DD do DB)
         data_oc_str = dt.datetime.strptime(str(oc_data["DATA_OC"]), "%Y-%m-%d").strftime("%d/%m/%Y")
     except ValueError:
-        data_oc_str = str(oc_data.get("DATA_OC", "-")) # Fallback
-
+        data_oc_str = str(oc_data.get("DATA_OC", "-"))
     try:
         data_prev_str = dt.datetime.strptime(str(oc_data["DATA_PREVISTA"]), "%Y-%m-%d").strftime("%d/%m/%Y")
     except ValueError:
-        data_prev_str = str(oc_data.get("DATA_PREVISTA", "-")) # Fallback
-    # =================================================================
-    # >> FIM DA CORREÇÃO (V10.8) <<
-    # =================================================================
+        data_prev_str = str(oc_data.get("DATA_PREVISTA", "-"))
 
     html = f"""
     <style>
@@ -210,60 +204,78 @@ def gerar_html_oc(oc_data: Dict[str, Any]) -> str:
     """
     return html
 
-# --- FUNÇÃO PRINCIPAL DA ABA DE GERAÇÃO OC (FIX V10.8 - Edição) ---
-def display_oc_interface(df_reposicao_final):
+# --- FUNÇÃO PRINCIPAL DA ABA DE GERAÇÃO OC (FIX V10.14 - KeyError Cesta Vazia) ---
+def display_oc_interface(state):
     _init_cesta()
     empresa = st.radio("Empresa para OC", ["ALIVVIA", "JCA"], horizontal=True, key="oc_emp_radio")
     
-    cesta_itens = st.session_state.oc_cesta_itens.get(empresa, [])
+    cesta_itens = state.oc_cesta_itens.get(empresa, [])
 
-    if not cesta_itens:
-        st.info("🛒 A Cesta está vazia. Selecione itens na 'Compra Automática' (Tab 2).")
-        return
+    # Pega a lista de SKUs do Catálogo (Req 1)
+    sku_list = []
+    if state.catalogo_df is not None and not state.catalogo_df.empty:
+        sku_list = state.catalogo_df["sku"].dropna().astype(str).sort_values().unique().tolist()
+    else:
+        st.error("Catálogo não carregado. Adição manual de SKUs desabilitada.")
 
+    # =================================================================
+    # >> INÍCIO DA CORREÇÃO (V10.14) - KeyError 'Compra_Sugerida' <<
+    # =================================================================
     df_cesta = pd.DataFrame(cesta_itens)
-    # Garante que as colunas existam mesmo se a cesta estiver vazia e for editada
-    df_cesta["Qtd_Comprar"] = df_cesta["Compra_Sugerida"]
-    df_cesta["Valor_Total"] = (df_cesta["Qtd_Comprar"] * df_cesta["Preco"]).round(2)
-    df_cesta = df_cesta.fillna({"fornecedor": "", "SKU": ""}) # Prepara para adição de novas linhas
+    
+    # Colunas que o data_editor precisa
+    colunas_editor = ["fornecedor", "SKU", "Qtd_Comprar", "Preco", "Valor_Total"]
 
-    st.subheader(f"Cesta de Itens para {empresa} ({len(df_cesta)} SKUs)")
+    if not df_cesta.empty:
+        # Se a cesta NÃO está vazia, processa os dados
+        df_cesta["Qtd_Comprar"] = df_cesta["Compra_Sugerida"]
+        df_cesta["Valor_Total"] = (df_cesta["Qtd_Comprar"] * df_cesta["Preco"]).round(2)
+        df_cesta = df_cesta.fillna({"fornecedor": "", "SKU": ""})
+        # Garante que só as colunas certas passem
+        df_cesta_display = df_cesta[[col for col in colunas_editor if col in df_cesta.columns]].copy()
+    else:
+        # Se a cesta ESTÁ vazia, cria um DF vazio com as colunas certas
+        # Isso corrige o KeyError e permite a adição manual (Req 1)
+        st.info("🛒 A Cesta está vazia. Adicione itens manualmente abaixo (clicando no '+') ou nas abas 2 e 3.")
+        df_cesta_display = pd.DataFrame(columns=colunas_editor)
+    # =================================================================
+    # >> FIM DA CORREÇÃO (V10.14) <<
+    # =================================================================
+
+    st.subheader(f"Cesta de Itens para {empresa} ({len(df_cesta_display)} SKUs)")
 
     with st.form(key="form_gerar_oc"):
         st.markdown("### 1. Revisão e Detalhes")
-        st.caption("Você pode editar 'Qtd. Comprar', 'Preço Unitário' ou adicionar novas linhas.")
+        st.caption("Você pode: **Editar** 'Qtd. Comprar'/'Preço', **Adicionar** linhas (botão +) ou **Excluir** (ícone de lixeira ao lado da linha).")
 
         df_editado = st.data_editor(
-            df_cesta[[
-                "fornecedor", "SKU", "Qtd_Comprar", "Preco", "Valor_Total"
-            ]],
+            df_cesta_display,
             use_container_width=True, hide_index=True,
-            num_rows="dynamic", # Permite adicionar/deletar linhas
+            num_rows="dynamic", # (Req 2) Permite adicionar/deletar linhas
             column_config={
-                "fornecedor": st.column_config.TextColumn("Fornecedor"),
-                "SKU": st.column_config.TextColumn("SKU"),
+                "fornecedor": st.column_config.TextColumn("Fornecedor", help="Digite o fornecedor (obrigatório se adicionar linha)"),
+                
+                # (Req 1) SKU agora é um Autoselect
+                "SKU": st.column_config.SelectboxColumn(
+                    "SKU",
+                    options=sku_list,
+                    required=True,
+                    help="Selecione o SKU do seu catálogo"
+                ),
+                
                 "Qtd_Comprar": st.column_config.NumberColumn("Qtd. Comprar", min_value=0, format="%d"),
-                
-                # =================================================================
-                # >> INÍCIO DA CORREÇÃO (V10.8) - Edição de Preço <<
-                # =================================================================
                 "Preco": st.column_config.NumberColumn("Preço Unitário", format="R$ %.2f", disabled=False),
-                # =================================================================
-                
                 "Valor_Total": st.column_config.NumberColumn("Valor Total", format="R$ %.2f", disabled=True),
             },
             key=f"editor_cesta_final_{empresa}"
         )
-
-        # =================================================================
-        # >> INÍCIO DA CORREÇÃO (V10.8) - Recálculo pós-edição <<
-        # =================================================================
+    
         # Recalcula o valor total com base nos dados ATUAIS do editor
         df_final = df_editado.copy()
+        
         df_final["Qtd_Comprar"] = pd.to_numeric(df_final["Qtd_Comprar"], errors="coerce").fillna(0).astype(int)
         df_final["Preco"] = pd.to_numeric(df_final["Preco"], errors="coerce").fillna(0.0)
         df_final["Valor_Total"] = (df_final["Qtd_Comprar"] * df_final["Preco"]).round(2)
-        # =================================================================
         
         total_oc = df_final["Valor_Total"].sum()
         st.metric("VALOR TOTAL ESTIMADO DA OC", f"R$ {total_oc:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
@@ -272,35 +284,30 @@ def display_oc_interface(df_reposicao_final):
         fornecedores = [f for f in fornecedores if f] # Remove vazios
         
         if not fornecedores:
-            st.error("Nenhum fornecedor encontrado nos itens da cesta. Adicione um fornecedor.")
-            st.stop()
+            st.warning("Nenhum fornecedor encontrado nos itens da cesta. Adicione um fornecedor se estiver criando uma OC nova.")
             
         fornec_selecionado = st.selectbox("Selecione o Fornecedor para esta OC (Um por vez)", options=fornecedores)
         
+        # Filtra apenas os itens do fornecedor selecionado
         df_oc_final = df_final[df_final["fornecedor"] == fornec_selecionado].copy()
         valor_total_oc_final = df_oc_final["Valor_Total"].sum()
         
-        st.info(f"Gerando OC apenas para **{fornec_selecionado}** (R$ {valor_total_oc_final:,.2f})")
+        if fornec_selecionado:
+            st.info(f"Gerando OC apenas para **{fornec_selecionado}** (R$ {valor_total_oc_final:,.2f})")
         
         col1, col2 = st.columns(2)
         condicao_pgto = col1.selectbox("Condição de Pagamento", ["À Vista", "Boleto 30/60/90", "Outra"], key=f"pgto_{empresa}")
         
-        # =================================================================
-        # >> INÍCIO DA CORREÇÃO (V10.8) - Data Prevista BR <<
-        # =================================================================
-        # A data é salva corretamente no DB, o input se adapta ao browser.
-        # A mudança foi na impressão (gerar_html_oc).
+        # (Req 3) Data
         data_prevista = col2.date_input("Data Prevista de Entrega", value=dt.date.today() + dt.timedelta(days=15), key=f"data_prev_{empresa}")
-        # =================================================================
 
-        submitted = st.form_submit_button(f"💾 SALVAR OC E IMPRIMIR PARA {fornec_selecionado}", type="primary")
+        submitted = st.form_submit_button(f"💾 SALVAR OC E IMPRIMIR PARA {fornec_selecionado}", type="primary", disabled=(not fornec_selecionado))
 
         if submitted:
             if valor_total_oc_final <= 0:
                 st.error("Valor total da OC é R$ 0,00. Nada foi salvo.")
             else:
                 with st.spinner("Gerando ID e salvando OC no Banco de Dados..."):
-                    # Prepara o JSON para salvar
                     itens_json = df_oc_final.rename(
                         columns={"Qtd_Comprar": "Compra_Sugerida", "Valor_Total": "Valor_Compra_R$"}
                     ).to_dict("records")
@@ -313,6 +320,7 @@ def display_oc_interface(df_reposicao_final):
                     }
                     
                     try:
+                        # (Req 4, 5, 6) Salva no DB
                         oc_id_final = salvar_oc(oc_data)
                         st.success(f"🎉 Ordem de Compra **{oc_id_final}** salva com sucesso no Banco de Dados!")
                         
@@ -326,6 +334,11 @@ def display_oc_interface(df_reposicao_final):
                     except Exception as e:
                         st.error(f"Falha ao salvar a OC: {e}")
 
-# --- Ponto de Entrada (V10.7) ---
+# --- Ponto de Entrada (V10.14) ---
 def render_tab4(state):
-    display_oc_interface(df_reposicao_final=None)
+    """Renderiza a Tab 4, passando o st.session_state"""
+    if state.catalogo_df is None:
+        st.error("Catálogo (KITS/CAT) não carregado. Carregue no sidebar para usar a Ordem de Compra.")
+        return
+    
+    display_oc_interface(state) # Passa o state para a função
