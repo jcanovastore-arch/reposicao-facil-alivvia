@@ -1,8 +1,7 @@
-# mod_compra_autom.py - TAB 2 - V10.7
-# - Corrige SyntaxError (adiciona norm_sku)
-# - Corrige Bug da Cesta (mantém V10.6 sem st.rerun)
-# - NOVO FLUXO CONJUNTA: Mostra as 2 empresas separadamente
-# - ADICIONA FORMATAÇÃO de números e R$
+# mod_compra_autom.py - TAB 2 - V10.9
+# - FIX: Corrige o crash "@st.cache_data" (Cannot hash argument 'state')
+# - REVERTE FLUXO CONJUNTA: Volta a calcular a lista Agregada (para a Tab 3 usar)
+# - Mantém Formatação (V10.7) e Fix da Cesta (V10.6)
 
 import pandas as pd
 import streamlit as st
@@ -12,7 +11,7 @@ from unidecode import unidecode # Necessário para norm_sku
 import logica_compra
 from logica_compra import (
     Catalogo,
-    aggregate_data_for_conjunta_clean, # Esta função não será mais usada aqui
+    aggregate_data_for_conjunta_clean, # Re-adicionado
     load_any_table_from_bytes,
     mapear_colunas,
     mapear_tipo,
@@ -27,18 +26,10 @@ except ImportError:
     def adicionar_itens_cesta(empresa: str, df: pd.DataFrame):
         st.error("Falha crítica: Função 'adicionar_itens_cesta' não encontrada em ordem_compra.py")
 
-# =================================================================
-# >> INÍCIO DA CORREÇÃO (V10.7) - SyntaxError <<
-# =================================================================
 def norm_sku(x: str) -> str:
-    """Copia da função que estava faltando e causando o SyntaxError."""
     if pd.isna(x): return ""
     return unidecode(str(x)).strip().upper()
-# =================================================================
-# >> FIM DA CORREÇÃO <<
-# =================================================================
 
-# Funções de verificação (do V9.1)
 def _require_cols(df: pd.DataFrame, cols: list[str], ctx: str):
     faltando = [c for c in cols if c not in df.columns]
     if faltando:
@@ -50,14 +41,17 @@ def _safe_contains_series(series: pd.Series, text: str) -> pd.Series:
     except Exception:
         return pd.Series([False]*len(series), index=series.index)
 
-
+# =================================================================
+# >> INÍCIO DA CORREÇÃO (V10.9) - Crash do @st.cache_data <<
+# =================================================================
 @st.cache_data(show_spinner="Calculando Compra para _empresa_...")
-def calcular_compra_para_empresa(_empresa_, state, h, g, LT):
+def calcular_compra_para_empresa(_empresa_, _state, h, g, LT): # <- 'state' mudou para '_state'
     """
     Função cacheada que executa a lógica de cálculo para UMA empresa.
-    Usada pelo novo fluxo "CONJUNTA".
+    O argumento '_state' é ignorado pelo cache.
     """
-    dados = state.get(_empresa_, {})
+    # Lê do _state (que é o st.session_state)
+    dados = _state.get(_empresa_, {})
     missing = []
     for k, rot in (("FULL","FULL"),("VENDAS","Shopee/MT"),("ESTOQUE","Estoque")):
         slot_data = dados.get(k, {})
@@ -84,8 +78,8 @@ def calcular_compra_para_empresa(_empresa_, state, h, g, LT):
     fisico_df = mapear_colunas(fisico_raw, t_f)
     
     cat = Catalogo(
-        catalogo_simples=state.catalogo_df.rename(columns={"sku": "component_sku"}),
-        kits_reais=state.kits_df
+        catalogo_simples=_state.catalogo_df.rename(columns={"sku": "component_sku"}),
+        kits_reais=_state.kits_df
     )
     
     df_final, painel = calcular_compra(full_df, fisico_df, vendas_df, cat, h=h, g=g, LT=LT)
@@ -98,17 +92,16 @@ def calcular_compra_para_empresa(_empresa_, state, h, g, LT):
         df_final["Selecionar"] = False
     
     return df_final, painel
+# =================================================================
+# >> FIM DA CORREÇÃO (V10.9) <<
+# =================================================================
 
 
-def renderizar_painel_e_tabela(df_final, painel, nome_empresa_calc, state):
+def renderizar_painel_e_tabela(df_final, painel, nome_empresa_calc, state, is_conjunta=False):
     """
     Função helper para renderizar a tabela formatada e o botão de envio.
-    Usada pelo novo fluxo "CONJUNTA" e pelo fluxo individual.
     """
     
-    # =================================================================
-    # >> INÍCIO DA CORREÇÃO (V10.7) - Formatação <<
-    # =================================================================
     # Renderização do Painel (com formatação)
     cA, cB, cC, cD = st.columns(4)
     cA.metric("Full (un)",   f"{int(painel.get('full_unid', 0)):,}".replace(",", "."))
@@ -116,7 +109,7 @@ def renderizar_painel_e_tabela(df_final, painel, nome_empresa_calc, state):
     cC.metric("Físico (un)", f"{int(painel.get('fisico_unid', 0)):,}".replace(",", "."))
     cD.metric("Físico (R$)", f"R$ {float(painel.get('fisico_valor', 0.0)):,.2f}")
 
-    # (Filtros - V9.1 - Inalterada)
+    # Filtros
     c_f1, c_f2 = st.columns(2)
     _require_cols(df_final, ["fornecedor", "SKU", "Compra_Sugerida"], "Filtros/Render")
     fornecedores = sorted(df_final["fornecedor"].fillna("").astype(str).unique().tolist())
@@ -135,7 +128,6 @@ def renderizar_painel_e_tabela(df_final, painel, nome_empresa_calc, state):
 
     editor_key = f"data_editor_{nome_empresa_calc}"
     
-    # Colunas (como pedido pelo usuário)
     cols_display = [
         "Selecionar", "SKU", "fornecedor",
         "Vendas_h_ML", "Vendas_h_Shopee", "TOTAL_60d",
@@ -160,11 +152,8 @@ def renderizar_painel_e_tabela(df_final, painel, nome_empresa_calc, state):
             "Valor_Compra_R$": st.column_config.NumberColumn("Valor Compra R$", format="R$ %.2f"),
         }
     )
-    # =================================================================
-    # >> FIM DA CORREÇÃO (V10.7) - Formatação <<
-    # =================================================================
 
-    # (Lógica de Seleção - V9.1 - Inalterada)
+    # Lógica de Seleção (V10.7)
     df_selecionados = pd.DataFrame()
     try:
         if isinstance(edited_df, pd.DataFrame) and "Selecionar" in edited_df.columns:
@@ -175,14 +164,23 @@ def renderizar_painel_e_tabela(df_final, painel, nome_empresa_calc, state):
                 how="inner",
                 suffixes=('', '_sel')
             ).drop(columns=['Selecionar_sel'])
-            
     except Exception:
         df_selecionados = pd.DataFrame()
 
     qtd_sel = 0 if df_selecionados is None or df_selecionados.empty else len(df_selecionados)
 
     # Lógica do Botão (V10.6 - Sem st.rerun)
-    if qtd_sel == 0:
+    # =================================================================
+    # >> INÍCIO DA CORREÇÃO (V10.9) - Lógica do Botão <<
+    # =================================================================
+    # Se for "CONJUNTA" (agregada), desabilita o botão e mostra o aviso.
+    if is_conjunta:
+        st.button("Enviar 0 itens selecionados para a Cesta de OC", disabled=True, key=f"btn_send_oc_{nome_empresa_calc}",
+                  help="Use a Tab 'Alocação de Compra' para itens CONJUNTOS.")
+        st.warning("⚠️ Compra Conjunta gerada! Use a aba **'📦 Alocação de Compra'** (Tab 3) para fracionar o lote e enviar para OC.")
+    
+    # Se for individual (ALIVVIA ou JCA)
+    elif qtd_sel == 0:
         st.button("Enviar 0 itens selecionados para a Cesta de OC", disabled=True, key=f"btn_send_oc_{nome_empresa_calc}")
         
     else:
@@ -199,6 +197,9 @@ def renderizar_painel_e_tabela(df_final, painel, nome_empresa_calc, state):
                     st.error(f"Erro ao enviar para a cesta: {e}")
             else:
                 st.warning("Nada foi enviado (nenhum item válido selecionado).")
+    # =================================================================
+    # >> FIM DA CORREÇÃO (V10.9) <<
+    # =================================================================
 
 
 # Função principal (Render)
@@ -210,72 +211,102 @@ def render_tab2(state, h, g, LT):
         return
 
     empresa_selecionada = st.radio("Empresa ativa", ["ALIVVIA", "JCA", "CONJUNTA"], horizontal=True, key="empresa_ca")
+    nome_estado = empresa_selecionada # ALIVVIA, JCA, ou CONJUNTA
     
     # =================================================================
-    # >> INÍCIO DA CORREÇÃO (V10.7) - Novo Fluxo "CONJUNTA" <<
+    # >> INÍCIO DA CORREÇÃO (V10.9) - Revertendo Fluxo "CONJUNTA" <<
     # =================================================================
     
-    if empresa_selecionada == "CONJUNTA":
-        st.info("Modo 'Conjunta': Calculando e exibindo ALIVVIA e JCA separadamente.")
+    # Lógica de Disparo (ou manutenção do estado)
+    if st.button(f"Gerar Compra — {nome_estado}", type="primary"):
+        state.compra_autom_data["force_recalc"] = True
+
+    # Se o cálculo não existir no estado ou se for forçado, execute-o
+    if nome_estado not in state.compra_autom_data or state.compra_autom_data.get("force_recalc", False):
+        state.compra_autom_data["force_recalc"] = False
         
         try:
-            # Calcula para ALIVVIA
-            with st.container():
-                st.markdown("### 1. Cálculo: ALIVVIA")
-                df_alivvia, painel_alivvia = calcular_compra_para_empresa("ALIVVIA", state, h, g, LT)
-                renderizar_painel_e_tabela(df_alivvia, painel_alivvia, "ALIVVIA", state)
+            # FLUXO CONJUNTA (Agregado - como no V10.6)
+            if nome_estado == "CONJUNTA":
+                st.info("Modo 'Conjunta': Calculando lista agregada para a Tab 3 (Alocação).")
+                
+                dfs = {}
+                missing = []
+                for emp in ("ALIVVIA", "JCA"):
+                    dados = state.get(emp, {})
+                    for k, rot in (("FULL","FULL"), ("VENDAS","Shopee/MT"), ("ESTOQUE","Estoque")):
+                        slot_data = dados.get(k, {})
+                        if not (slot_data.get("name") and slot_data.get("bytes")):
+                            missing.append(f"{emp} {rot}")
+                            continue
+                        
+                        raw_bytes = slot_data["bytes"]
+                        if raw_bytes is None:
+                             missing.append(f"{emp} {rot} (bytes não carregados)")
+                             continue
+                            
+                        raw = load_any_table_from_bytes(slot_data["name"], raw_bytes)
+                        tipo = mapear_tipo(raw)
+                        
+                        if tipo == "FULL": dfs[f"full_{emp[0]}"] = mapear_colunas(raw, tipo)
+                        elif tipo == "VENDAS": dfs[f"vend_{emp[0]}"] = mapear_colunas(raw, tipo)
+                        elif tipo == "FISICO": dfs[f"fisi_{emp[0]}"] = mapear_colunas(raw, tipo)
+                        else: raise RuntimeError(f"Arquivo {rot} de {emp} com formato incorreto: {tipo}.")
+
+                if missing:
+                    raise RuntimeError(
+                        "Arquivos necessários para Compra Conjunta ausentes: "
+                        + ", ".join(missing)
+                    )
+
+                full_df, fisico_df, vendas_df = aggregate_data_for_conjunta_clean(
+                    dfs["full_A"], dfs["vend_A"], dfs["fisi_A"],
+                    dfs["full_J"], dfs["vend_J"], dfs["fisi_J"]
+                )
+                nome_empresa_calc = "CONJUNTA"
+                
+                cat = Catalogo(
+                    catalogo_simples=state.catalogo_df.rename(columns={"sku": "component_sku"}),
+                    kits_reais=state.kits_df
+                )
+                df_final, painel = calcular_compra(full_df, fisico_df, vendas_df, cat, h=h, g=g, LT=LT)
+
             
-            st.divider()
+            # FLUXO INDIVIDUAL (ALIVVIA ou JCA)
+            else:
+                dados_display = state.get(nome_estado, {})
+                col = st.columns(3)
+                col[0].info(f"FULL: {dados_display.get('FULL', {}).get('name') or '—'}")
+                col[1].info(f"Shopee/MT: {dados_display.get('VENDAS', {}).get('name') or '—'}")
+                col[2].info(f"Estoque: {dados_display.get('ESTOQUE', {}).get('name') or '—'}")
+
+                # Passa o 'state' completo, mas a função cacheada o ignora (com _state)
+                df_final, painel = calcular_compra_para_empresa(nome_estado, state, h, g, LT)
+                nome_empresa_calc = nome_estado
             
-            # Calcula para JCA
-            with st.container():
-                st.markdown("### 2. Cálculo: JCA")
-                df_jca, painel_jca = calcular_compra_para_empresa("JCA", state, h, g, LT)
-                renderizar_painel_e_tabela(df_jca, painel_jca, "JCA", state)
+            # Salva o resultado no estado (caching)
+            state.compra_autom_data[nome_estado] = {
+                "df": df_final,
+                "painel": painel,
+                "empresa": nome_empresa_calc
+            }
+            st.success("Cálculo concluído.")
 
         except Exception as e:
+            state.compra_autom_data[nome_estado] = {"error": str(e)}
             st.error(str(e))
+            return
 
-    else:
-        # Fluxo original para ALIVVIA ou JCA individualmente
-        nome_estado = empresa_selecionada
-        dados_display = state.get(nome_estado, {})
-        col = st.columns(3)
-        col[0].info(f"FULL: {dados_display.get('FULL', {}).get('name') or '—'}")
-        col[1].info(f"Shopee/MT: {dados_display.get('VENDAS', {}).get('name') or '—'}")
-        col[2].info(f"Estoque: {dados_display.get('ESTOQUE', {}).get('name') or '—'}")
-        
-        if st.button(f"Gerar Compra — {nome_estado}", type="primary"):
-            state.compra_autom_data["force_recalc"] = True
-
-        if nome_estado not in state.compra_autom_data or state.compra_autom_data.get("force_recalc", False):
-            state.compra_autom_data["force_recalc"] = False
-            try:
-                df_final, painel = calcular_compra_para_empresa(nome_estado, state, h, g, LT)
-                
-                # Salva no estado (caching)
-                state.compra_autom_data[nome_estado] = {
-                    "df": df_final,
-                    "painel": painel,
-                    "empresa": nome_estado
-                }
-                st.success("Cálculo concluído. Selecione itens abaixo para Ordem de Compra.")
-
-            except Exception as e:
-                state.compra_autom_data[nome_estado] = {"error": str(e)}
-                st.error(str(e))
-                return
-
-        # Renderização de resultados (usando o estado salvo)
-        if nome_estado in state.compra_autom_data and "df" in state.compra_autom_data[nome_estado]:
-            data_fixa = state.compra_autom_data[nome_estado]
-            renderizar_painel_e_tabela(
-                data_fixa["df"].copy(), 
-                data_fixa["painel"], 
-                data_fixa["empresa"],
-                state
-            )
-
+    # Renderização de resultados (usando o estado salvo)
+    if nome_estado in state.compra_autom_data and "df" in state.compra_autom_data[nome_estado]:
+        data_fixa = state.compra_autom_data[nome_estado]
+        renderizar_painel_e_tabela(
+            data_fixa["df"].copy(), 
+            data_fixa["painel"], 
+            data_fixa["empresa"],
+            state,
+            is_conjunta=(nome_estado == "CONJUNTA")
+        )
     # =================================================================
-    # >> FIM DA CORREÇÃO (V10.7) <<
+    # >> FIM DA CORREÇÃO (V10.9) <<
     # =================================================================

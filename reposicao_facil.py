@@ -1,6 +1,6 @@
-# reposicao_facil.py - ESTABILIDADE V10.7 (Fix Cesta)
+# reposicao_facil.py - ESTABILIDADE V10.9 (Fix Cesta + Reativa Tab 3)
 # - Corrige o bug da cesta (oc_cesta -> oc_cesta_itens)
-# - Mantém o V10.3 (persistência, anti-flicker)
+# - Reativa o nome da Tab 3 ("Alocação de Compra")
 
 import datetime as dt
 import json
@@ -39,7 +39,7 @@ try:
 except Exception:
     gerenciador_oc = None
 
-VERSION = "v10.7 – Disco + Anti-Flicker + Fix Cesta + Fluxo Conjunta"
+VERSION = "v10.9 – Crash Fix + Fluxo Alocação Correto"
 
 # ===================== CONFIG PÁGINA =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -49,19 +49,15 @@ DEFAULT_SHEET_LINK = (
     "edit?usp=sharing&ouid=109458533144345974874&rtpof=true&sd=true"
 )
 
-# ===================== ESTADO INICIAL (CORRIGIDO V10.7) =====================
+# ===================== ESTADO INICIAL (CORRIGIDO V10.9) =====================
 def _ensure_state():
     st.session_state.setdefault("catalogo_df", None)
     st.session_state.setdefault("kits_df", None)
     st.session_state.setdefault("loaded_at", None)
     st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK)
     
-    # =====================================================================
-    # >> INÍCIO DA CORREÇÃO (V10.7) <<
-    # O bug estava aqui. A cesta de OCs deve ser um dict (conforme V10.5)
-    # e não um DataFrame (como estava no V10.3).
+    # CHAVE CORRETA (Fix V10.7)
     st.session_state.setdefault("oc_cesta_itens", {"ALIVVIA": [], "JCA": []})
-    # =====================================================================
     
     st.session_state.setdefault("compra_autom_data", {})
     for emp in ("ALIVVIA", "JCA"):
@@ -263,14 +259,20 @@ with st.sidebar:
             st.session_state.loaded_at = None
             st.error(f"Erro ao carregar do link: {str(e)}")
 
-# ===================== TÍTULO E ABAS =====================
+# ===================== TÍTULO E ABAS (CORRIGIDO V10.9) =====================
 st.title("Reposição Logística — Alivvia")
 if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
     st.warning("► Carregue o **Padrão (KITS/CAT)** no sidebar antes de usar as abas.")
 
+# =================================================================
+# >> INÍCIO DA CORREÇÃO (V10.9) - Reativa Tab 3 <<
+# =================================================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["📂 Dados das Empresas", "🧮 Compra Automática", "📦 Alocação (Desativado)", "🛒 Ordem de Compra (OC)", "✨ Gerenciador de OCs"]
+    ["📂 Dados das Empresas", "🧮 Compra Automática", "📦 Alocação de Compra", "🛒 Ordem de Compra (OC)", "✨ Gerenciador de OCs"]
 )
+# =================================================================
+# >> FIM DA CORREÇÃO (V10.9) <<
+# =================================================================
 
 # ===================== TAB 1 — UPLOADS COM PERSISTÊNCIA (ANTI-FLICKER) =====================
 with tab1:
