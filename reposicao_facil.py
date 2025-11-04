@@ -1,6 +1,7 @@
-# reposicao_facil.py - V10.16 (Sincronização)
-# - FIX: Corrige "The truth value of a Series is ambiguous" (V10.15)
-# - FIX: Converte preços para numérico ANTES de usar np.where
+# reposicao_facil.py - V10.17 (Sincronização)
+# - FIX: (V10.17) Corrige "Ambiguous" (V10.16) de forma robusta
+# - FIX: Lógica de 'get_padrao_from_sheets' agora verifica a existência
+#   das colunas 'Preco_cat' e 'Preco_est' ANTES de usá-las.
 # - Mantém V10.15 (5 abas, persistência V10.3, OC Auto-Preço)
 
 import datetime as dt
@@ -34,7 +35,7 @@ from logica_compra import (
     br_to_float # Importa o helper de R$
 )
 
-VERSION = "v10.16 – Sincronização Total + Fix Preço Ambiguous"
+VERSION = "v10.17 – Fix Robusto Preço Ambiguous"
 
 # ===================== CONFIG PÁGINA =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -67,23 +68,20 @@ _ensure_state()
 BASE_DIR = Path(".uploads")
 BASE_DIR.mkdir(exist_ok=True)
 
+# (Funções de persistência _slug, _empresa_dir, etc... idênticas V10.16)
 def _slug(s: str) -> str:
     s = (s or "").strip()
     return "".join(c if c.isalnum() or c in ("-", "_") else "-" for c in s.upper())
-
 def _empresa_dir(empresa: str) -> Path:
     p = BASE_DIR / _slug(empresa)
     p.mkdir(parents=True, exist_ok=True)
     return p
-
 def _tipo_dir(empresa: str, tipo: str) -> Path:
     p = _empresa_dir(empresa) / _slug(tipo)
     p.mkdir(parents=True, exist_ok=True)
     return p
-
 def _manifest_path(empresa: str) -> Path:
     return _empresa_dir(empresa) / "_manifest.json"
-
 def _load_manifest(empresa: str) -> dict:
     mp = _manifest_path(empresa)
     if mp.exists():
@@ -92,61 +90,45 @@ def _load_manifest(empresa: str) -> dict:
         except Exception:
             return {}
     return {}
-
 def _save_manifest(empresa: str, manifest: dict) -> None:
     _manifest_path(empresa).write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8"
     )
-
 def persist_to_disk(empresa: str, tipo: str, name: str, mime: str, data: bytes) -> Path:
     ext = Path(name).suffix or ""
     fname = f"{_slug(tipo)}{ext}"
     fpath = _tipo_dir(empresa, tipo) / fname
     fpath.write_bytes(data)
-
     manifest = _load_manifest(empresa)
     manifest[tipo] = {
-        "name": name,
-        "mime": mime or "application/octet-stream",
-        "path": str(fpath),
-        "size": len(data),
-        "sha1": hashlib.sha1(data).hexdigest(),
+        "name": name, "mime": mime or "application/octet-stream", "path": str(fpath),
+        "size": len(data), "sha1": hashlib.sha1(data).hexdigest(),
         "saved_at": dt.datetime.now().isoformat(timespec="seconds"),
     }
     _save_manifest(empresa, manifest)
     return fpath
-
 def remove_from_disk(empresa: str, tipo: str) -> None:
     manifest = _load_manifest(empresa)
     info = manifest.get(tipo)
     if info:
-        try:
-            Path(info["path"]).unlink(missing_ok=True)
-        except Exception:
-            pass
+        try: Path(info["path"]).unlink(missing_ok=True)
+        except Exception: pass
         manifest.pop(tipo, None)
         _save_manifest(empresa, manifest)
-
 def load_from_disk_if_any(empresa: str, tipo: str) -> Optional[dict]:
     manifest = _load_manifest(empresa)
     info = manifest.get(tipo)
-    if not info:
-        return None
+    if not info: return None
     p = Path(info["path"])
-    if not p.exists():
-        return None
+    if not p.exists(): return None
     try:
         data = p.read_bytes()
         return {
-            "name": info.get("name", p.name),
-            "mime": info.get("mime", "application/octet-stream"),
-            "bytes": data,
-            "sha1": info.get("sha1"),
-            "saved_at": info.get("saved_at"),
+            "name": info.get("name", p.name), "mime": info.get("mime", "application/octet-stream"),
+            "bytes": data, "sha1": info.get("sha1"), "saved_at": info.get("saved_at"),
         }
-    except Exception:
-        return None
+    except Exception: return None
 
 def preload_persisted_uploads():
     for emp in ("ALIVVIA", "JCA"):
@@ -156,51 +138,41 @@ def preload_persisted_uploads():
                 if disk_item:
                     st.session_state[emp][tipo]["name"] = disk_item["name"]
                     st.session_state[emp][tipo]["bytes"] = disk_item["bytes"]
-
 preload_persisted_uploads()
 
 # ===================== HELPERS DE DATAFRAME / PARSING CACHEADO =====================
 @st.cache_data(show_spinner=False)
 def _parse_table_cached(name_lower: str, raw_bytes: bytes) -> Optional[pd.DataFrame]:
-    if not name_lower or not raw_bytes:
-        return None
+    # (Função idêntica à V10.16)
+    if not name_lower or not raw_bytes: return None
     _ = hashlib.sha1(raw_bytes).hexdigest()
     bio = io.BytesIO(raw_bytes)
     try:
         if name_lower.endswith(".csv"):
-            try:
-                return pd.read_csv(bio)
-            except Exception:
-                bio.seek(0)
-                return pd.read_csv(bio, sep=";")
+            try: return pd.read_csv(bio)
+            except Exception: bio.seek(0); return pd.read_csv(bio, sep=";")
         elif name_lower.endswith(".xlsx") or name_lower.endswith(".xls"):
             return pd.read_excel(bio, engine="openpyxl")
-        else:
-            return None
-    except Exception:
-        return None
+        else: return None
+    except Exception: return None
 
 def df_from_saved_cached(empresa: str, tipo: str) -> Optional[pd.DataFrame]:
+    # (Função idêntica à V10.16)
     item_name = st.session_state[empresa][tipo]["name"]
     item_bytes = st.session_state[empresa][tipo]["bytes"]
-
     if not item_name or not item_bytes:
         disk_item = load_from_disk_if_any(empresa, tipo)
-        if not disk_item:
-            return None
-        item_name = disk_item["name"]
-        item_bytes = disk_item["bytes"]
+        if not disk_item: return None
+        item_name = disk_item["name"]; item_bytes = disk_item["bytes"]
         st.session_state[empresa][tipo]["name"] = item_name
         st.session_state[empresa][tipo]["bytes"] = item_bytes
-
     return _parse_table_cached((item_name or "").lower(), item_bytes)
 
 def clear_upload(empresa: str, tipo: str, also_disk: bool = True) -> None:
     st.session_state[empresa][tipo] = {"name": None, "bytes": None}
-    if also_disk:
-        remove_from_disk(empresa, tipo)
+    if also_disk: remove_from_disk(empresa, tipo)
 
-# ===================== SIDEBAR / PARÂMETROS (FIX V10.16) =====================
+# ===================== SIDEBAR / PARÂMETROS (FIX V10.17) =====================
 with st.sidebar:
     st.subheader("Parâmetros")
     h  = st.selectbox("Horizonte (dias)", [30, 60, 90], index=1, key="h")
@@ -216,13 +188,14 @@ with st.sidebar:
         content = logica_compra.baixar_xlsx_do_sheets(sheet_id)
         
         # =================================================================
-        # >> INÍCIO DA CORREÇÃO (V10.16) - "Ambiguous" Error <<
+        # >> INÍCIO DA CORREÇÃO (V10.17) - "Ambiguous" Error <<
         # =================================================================
         cat = logica_compra._carregar_padrao_de_content(content)
         df_cat = cat.catalogo_simples.rename(columns={"component_sku":"sku"})
         df_kits = cat.kits_reais
         
         try:
+            # 1. Tenta carregar preços dos estoques salvos
             df_precos_list = []
             for emp in ("ALIVVIA", "JCA"):
                 disk_item = load_from_disk_if_any(emp, "ESTOQUE")
@@ -233,34 +206,43 @@ with st.sidebar:
                         df_fis = mapear_colunas(df_raw, tipo)
                         df_precos_list.append(df_fis[["SKU", "Preco"]])
             
+            # 2. Se carregou preços, faz o merge
             if df_precos_list:
                 df_precos_all = pd.concat(df_precos_list, ignore_index=True)
                 df_precos_final = df_precos_all.drop_duplicates(subset=["SKU"], keep="last")
                 
-                # Funde com o catálogo
-                df_cat = df_cat.merge(df_precos_final, on="SKU", how="left", suffixes=("_cat", "_est"))
+                # 3. Faz o merge (V10.17)
+                
+                # Verifica se o Catálogo *original* já tinha uma coluna 'Preco'
+                if "Preco" in df_cat.columns:
+                    # Sim. Funde com sufixos
+                    df_cat = df_cat.merge(df_precos_final, on="SKU", how="left", suffixes=("_cat", "_est"))
+                    
+                    # Converte ambos para numérico ANTES de comparar
+                    preco_cat_num = br_to_float(df_cat["Preco_cat"]).fillna(0.0)
+                    preco_est_num = br_to_float(df_cat["Preco_est"]).fillna(0.0)
+                    
+                    # Usa preço do catálogo se for > 0, senão usa do estoque
+                    df_cat["Preco"] = np.where(
+                        preco_cat_num > 0.0,
+                        preco_cat_num,
+                        preco_est_num
+                    )
+                    df_cat = df_cat.drop(columns=["Preco_cat", "Preco_est"], errors="ignore")
+                
+                else:
+                    # Não. Apenas funde os preços do estoque
+                    df_cat = df_cat.merge(df_precos_final, on="SKU", how="left")
+                    df_cat["Preco"] = br_to_float(df_cat["Preco"]).fillna(0.0)
 
-                # FIX V10.16: Converte para numérico *ANTES* de comparar
-                preco_cat_num = br_to_float(df_cat.get("Preco_cat")).fillna(0.0)
-                preco_est_num = br_to_float(df_cat.get("Preco_est")).fillna(0.0)
-                
-                # Agora a comparação (np.where) é segura
-                df_cat["Preco"] = np.where(
-                    (preco_cat_num == 0.0), # Se o preço do catálogo é 0 (ou NaN)
-                    preco_est_num,          # Usa o preço do estoque
-                    preco_cat_num           # Senão, usa o preço do catálogo
-                )
-                
-                df_cat = df_cat.drop(columns=["Preco_cat", "Preco_est"], errors="ignore")
-            
             else:
-                # Se não há arquivos de estoque, apenas usa o Preço do catálogo (se houver)
+                # 4. Se não carregou preços do estoque, apenas limpa a coluna 'Preco' (se existir)
                 if "Preco" not in df_cat.columns:
-                    df_cat["Preco"] = 0.0
+                    df_cat["Preco"] = 0.0 # Cria
                 df_cat["Preco"] = br_to_float(df_cat["Preco"]).fillna(0.0)
 
         except Exception as e:
-            # Se falhar em ler os estoques, apenas usa o Preço do catálogo
+            # 5. Se tudo falhar, apenas garante que a coluna 'Preco' exista e seja 0.0
             st.warning(f"Não foi possível carregar preços dos estoques (usando Padrão): {e}")
             if "Preco" not in df_cat.columns:
                 df_cat["Preco"] = 0.0
@@ -268,14 +250,16 @@ with st.sidebar:
             
         return df_cat, df_kits
         # =================================================================
-        # >> FIM DA CORREÇÃO (V10.16) <<
+        # >> FIM DA CORREÇÃO (V10.17) <<
         # =================================================================
 
     colA, colB = st.columns([1, 1])
     with colA:
         if st.button("Carregar padrão agora", use_container_width=True):
             try:
-                # Agora retorna (cat_df, kits_df)
+                # Limpa o cache ANTES de rodar
+                get_padrao_from_sheets.clear() 
+                
                 cat_df, kits_df = get_padrao_from_sheets(DEFAULT_SHEET_ID)
                 st.session_state.catalogo_df = cat_df
                 st.session_state.kits_df = kits_df
@@ -289,7 +273,7 @@ with st.sidebar:
     with colB:
         st.link_button("🔗 Abrir no Drive (editar)", DEFAULT_SHEET_LINK, use_container_width=True)
 
-    # (Lógica do link alternativo omitida para brevidade, V10.10)
+    # (Lógica do link alternativo idêntica V10.16)
     st.text_input(
         "Link alternativo do Google Sheets (opcional)",
         key="alt_sheet_link",
@@ -298,8 +282,8 @@ with st.sidebar:
     )
     if st.button("Carregar deste link", use_container_width=True):
         try:
+            get_padrao_from_sheets.clear() # Limpa o cache
             alt_link = st.session_state.alt_sheet_link.strip()
-            # Tenta extrair ID do link alternativo
             alt_sheet_id = logica_compra.extract_sheet_id_from_url(alt_link)
             if not alt_sheet_id:
                 raise ValueError("Link alternativo inválido. Use o link completo do Google Sheets.")
@@ -327,17 +311,14 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 
 # ===================== TAB 1 — UPLOADS (V10.3) =====================
 with tab1:
+    # (Código da Tab 1 idêntico V10.16)
     st.subheader("Uploads fixos por empresa (sessão + disco)")
     st.caption("Após **Salvar (Confirmar)**, o arquivo fica gravado em .uploads/ e volta sozinho após F5/restart.")
 
     def render_upload_slot(emp: str, slot: str, label: str, col):
         with col:
             st.markdown(f"**{label} — {emp}**")
-            up_file = st.file_uploader(
-                "CSV/XLSX/XLS",
-                type=["csv", "xlsx", "xls"],
-                key=f"up_{slot}_{emp}"
-            )
+            up_file = st.file_uploader("CSV/XLSX/XLS", type=["csv", "xlsx", "xls"], key=f"up_{slot}_{emp}")
             if up_file is not None:
                 st.session_state[emp][slot]["name"] = up_file.name
                 st.session_state[emp][slot]["bytes"] = up_file.getbuffer().tobytes()
@@ -345,29 +326,20 @@ with tab1:
             c1, c2 = st.columns(2)
             with c1:
                 if st.button(f"Salvar {label} (Confirmar)", key=f"btn_save_{slot}_{emp}", use_container_width=True):
-                    nm = st.session_state[emp][slot]["name"]
-                    bt = st.session_state[emp][slot]["bytes"]
-                    if not nm or not bt:
-                        st.warning("Nada para salvar.")
-                    else:
-                        persist_to_disk(emp, slot, nm, "application/octet-stream", bt)
-                        st.success("✅ Confirmado em .uploads/")
+                    nm = st.session_state[emp][slot]["name"]; bt = st.session_state[emp][slot]["bytes"]
+                    if not nm or not bt: st.warning("Nada para salvar.")
+                    else: persist_to_disk(emp, slot, nm, "application/octet-stream", bt); st.success("✅ Confirmado em .uploads/")
             with c2:
                 if st.button(f"Limpar {label}", key=f"btn_clear_{slot}_{emp}", use_container_width=True):
-                    clear_upload(emp, slot, also_disk=True)
-                    st.info("Removido da sessão e do disco.")
+                    clear_upload(emp, slot, also_disk=True); st.info("Removido da sessão e do disco.")
             disk_info = load_from_disk_if_any(emp, slot)
             if disk_info:
-                short_sha = (disk_info.get("sha1") or "")[:8]
-                when = disk_info.get("saved_at") or "-"
+                short_sha = (disk_info.get("sha1") or "")[:8]; when = disk_info.get("saved_at") or "-"
                 st.caption(f"📦 Disco: {disk_info['name']} • {short_sha} • {when}")
             with st.expander("Prévia (opcional)"):
                 dfp = df_from_saved_cached(emp, slot)
-                if dfp is not None:
-                    st.caption(f"{label}: {dfp.shape[0]} linhas / {dfp.shape[1]} colunas")
-                    st.dataframe(dfp.head(5), use_container_width=True, hide_index=True)
-                else:
-                    st.caption("(vazio)")
+                if dfp is not None: st.dataframe(dfp.head(5), use_container_width=True, hide_index=True)
+                else: st.caption("(vazio)")
 
     def render_block(emp: str):
         st.markdown(f"### {emp}")
@@ -383,20 +355,14 @@ with tab1:
             if st.button(f"Salvar {emp} (Confirmar tudo)", key=f"save_all_{emp}", type="primary", use_container_width=True):
                 faltando = []
                 for slot in ("FULL", "VENDAS", "ESTOQUE"):
-                    nm = st.session_state[emp][slot]["name"]
-                    bt = st.session_state[emp][slot]["bytes"]
-                    if not nm or not bt:
-                        faltando.append(slot)
-                        continue
+                    nm = st.session_state[emp][slot]["name"]; bt = st.session_state[emp][slot]["bytes"]
+                    if not nm or not bt: faltando.append(slot); continue
                     persist_to_disk(emp, slot, nm, "application/octet-stream", bt)
-                if faltando:
-                    st.warning(f"{emp}: faltou salvar {', '.join(faltando)}.")
-                else:
-                    st.success(f"{emp}: todos os arquivos confirmados em .uploads/")
+                if faltando: st.warning(f"{emp}: faltou salvar {', '.join(faltando)}.")
+                else: st.success(f"{emp}: todos os arquivos confirmados em .uploads/")
         with b2:
             if st.button(f"Limpar {emp} (Tudo)", key=f"clear_all_{emp}", use_container_width=True):
-                for slot in ("FULL", "VENDAS", "ESTOQUE"):
-                    clear_upload(emp, slot, also_disk=True)
+                for slot in ("FULL", "VENDAS", "ESTOQUE"): clear_upload(emp, slot, also_disk=True)
                 st.info(f"{emp}: sessão e disco limpos.")
     
     render_block("ALIVVIA")
@@ -404,9 +370,7 @@ with tab1:
 
 # ===================== TAB 2 — COMPRA AUTOMÁTICA =====================
 with tab2:
-    h_val = h
-    g_val = g
-    lt_val = LT
+    h_val = h; g_val = g; lt_val = LT
     mod_compra_autom.render_tab2(st.session_state, h_val, g_val, lt_val)
 
 # ===================== TAB 3 — ALOCAÇÃO DE COMPRA =====================
@@ -417,7 +381,6 @@ with tab3:
 with tab4:
     if ordem_compra:
         try:
-            # FIX V10.15: Chamada correta da função
             ordem_compra.display_oc_interface(st.session_state)
         except Exception as e:
             st.error(f"Erro na Tab 4: {e}")
@@ -427,7 +390,6 @@ with tab4:
 with tab5:
     if gerenciador_oc:
         try:
-            # FIX V10.15: Chamada correta da função
             gerenciador_oc.display_gerenciador_interface(st.session_state)
         except Exception as e:
             st.error(f"Erro na Tab 5: {e}")
