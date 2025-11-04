@@ -244,11 +244,13 @@ with st.sidebar:
                 # Funde com o catálogo, mantendo o preço do catálogo se já existir
                 df_cat = df_cat.merge(df_precos_final, on="SKU", how="left", suffixes=("_cat", "_est"))
                 
+                # Usa 'Preco_cat' se existir e não for 0, senão usa 'Preco_est'
                 df_cat["Preco"] = np.where(
-                    pd.isna(df_cat["Preco_cat"]) | (df_cat["Preco_cat"] == 0),
+                    (pd.isna(df_cat["Preco_cat"])) | (df_cat["Preco_cat"] == 0),
                     df_cat["Preco_est"],
                     df_cat["Preco_cat"]
                 )
+                
                 df_cat["Preco"] = br_to_float(df_cat["Preco"]).fillna(0.0)
                 df_cat = df_cat.drop(columns=["Preco_cat", "Preco_est"], errors="ignore")
         except Exception:
@@ -287,7 +289,25 @@ with st.sidebar:
         help="Se necessário, cole o link e use o botão abaixo.",
         value=st.session_state.get("alt_sheet_link") or DEFAULT_SHEET_LINK,
     )
-    # ... (Botão "Carregar deste link" - V10.10)
+    if st.button("Carregar deste link", use_container_width=True):
+        try:
+            alt_link = st.session_state.alt_sheet_link.strip()
+            # Tenta extrair ID do link alternativo
+            alt_sheet_id = logica_compra.extract_sheet_id_from_url(alt_link)
+            if not alt_sheet_id:
+                raise ValueError("Link alternativo inválido. Use o link completo do Google Sheets.")
+                
+            cat_df, kits_df = get_padrao_from_sheets(alt_sheet_id)
+            st.session_state.catalogo_df = cat_df
+            st.session_state.kits_df = kits_df
+            st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            st.success("Padrão carregado (link alternativo).")
+        except Exception as e:
+            st.session_state.catalogo_df = None
+            st.session_state.kits_df = None
+            st.session_state.loaded_at = None
+            st.error(f"Erro ao carregar (link alt): {e}")
+
 
 # ===================== TÍTULO E ABAS (CORRIGIDO V10.15) =====================
 st.title("Reposição Logística — Alivvia")

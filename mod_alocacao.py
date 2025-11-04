@@ -35,7 +35,10 @@ def _get_bytes_from_state(state, emp, k):
 
 @st.cache_data(show_spinner="Calculando proporções de venda...")
 def calcular_proporcoes_venda(_state): # FIX V10.9: _state
-    # (Função idêntica à V10.14 - omitida para brevidade)
+    """
+    Calcula a demanda de 60 dias por componente para ALIVVIA e JCA.
+    Retorna um DataFrame mesclado com a proporção.
+    """
     missing = []
     files_map = {}
     
@@ -129,8 +132,9 @@ def calcular_proporcoes_venda(_state): # FIX V10.9: _state
     
     return demandas_finais
 
+
 def render_tab3(state):
-    # (Função idêntica à V10.14 - omitida para brevidade)
+    """Renderiza a Tab 3 (Alocação de Compra Manual)"""
     st.subheader("Alocação Manual de Compra")
     st.caption("Ferramenta independente para dividir um lote comprado (ex: 1000 blocos) proporcionalmente às vendas.")
 

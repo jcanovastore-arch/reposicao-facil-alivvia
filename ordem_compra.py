@@ -34,7 +34,7 @@ DADOS_EMPRESAS = {
 
 # --- CONEXÃO SQLITE ---
 def _get_db_connection() -> sqlite3.Connection:
-    # (Função idêntica à V10.14 - omitida para brevidade)
+    """Cria e/ou conecta ao banco de dados e garante que a tabela exista."""
     try:
         conn = sqlite3.connect(DB_FILE)
         conn.execute("""
@@ -66,7 +66,7 @@ def _init_cesta():
 
 
 def adicionar_itens_cesta(empresa: str, df: pd.DataFrame):
-    # (Função idêntica à V10.14 - omitida para brevidade)
+    """Adiciona itens à cesta (lógica V10.10)."""
     _init_cesta()
     cesta_atual = st.session_state.oc_cesta_itens.get(empresa, [])
     itens_para_processar = df.to_dict("records")
@@ -116,7 +116,6 @@ def adicionar_item_manual_cesta(empresa: str, fornecedor: str, sku: str, preco: 
 
 # --- LÓGICA DE BANCO DE DADOS (OC) ---
 def _get_next_oc_id(empresa: str, conn: sqlite3.Connection) -> str:
-    # (Função idêntica à V10.14 - omitida para brevidade)
     cursor = conn.cursor()
     try:
         prefixo = f"{empresa}-OC-"
@@ -133,7 +132,6 @@ def _get_next_oc_id(empresa: str, conn: sqlite3.Connection) -> str:
 
 
 def salvar_oc(oc_data: Dict[str, Any]):
-    # (Função idêntica à V10.14 - omitida para brevidade)
     conn = _get_db_connection()
     oc_id = _get_next_oc_id(oc_data["EMPRESA"], conn)
     oc_data["OC_ID"] = oc_id 
@@ -145,8 +143,8 @@ def salvar_oc(oc_data: Dict[str, Any]):
             oc_data["OC_ID"],
             oc_data["EMPRESA"],
             oc_data["FORNECEDOR"],
-            oc_data["DATA_OC"].strftime("%Y-%m-%d"),
-            oc_data["DATA_PREVISTA"].strftime("%Y-%m-%d"),
+            oc_data["DATA_OC"].strftime("%Y-%m-%d"), # Salva no DB em formato ISO
+            oc_data["DATA_PREVISTA"].strftime("%Y-%m-%d"), # Salva no DB em formato ISO
             oc_data["CONDICAO_PGTO"],
             oc_data["VALOR_TOTAL_R$"],
             oc_data["STATUS"],
@@ -164,7 +162,7 @@ def salvar_oc(oc_data: Dict[str, Any]):
 
 # --- FUNÇÃO DE IMPRESSÃO (V10.15 - Limpeza) ---
 def gerar_html_oc(oc_data: Dict[str, Any]) -> str:
-    # (Função idêntica à V10.14 - omitida para brevidade, mas garantindo formato BR na data)
+    """Gera o HTML de uma OC para impressão/download."""
     itens = json.loads(oc_data.get("ITENS_JSON", "[]"))
     itens_html = ""
     for item in itens:

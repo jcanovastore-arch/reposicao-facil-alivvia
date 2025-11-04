@@ -11,6 +11,7 @@ from typing import Dict, List, Any
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 
 # Importa as funções de DB e HTML do módulo de OC
 try:
@@ -159,7 +160,7 @@ def display_gerenciador_interface(state):
     
     oc_id_selecionada = st.selectbox(
         "Selecione uma OC para ver detalhes ou dar baixa:",
-        options=df_ocs["OC_ID"].unique().tolist()
+        options=df_ocs["OC Nº"].unique().tolist() # Usa a coluna renomeada
     )
 
     if not oc_id_selecionada:
@@ -219,7 +220,9 @@ def display_gerenciador_interface(state):
         "fornecedor", "SKU", "Compra_Sugerida", "Preco", "Valor_Compra_R$",
         "Qtd_Recebida", "NF_OK"
     ]
-    df_itens_display = df_itens[[col for col in cols_editor_baixa if col in df_itens.columns]].copy()
+    # Garante que colunas_editor só tenha colunas que *realmente* existem no df_itens
+    cols_existentes = [col for col in cols_editor_baixa if col in df_itens.columns]
+    df_itens_display = df_itens[cols_existentes].copy()
     # =================================================================
     # >> FIM DA CORREÇÃO (V10.15) <<
     # =================================================================
