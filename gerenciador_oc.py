@@ -6,7 +6,12 @@ import sqlite3
 import datetime as dt
 
 # Importar funções de persistência e impressão do módulo de OC
-from ordem_compra import _get_db_connection, gerar_html_oc, STATUS_PENDENTE, STATUS_BAIXADA, STATUS_CANCELADA
+# Garante que as importações sejam robustas
+try:
+    from ordem_compra import _get_db_connection, gerar_html_oc, STATUS_PENDENTE, STATUS_BAIXADA, STATUS_CANCELADA
+except ImportError:
+    st.error("Falha ao importar 'ordem_compra.py'. Verifique se o arquivo está presente.")
+    st.stop()
 
 # --- FUNÇÕES DE PERSISTÊNCIA ---
 
