@@ -1,6 +1,6 @@
-# reposicao_facil.py - V11.1 (Principal - Hyper-Defensive Price Merge)
-# - FIX: Reestrutura a lógica de merge de preços em get_padrao_from_sheets para
-#   eliminar a causa-raiz do erro "The truth value of a Series is ambiguous".
+# reposicao_facil.py - V11.2 (Principal - Widget Fix e Estabilidade de Estado)
+# - FIX A: Remove valor redundante no st.text_input (alt_sheet_link) para eliminar o warning.
+# - FIX B: Mantém a lógica Hyper-Defensive Price Merge (V11.1) que elimina o erro "ambiguous".
 
 import datetime as dt
 import json
@@ -13,7 +13,7 @@ import pandas as pd
 import streamlit as st
 import numpy as np
 
-# ====== MÓDulos DO PROJETO (IMPORTAÇÃO CORRETA) ======
+# ====== MÓDulos DO PROJETO (Importações V11.0) ======
 import logica_compra 
 import mod_compra_autom
 import mod_alocacao
@@ -33,7 +33,7 @@ from logica_compra import (
     _carregar_padrao_de_content
 )
 
-VERSION = "v11.1 – Hyper-Defensive Fix Ambiguous"
+VERSION = "v11.2 – Estabilidade de Estado (Widget Fix)"
 
 # ===================== CONFIG PÁGINA =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -45,10 +45,11 @@ DEFAULT_SHEET_LINK = (
 
 # ===================== ESTADO INICIAL (V10.10) =====================
 def _ensure_state():
+    # Inicialização ÚNICA (setdefault) é o padrão seguro.
     st.session_state.setdefault("catalogo_df", None)
     st.session_state.setdefault("kits_df", None)
     st.session_state.setdefault("loaded_at", None)
-    st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK)
+    st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK) # Valor padrão setado aqui
     st.session_state.setdefault("oc_cesta_itens", {"ALIVVIA": [], "JCA": []})
     st.session_state.setdefault("compra_autom_data", {})
     st.session_state.setdefault("oc_just_saved_html", None)
@@ -63,9 +64,9 @@ def _ensure_state():
 _ensure_state()
 
 # ===================== PERSISTÊNCIA LOCAL (.uploads) (V10.3) =====================
+# (Lógica de Persistência omitida para brevidade - mantida igual a V11.1)
 BASE_DIR = Path(".uploads")
 BASE_DIR.mkdir(exist_ok=True)
-
 def _slug(s: str) -> str:
     s = (s or "").strip()
     return "".join(c if c.isalnum() or c in ("-", "_") else "-" for c in s.upper())
@@ -85,7 +86,6 @@ def _save_manifest(empresa: str, manifest: dict) -> None:
     _manifest_path(empresa).write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-
 def persist_to_disk(empresa: str, tipo: str, name: str, mime: str, data: bytes) -> Path:
     ext = Path(name).suffix or ""; fname = f"{_slug(tipo)}{ext}"
     fpath = _tipo_dir(empresa, tipo) / fname; fpath.write_bytes(data)
@@ -96,14 +96,12 @@ def persist_to_disk(empresa: str, tipo: str, name: str, mime: str, data: bytes) 
         "saved_at": dt.datetime.now().isoformat(timespec="seconds"),
     }
     _save_manifest(empresa, manifest); return fpath
-
 def remove_from_disk(empresa: str, tipo: str) -> None:
     manifest = _load_manifest(empresa); info = manifest.get(tipo)
     if info:
         try: Path(info["path"]).unlink(missing_ok=True)
         except Exception: pass
         manifest.pop(tipo, None); _save_manifest(empresa, manifest)
-
 def load_from_disk_if_any(empresa: str, tipo: str) -> Optional[dict]:
     manifest = _load_manifest(empresa); info = manifest.get(tipo)
     if not info: return None
@@ -116,7 +114,6 @@ def load_from_disk_if_any(empresa: str, tipo: str) -> Optional[dict]:
             "bytes": data, "sha1": info.get("sha1"), "saved_at": info.get("saved_at"),
         }
     except Exception: return None
-
 def preload_persisted_uploads():
     for emp in ("ALIVVIA", "JCA"):
         for tipo in ("FULL", "VENDAS", "ESTOQUE"):
@@ -156,7 +153,7 @@ def clear_upload(empresa: str, tipo: str, also_disk: bool = True) -> None:
     st.session_state[empresa][tipo] = {"name": None, "bytes": None}
     if also_disk: remove_from_disk(empresa, tipo)
 
-# ===================== SIDEBAR / PARÂMETROS (Lógica de Carregamento V11.1) =====================
+# ===================== SIDEBAR / PARÂMETROS (Lógica de Carregamento V11.2) =====================
 with st.sidebar:
     st.subheader("Parâmetros")
     h  = st.selectbox("Horizonte (dias)", [30, 60, 90], index=1, key="h")
@@ -177,6 +174,7 @@ with st.sidebar:
         df_kits = cat.kits_reais
         
         # 3. Lógica de Carregamento de Preço (FIX Hyper-Defensive V11.1)
+        # Este bloco corrige o erro "ambiguous" garantindo tipos float e usando np.where
         try:
             df_precos_list = []
             for emp in ("ALIVVIA", "JCA"):
@@ -204,7 +202,7 @@ with st.sidebar:
                 # 2. Mescla o preço do Estoque (Preco_Estoque)
                 df_cat = df_cat.merge(df_precos_final, on="SKU", how="left")
                 df_cat['Preco_Estoque'] = br_to_float(df_cat.get('Preco', df_cat.get('Preco_Estoque'))).fillna(0.0)
-                df_cat = df_cat.drop(columns=['Preco'], errors='ignore') # Remove a coluna 'Preco' intermediária
+                df_cat = df_cat.drop(columns=['Preco'], errors='ignore') 
                 
                 # 3. SELEÇÃO FINAL: Catálogo > Estoque (usando np.where em colunas pré-limpas)
                 df_cat['Preco'] = np.where(
@@ -232,9 +230,7 @@ with st.sidebar:
     with colA:
         if st.button("Carregar padrão agora", use_container_width=True):
             try:
-                # Limpa o cache para garantir que rode o código novo
                 get_padrao_from_sheets.clear() 
-                
                 cat_df, kits_df = get_padrao_from_sheets(DEFAULT_SHEET_ID)
                 st.session_state.catalogo_df = cat_df
                 st.session_state.kits_df = kits_df
@@ -248,16 +244,16 @@ with st.sidebar:
     with colB:
         st.link_button("🔗 Abrir no Drive (editar)", DEFAULT_SHEET_LINK, use_container_width=True)
 
-    # Lógica do link alternativo
+    # CORREÇÃO A: Remove o 'value' redundante para evitar o warning do widget
     st.text_input(
         "Link alternativo do Google Sheets (opcional)",
         key="alt_sheet_link",
-        help="Se necessário, cole o link e use o botão abaixo.",
-        value=st.session_state.get("alt_sheet_link") or DEFAULT_SHEET_LINK,
+        help="Se necessário, cole o link e use o botão abaixo."
+        # 'value' removido para usar o valor inicializado via st.session_state.setdefault no _ensure_state
     )
     if st.button("Carregar deste link", use_container_width=True):
         try:
-            get_padrao_from_sheets.clear() # Limpa o cache
+            get_padrao_from_sheets.clear() 
             alt_link = st.session_state.alt_sheet_link.strip()
             alt_sheet_id = extract_sheet_id_from_url(alt_link)
             if not alt_sheet_id:
