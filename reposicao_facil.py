@@ -1,371 +1,138 @@
-# reposicao_facil.py - V11.2 (Principal - Widget Fix e Estabilidade de Estado)
-# - FIX A: Remove valor redundante no st.text_input (alt_sheet_link) para eliminar o warning.
-# - FIX B: Mantém a lógica Hyper-Defensive Price Merge (V11.1) que elimina o erro "ambiguous".
+# ==== PATCH: Leitura hiper-defensiva do Padrão (KITS/CAT) ====
+# Cole este bloco em logica_compra.py (substitui a função antiga _carregar_padrao_de_content
+# e adiciona helpers necessários). Mantém o contrato: retorna Catalogo(catalogo_simples, kits_reais).
 
-import datetime as dt
-import json
 import io
-import hashlib
-from pathlib import Path
-from typing import Optional
-
-import pandas as pd
-import streamlit as st
+import re
 import numpy as np
+import pandas as pd
+from dataclasses import dataclass
 
-# ====== MÓDulos DO PROJETO (Importações V11.0) ======
-import logica_compra 
-import mod_compra_autom
-import mod_alocacao
-import ordem_compra
-import gerenciador_oc
-# ======================================================
+# Se já existir @dataclass Catalogo no arquivo, mantenha a sua versão e remova esta.
+@dataclass
+class Catalogo:
+    catalogo_simples: pd.DataFrame
+    kits_reais: pd.DataFrame
 
-from logica_compra import (
-    Catalogo,
-    baixar_xlsx_do_sheets,
-    load_any_table_from_bytes,
-    mapear_tipo,
-    mapear_colunas,
-    extract_sheet_id_from_url,
-    DEFAULT_SHEET_ID,
-    br_to_float,
-    _carregar_padrao_de_content
-)
+# ----------------- Helpers robustos -----------------
+_BR_MONEY_RE = re.compile(r"[^\d,.-]+")
 
-VERSION = "v11.2 – Estabilidade de Estado (Widget Fix)"
+def br_to_float(series_or_scalar):
+    """Converte valores BR ('R$ 12,90') em float. Aceita escalar ou Series."""
+    if isinstance(series_or_scalar, pd.Series):
+        s = series_or_scalar.astype(str).str.replace(".", "", regex=False)
+        s = s.str.replace(",", ".", regex=False)
+        s = s.str.replace(_BR_MONEY_RE, "", regex=True)
+        out = pd.to_numeric(s, errors="coerce").astype(float)
+        return out.fillna(0.0)
+    else:
+        s = str(series_or_scalar).replace(".", "").replace(",", ".")
+        s = _BR_MONEY_RE.sub("", s)
+        try:
+            return float(s)
+        except Exception:
+            return 0.0
 
-# ===================== CONFIG PÁGINA =====================
-st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
+def _to_lc_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Colunas em minúsculas, sem espaços extras."""
+    m = {c: c.strip().lower() for c in df.columns}
+    return df.rename(columns=m)
 
-DEFAULT_SHEET_LINK = (
-    "https://docs.google.com/spreadsheets/d/1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43/"
-    "edit?usp=sharing&ouid=109458533144345974874&rtpof=true&sd=true"
-)
+def _pick_sheet_ci(xls: pd.ExcelFile, *candidates) -> pd.DataFrame:
+    """Escolhe aba por substring case-insensitive. Ex.: _pick_sheet_ci(xls,'catalog','catalogo')."""
+    names = {name.lower(): name for name in xls.sheet_names}
+    for cand in candidates:
+        cand_lc = cand.lower()
+        for lc, real in names.items():
+            if cand_lc in lc:
+                return xls.parse(real, dtype=str, engine="openpyxl")
+    raise RuntimeError(f"Aba não encontrada: tente nomes contendo {candidates}")
 
-# ===================== ESTADO INICIAL (V10.10) =====================
-def _ensure_state():
-    # Inicialização ÚNICA (setdefault) é o padrão seguro.
-    st.session_state.setdefault("catalogo_df", None)
-    st.session_state.setdefault("kits_df", None)
-    st.session_state.setdefault("loaded_at", None)
-    st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK) # Valor padrão setado aqui
-    st.session_state.setdefault("oc_cesta_itens", {"ALIVVIA": [], "JCA": []})
-    st.session_state.setdefault("compra_autom_data", {})
-    st.session_state.setdefault("oc_just_saved_html", None)
-    st.session_state.setdefault("oc_just_saved_id", None)
-    
-    for emp in ("ALIVVIA", "JCA"):
-        st.session_state.setdefault(emp, {})
-        st.session_state[emp].setdefault("FULL",    {"name": None, "bytes": None})
-        st.session_state[emp].setdefault("VENDAS",  {"name": None, "bytes": None})
-        st.session_state[emp].setdefault("ESTOQUE", {"name": None, "bytes": None})
+# ----------------- Normalizações de dados -----------------
+def _normalize_catalogo(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """Gera DataFrame com colunas padronizadas:
+       ['component_sku','fornecedor','status_reposicao','preco']"""
+    df = _to_lc_columns(df_raw).copy()
 
-_ensure_state()
+    # Mapas de possíveis nomes
+    sku_cols = [c for c in df.columns if "component" in c and "sku" in c] or \
+               [c for c in df.columns if c in ("component_sku","sku","código (sku)","codigo (sku)","codigo","código")]
+    forn_cols = [c for c in df.columns if c in ("fornecedor","supplier","vendor")]
+    status_cols = [c for c in df.columns if "status" in c and "repos" in c] or \
+                  [c for c in df.columns if c in ("status_reposicao","status reposicao","status")]
+    preco_cols = [c for c in df.columns if c in ("preco","preço","preco_cat","preço_cat")]
 
-# ===================== PERSISTÊNCIA LOCAL (.uploads) (V10.3) =====================
-# (Lógica de Persistência omitida para brevidade - mantida igual a V11.1)
-BASE_DIR = Path(".uploads")
-BASE_DIR.mkdir(exist_ok=True)
-def _slug(s: str) -> str:
-    s = (s or "").strip()
-    return "".join(c if c.isalnum() or c in ("-", "_") else "-" for c in s.upper())
-def _empresa_dir(empresa: str) -> Path:
-    p = BASE_DIR / _slug(empresa); p.mkdir(parents=True, exist_ok=True); return p
-def _tipo_dir(empresa: str, tipo: str) -> Path:
-    p = _empresa_dir(empresa) / _slug(tipo); p.mkdir(parents=True, exist_ok=True); return p
-def _manifest_path(empresa: str) -> Path:
-    return _empresa_dir(empresa) / "_manifest.json"
-def _load_manifest(empresa: str) -> dict:
-    mp = _manifest_path(empresa)
-    if mp.exists():
-        try: return json.loads(mp.read_text(encoding="utf-8"))
-        except Exception: return {}
-    return {}
-def _save_manifest(empresa: str, manifest: dict) -> None:
-    _manifest_path(empresa).write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-def persist_to_disk(empresa: str, tipo: str, name: str, mime: str, data: bytes) -> Path:
-    ext = Path(name).suffix or ""; fname = f"{_slug(tipo)}{ext}"
-    fpath = _tipo_dir(empresa, tipo) / fname; fpath.write_bytes(data)
-    manifest = _load_manifest(empresa)
-    manifest[tipo] = {
-        "name": name, "mime": mime or "application/octet-stream", "path": str(fpath),
-        "size": len(data), "sha1": hashlib.sha1(data).hexdigest(),
-        "saved_at": dt.datetime.now().isoformat(timespec="seconds"),
-    }
-    _save_manifest(empresa, manifest); return fpath
-def remove_from_disk(empresa: str, tipo: str) -> None:
-    manifest = _load_manifest(empresa); info = manifest.get(tipo)
-    if info:
-        try: Path(info["path"]).unlink(missing_ok=True)
-        except Exception: pass
-        manifest.pop(tipo, None); _save_manifest(empresa, manifest)
-def load_from_disk_if_any(empresa: str, tipo: str) -> Optional[dict]:
-    manifest = _load_manifest(empresa); info = manifest.get(tipo)
-    if not info: return None
-    p = Path(info["path"])
-    if not p.exists(): return None
+    if not sku_cols:
+        raise RuntimeError("CATALOGO: coluna de SKU não encontrada (ex.: component_sku/sku).")
+
+    out = pd.DataFrame()
+    out["component_sku"]    = df[sku_cols[0]].astype(str).str.strip()
+    out["fornecedor"]       = df[forn_cols[0]].astype(str).str.strip() if forn_cols else ""
+    out["status_reposicao"] = df[status_cols[0]].astype(str).str.strip() if status_cols else ""
+
+    if preco_cols:
+        preco = br_to_float(df[preco_cols[0]])
+    else:
+        preco = pd.Series([0.0] * len(out), index=out.index, dtype=float)
+
+    # Garante float, sem NaN
+    out["preco"] = pd.to_numeric(preco, errors="coerce").fillna(0.0).astype(float)
+
+    # Remove linhas vazias de SKU
+    out = out[out["component_sku"].astype(str).str.len() > 0].reset_index(drop=True)
+    return out
+
+def _normalize_kits(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """Gera DataFrame com colunas padronizadas para kits reais:
+       ['kit_sku','component_sku','quantidade']"""
+    df = _to_lc_columns(df_raw).copy()
+
+    # Tenta alguns nomes comuns
+    kit_cols  = [c for c in df.columns if c in ("kit_sku","sku_kit","parent_sku","sku pai","sku_pai","sku kit","kit")]
+    comp_cols = [c for c in df.columns if "component" in c and "sku" in c] or \
+                [c for c in df.columns if c in ("component_sku","sku_componente","sku comp","comp_sku")]
+    qtd_cols  = [c for c in df.columns if c in ("quantidade","qtd","qtde","qty")]
+
+    if not (kit_cols and comp_cols and qtd_cols):
+        # Se não for uma planilha de kits válida, retorna vazio — nunca explode.
+        return pd.DataFrame(columns=["kit_sku","component_sku","quantidade"])
+
+    out = pd.DataFrame({
+        "kit_sku":       df[kit_cols[0]].astype(str).str.strip(),
+        "component_sku": df[comp_cols[0]].astype(str).str.strip(),
+        "quantidade":    pd.to_numeric(br_to_float(df[qtd_cols[0]]), errors="coerce").fillna(0).astype(int)
+    })
+    # Remove linhas inválidas
+    out = out[(out["kit_sku"] != "") & (out["component_sku"] != "")]
+    return out.reset_index(drop=True)
+
+# ----------------- Loader principal -----------------
+def _carregar_padrao_de_content(content_bytes: bytes) -> Catalogo:
+    """
+    Lê o XLSX do Google Sheets e retorna Catalogo(catalogo_simples, kits_reais) com:
+    - Abas e colunas case-insensitive
+    - Preço normalizado para float (sem 'R$' / vírgula)
+    - Nenhuma checagem booleana ambígua sobre Series
+    """
+    if not content_bytes:
+        raise RuntimeError("Arquivo de padrão vazio.")
+
+    xls = pd.ExcelFile(io.BytesIO(content_bytes), engine="openpyxl")
+
+    # Escolhe abas por substring, sem depender de maiúsculas/minúsculas
+    df_cat_raw  = _pick_sheet_ci(xls, "catalogo", "catalog", "cat")
+    df_kits_raw = None
     try:
-        data = p.read_bytes()
-        return {
-            "name": info.get("name", p.name), "mime": info.get("mime", "application/octet-stream"),
-            "bytes": data, "sha1": info.get("sha1"), "saved_at": info.get("saved_at"),
-        }
-    except Exception: return None
-def preload_persisted_uploads():
-    for emp in ("ALIVVIA", "JCA"):
-        for tipo in ("FULL", "VENDAS", "ESTOQUE"):
-            if not st.session_state[emp][tipo]["name"]:
-                disk_item = load_from_disk_if_any(emp, tipo)
-                if disk_item:
-                    st.session_state[emp][tipo]["name"] = disk_item["name"]
-                    st.session_state[emp][tipo]["bytes"] = disk_item["bytes"]
-preload_persisted_uploads()
+        df_kits_raw = _pick_sheet_ci(xls, "kits", "kit")
+    except Exception:
+        # Se não tiver aba de kits, seguimos com vazio — não é erro.
+        pass
 
-# ===================== HELPERS DE DATAFRAME / PARSING CACHEADO =====================
-@st.cache_data(show_spinner=False)
-def _parse_table_cached(name_lower: str, raw_bytes: bytes) -> Optional[pd.DataFrame]:
-    if not name_lower or not raw_bytes: return None
-    _ = hashlib.sha1(raw_bytes).hexdigest(); bio = io.BytesIO(raw_bytes)
-    try:
-        if name_lower.endswith(".csv"):
-            try: return pd.read_csv(bio)
-            except Exception: bio.seek(0); return pd.read_csv(bio, sep=";")
-        elif name_lower.endswith(".xlsx") or name_lower.endswith(".xls"):
-            return pd.read_excel(bio, engine="openpyxl")
-        else: return None
-    except Exception: return None
+    # Normalizações (NUNCA usar if sobre Series)
+    catalogo_simples = _normalize_catalogo(df_cat_raw)
+    kits_reais = _normalize_kits(df_kits_raw) if df_kits_raw is not None else \
+                 pd.DataFrame(columns=["kit_sku","component_sku","quantidade"])
 
-def df_from_saved_cached(empresa: str, tipo: str) -> Optional[pd.DataFrame]:
-    item_name = st.session_state[empresa][tipo]["name"]
-    item_bytes = st.session_state[empresa][tipo]["bytes"]
-    if not item_name or not item_bytes:
-        disk_item = load_from_disk_if_any(empresa, tipo)
-        if not disk_item: return None
-        item_name = disk_item["name"]; item_bytes = disk_item["bytes"]
-        st.session_state[empresa][tipo]["name"] = item_name
-        st.session_state[empresa][tipo]["bytes"] = item_bytes
-    return _parse_table_cached((item_name or "").lower(), item_bytes)
-
-def clear_upload(empresa: str, tipo: str, also_disk: bool = True) -> None:
-    st.session_state[empresa][tipo] = {"name": None, "bytes": None}
-    if also_disk: remove_from_disk(empresa, tipo)
-
-# ===================== SIDEBAR / PARÂMETROS (Lógica de Carregamento V11.2) =====================
-with st.sidebar:
-    st.subheader("Parâmetros")
-    h  = st.selectbox("Horizonte (dias)", [30, 60, 90], index=1, key="h")
-    g  = st.number_input("Crescimento % ao mês", value=0.0, step=1.0, key="g")
-    LT = st.number_input("Lead time (dias)", value=0, step=1, min_value=0, key="LT")
-
-    st.markdown("---")
-    st.subheader("Padrão (KITS/CAT) — Google Sheets")
-    st.caption("Carrega **somente** quando você clicar.")
-
-    @st.cache_data(show_spinner="Baixando Planilha de Padrões KITS/CAT...")
-    def get_padrao_from_sheets(sheet_id):
-        # 1. Baixa o conteúdo
-        content = baixar_xlsx_do_sheets(sheet_id)
-        # 2. Processa o Catálogo/Kits (FIX V10.20 para Aba/Case-Insensitive em logica_compra.py)
-        cat = _carregar_padrao_de_content(content)
-        df_cat = cat.catalogo_simples.rename(columns={"component_sku":"sku"})
-        df_kits = cat.kits_reais
-        
-        # 3. Lógica de Carregamento de Preço (FIX Hyper-Defensive V11.1)
-        # Este bloco corrige o erro "ambiguous" garantindo tipos float e usando np.where
-        try:
-            df_precos_list = []
-            for emp in ("ALIVVIA", "JCA"):
-                disk_item = load_from_disk_if_any(emp, "ESTOQUE")
-                if disk_item and disk_item.get("bytes"):
-                    df_raw = load_any_table_from_bytes(disk_item["name"], disk_item["bytes"])
-                    tipo = mapear_tipo(df_raw)
-                    if tipo == "FISICO":
-                        df_fis = mapear_colunas(df_raw, tipo)
-                        df_precos_list.append(df_fis[["SKU", "Preco"]])
-            
-            if df_precos_list:
-                df_precos_all = pd.concat(df_precos_list, ignore_index=True)
-                df_precos_final = df_precos_all.drop_duplicates(subset=["SKU"], keep="last")
-                
-                # PREPARAÇÃO DEFENSIVA
-                
-                # 1. Renomeia e limpa o preço do Catálogo (Preco_Cat)
-                if 'Preco' in df_cat.columns:
-                    df_cat = df_cat.rename(columns={'Preco': 'Preco_Cat'}).copy()
-                    df_cat['Preco_Cat'] = br_to_float(df_cat['Preco_Cat']).fillna(0.0)
-                else:
-                    df_cat['Preco_Cat'] = 0.0
-                    
-                # 2. Mescla o preço do Estoque (Preco_Estoque)
-                df_cat = df_cat.merge(df_precos_final, on="SKU", how="left")
-                df_cat['Preco_Estoque'] = br_to_float(df_cat.get('Preco', df_cat.get('Preco_Estoque'))).fillna(0.0)
-                df_cat = df_cat.drop(columns=['Preco'], errors='ignore') 
-                
-                # 3. SELEÇÃO FINAL: Catálogo > Estoque (usando np.where em colunas pré-limpas)
-                df_cat['Preco'] = np.where(
-                    df_cat['Preco_Cat'] > 0.0,
-                    df_cat['Preco_Cat'],
-                    df_cat['Preco_Estoque']
-                )
-                df_cat = df_cat.drop(columns=['Preco_Cat', 'Preco_Estoque'], errors='ignore')
-
-            else:
-                # Se não há preço de estoque, usa o Catálogo e garante limpeza
-                if 'Preco' not in df_cat.columns: df_cat["Preco"] = 0.0
-                df_cat["Preco"] = br_to_float(df_cat["Preco"]).fillna(0.0)
-
-        except Exception as e:
-            # Caso o erro ainda ocorra, garante que o preço seja 0.0
-            st.warning(f"Não foi possível carregar preços dos estoques (usando Padrão): {e}")
-            if "Preco" not in df_cat.columns: df_cat["Preco"] = 0.0
-            df_cat["Preco"] = br_to_float(df_cat["Preco"]).fillna(0.0)
-            
-        return df_cat, df_kits
-
-
-    colA, colB = st.columns([1, 1])
-    with colA:
-        if st.button("Carregar padrão agora", use_container_width=True):
-            try:
-                get_padrao_from_sheets.clear() 
-                cat_df, kits_df = get_padrao_from_sheets(DEFAULT_SHEET_ID)
-                st.session_state.catalogo_df = cat_df
-                st.session_state.kits_df = kits_df
-                st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                st.success("Padrão carregado com sucesso.")
-            except Exception as e:
-                st.session_state.catalogo_df = None
-                st.session_state.kits_df = None
-                st.session_state.loaded_at = None
-                st.error(f"Erro ao carregar padrão: {str(e)}")
-    with colB:
-        st.link_button("🔗 Abrir no Drive (editar)", DEFAULT_SHEET_LINK, use_container_width=True)
-
-    # CORREÇÃO A: Remove o 'value' redundante para evitar o warning do widget
-    st.text_input(
-        "Link alternativo do Google Sheets (opcional)",
-        key="alt_sheet_link",
-        help="Se necessário, cole o link e use o botão abaixo."
-        # 'value' removido para usar o valor inicializado via st.session_state.setdefault no _ensure_state
-    )
-    if st.button("Carregar deste link", use_container_width=True):
-        try:
-            get_padrao_from_sheets.clear() 
-            alt_link = st.session_state.alt_sheet_link.strip()
-            alt_sheet_id = extract_sheet_id_from_url(alt_link)
-            if not alt_sheet_id:
-                raise ValueError("Link alternativo inválido.")
-                
-            cat_df, kits_df = get_padrao_from_sheets(alt_sheet_id)
-            st.session_state.catalogo_df = cat_df
-            st.session_state.kits_df = kits_df
-            st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            st.success("Padrão carregado (link alternativo).")
-        except Exception as e:
-            st.session_state.catalogo_df = None
-            st.session_state.kits_df = None
-            st.session_state.loaded_at = None
-            st.error(f"Erro ao carregar (link alt): {e}")
-
-
-# ===================== TÍTULO E ABAS =====================
-st.title("Reposição Logística — Alivvia")
-if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
-    st.warning("► Carregue o **Padrão (KITS/CAT)** no sidebar antes de usar as abas.")
-
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["📂 Dados das Empresas", "🧮 Compra Automática", "📦 Alocação de Compra", "🛒 Ordem de Compra (OC)", "✨ Gerenciador de OCs"]
-)
-
-# ===================== TAB 1 — UPLOADS =====================
-with tab1:
-    st.subheader("Uploads fixos por empresa (sessão + disco)")
-    st.caption("Após **Salvar (Confirmar)**, o arquivo fica gravado em .uploads/ e volta sozinho após F5/restart.")
-
-    def render_upload_slot(emp: str, slot: str, label: str, col):
-        with col:
-            st.markdown(f"**{label} — {emp}**")
-            up_file = st.file_uploader(
-                "CSV/XLSX/XLS", type=["csv", "xlsx", "xls"], key=f"up_{slot}_{emp}"
-            )
-            if up_file is not None:
-                st.session_state[emp][slot]["name"] = up_file.name
-                st.session_state[emp][slot]["bytes"] = up_file.getbuffer().tobytes()
-                st.info(f"💾 Salvo na sessão: {up_file.name}")
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button(f"Salvar {label} (Confirmar)", key=f"btn_save_{slot}_{emp}", use_container_width=True):
-                    nm = st.session_state[emp][slot]["name"]; bt = st.session_state[emp][slot]["bytes"]
-                    if not nm or not bt: st.warning("Nada para salvar.")
-                    else: persist_to_disk(emp, slot, nm, "application/octet-stream", bt); st.success("✅ Confirmado em .uploads/")
-            with c2:
-                if st.button(f"Limpar {label}", key=f"btn_clear_{slot}_{emp}", use_container_width=True):
-                    clear_upload(emp, slot, also_disk=True); st.info("Removido da sessão e do disco.")
-            disk_info = load_from_disk_if_any(emp, slot)
-            if disk_info:
-                short_sha = (disk_info.get("sha1") or "")[:8]; when = disk_info.get("saved_at") or "-"
-                st.caption(f"📦 Disco: {disk_info['name']} • {short_sha} • {when}")
-            with st.expander("Prévia (opcional)"):
-                dfp = df_from_saved_cached(emp, slot)
-                if dfp is not None:
-                    st.caption(f"{label}: {dfp.shape[0]} linhas / {dfp.shape[1]} colunas")
-                    st.dataframe(dfp.head(5), use_container_width=True, hide_index=True)
-                else: st.caption("(vazio)")
-
-    def render_block(emp: str):
-        st.markdown(f"### {emp}")
-        c1, c2 = st.columns(2)
-        render_upload_slot(emp, "FULL", "FULL", c1)
-        render_upload_slot(emp, "VENDAS", "Shopee/MT (Vendas)", c2)
-        st.markdown("---")
-        c3, _ = st.columns([1, 1])
-        render_upload_slot(emp, "ESTOQUE", "Estoque Físico", c3)
-        st.markdown("---")
-        b1, b2 = st.columns(2)
-        with b1:
-            if st.button(f"Salvar {emp} (Confirmar tudo)", key=f"save_all_{emp}", type="primary", use_container_width=True):
-                faltando = []
-                for slot in ("FULL", "VENDAS", "ESTOQUE"):
-                    nm = st.session_state[emp][slot]["name"]; bt = st.session_state[emp][slot]["bytes"]
-                    if not nm or not bt: faltando.append(slot); continue
-                    persist_to_disk(emp, slot, nm, "application/octet-stream", bt)
-                if faltando: st.warning(f"{emp}: faltou salvar {', '.join(faltando)}.")
-                else: st.success(f"{emp}: todos os arquivos confirmados em .uploads/")
-        with b2:
-            if st.button(f"Limpar {emp} (Tudo)", key=f"clear_all_{emp}", use_container_width=True):
-                for slot in ("FULL", "VENDAS", "ESTOQUE"): clear_upload(emp, slot, also_disk=True)
-                st.info(f"{emp}: sessão e disco limpos.")
-    
-    render_block("ALIVVIA")
-    render_block("JCA")
-
-# ===================== TAB 2 — COMPRA AUTOMÁTICA =====================
-with tab2:
-    h_val = h; g_val = g; lt_val = LT
-    mod_compra_autom.render_tab2(st.session_state, h_val, g_val, lt_val)
-
-# ===================== TAB 3 — ALOCAÇÃO DE COMPRA =====================
-with tab3:
-    mod_alocacao.render_tab3(st.session_state)
-
-# ===================== TAB 4 / TAB 5 =====================
-with tab4:
-    if ordem_compra:
-        try:
-            ordem_compra.display_oc_interface(st.session_state)
-        except Exception as e:
-            st.error(f"Erro na Tab 4: {e}")
-    else: st.info("Módulo 'ordem_compra' indisponível neste ambiente.")
-
-with tab5:
-    if gerenciador_oc:
-        try:
-            gerenciador_oc.display_gerenciador_interface(st.session_state)
-        except Exception as e:
-            st.error(f"Erro na Tab 5: {e}")
-    else: st.info("Módulo 'gerenciador_oc' indisponível neste ambiente.")
-
-st.caption(f"© Alivvia — simples, robusto e auditável. ({VERSION})")
+    # Retorno no contrato esperado
+    return Catalogo(catalogo_simples=catalogo_simples, kits_reais=kits_reais)
+# ==== FIM DO PATCH ====
