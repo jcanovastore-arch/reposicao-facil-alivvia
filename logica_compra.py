@@ -1,7 +1,6 @@
-# logica_compra.py - V11.4 (Final Clean - Lógica Hiper-Defensiva do Usuário)
-# - FIX: Remove caracteres invisíveis que causavam o erro fatal.
-# - FIX: Implementa a lógica robusta de checagem de abas/colunas/preços.
-# - Garante que o Catálogo de saída use a coluna 'Preco' (P maiúsculo).
+# logica_compra.py - V11.4 (PATCH HIPER-DEFENSIVO - FINAL CLEAN)
+# - FIX: Remove caracteres invisíveis que causaram o erro fatal de sintaxe.
+# - Contém a lógica robusta (V11.3) de checagem de abas/colunas/preços em Pandas.
 
 import io
 import re
@@ -24,7 +23,7 @@ def _requests_session() -> requests.Session:
     s = requests.Session()
     retries = Retry(total=3, backoff_factor=0.6, status_forcelist=[429,500,502,503,504], allowed_methods=["GET"])
     s.mount("https://", HTTPAdapter(max_retries=retries))
-    s.headers.update({"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"})
+    s.headers.update({"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit(537.36, like Gecko) Chrome/125 Safari/537.36"})
     return s
 
 def gs_export_xlsx_url(sheet_id: str) -> str:
@@ -155,7 +154,6 @@ def _pick_sheet_ci(xls: pd.ExcelFile, *candidates) -> pd.DataFrame:
 
 def _normalize_catalogo(df_raw: pd.DataFrame) -> pd.DataFrame:
     """Gera DataFrame de Catálogo padronizado, usando lógica robusta."""
-    # Usando _to_lc_columns para mapear colunas (solução do seu patch)
     df = _to_lc_columns(df_raw).copy()
 
     sku_cols = [c for c in df.columns if "component" in c and "sku" in c] or \
@@ -230,7 +228,7 @@ def _carregar_padrao_de_content(content_bytes: bytes) -> Catalogo:
 
     return Catalogo(catalogo_simples=catalogo_simples, kits_reais=kits_reais)
 
-# ===================== MAPEAMENTO E CÁLCULO (O restante do código V11.2/V11.3) =====================
+# ===================== MAPEAMENTO E CÁLCULO (O restante do código) =====================
 def mapear_tipo(df: pd.DataFrame) -> str:
     cols = [c.lower() for c in df.columns]
     tem_sku_std  = any(c in {"sku","codigo","codigo_sku"} for c in cols) or any("sku" in c for c in cols)
