@@ -1,6 +1,7 @@
-# logica_compra.py - V11.3 (PATCH HIPER-DEFENSIVO DO USUÁRIO)
-# - FIX: Implementa a lógica robusta de checagem de abas/colunas/preços em Pandas.
-# - Garante que todas as checagens e conversões de preço sejam vetoriais (Series-safe).
+# logica_compra.py - V11.4 (Final Clean - Lógica Hiper-Defensiva do Usuário)
+# - FIX: Remove caracteres invisíveis que causavam o erro fatal.
+# - FIX: Implementa a lógica robusta de checagem de abas/colunas/preços.
+# - Garante que o Catálogo de saída use a coluna 'Preco' (P maiúsculo).
 
 import io
 import re
@@ -55,7 +56,7 @@ def baixar_xlsx_do_sheets(sheet_id: str) -> bytes:
         )
     return r.content
 
-# ===================== UTILS DE DADOS (Seu Patch) =====================
+# ===================== UTILS DE DADOS =====================
 _BR_MONEY_RE = re.compile(r"[^\d,.-]+")
 
 def br_to_float(series_or_scalar):
@@ -131,14 +132,19 @@ def load_any_table_from_bytes(file_name: str, blob: bytes) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-# ===================== PADRÃO KITS/CAT (Seu Patch) =====================
+# ===================== PADRÃO KITS/CAT (PATCH CLEAN) =====================
 @dataclass
 class Catalogo:
     catalogo_simples: pd.DataFrame
     kits_reais: pd.DataFrame
 
+def _to_lc_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Colunas em minúsculas, sem espaços extras."""
+    m = {c: c.strip().lower() for c in df.columns}
+    return df.rename(columns=m)
+
 def _pick_sheet_ci(xls: pd.ExcelFile, *candidates) -> pd.DataFrame:
-    """Escolhe aba por substring case-insensitive. (Baseado no seu patch)"""
+    """Escolhe aba por substring case-insensitive. (Sua lógica limpa)"""
     names = {name.lower(): name for name in xls.sheet_names}
     for cand in candidates:
         cand_lc = cand.lower()
@@ -149,7 +155,8 @@ def _pick_sheet_ci(xls: pd.ExcelFile, *candidates) -> pd.DataFrame:
 
 def _normalize_catalogo(df_raw: pd.DataFrame) -> pd.DataFrame:
     """Gera DataFrame de Catálogo padronizado, usando lógica robusta."""
-    df = normalize_cols(df_raw).copy()
+    # Usando _to_lc_columns para mapear colunas (solução do seu patch)
+    df = _to_lc_columns(df_raw).copy()
 
     sku_cols = [c for c in df.columns if "component" in c and "sku" in c] or \
                [c for c in df.columns if c in ("component_sku","sku","codigo_sku","codigo")]
@@ -162,8 +169,9 @@ def _normalize_catalogo(df_raw: pd.DataFrame) -> pd.DataFrame:
         raise RuntimeError("CATALOGO: coluna de SKU não encontrada (ex.: component_sku/sku).")
 
     out = pd.DataFrame()
-    out["component_sku"]    = df[sku_cols[0]].map(norm_sku)
-    out["fornecedor"]       = df[forn_cols[0]].astype(str).str.strip() if forn_cols else ""
+    # LINHAS ATRIBUÍDAS LIMPAS:
+    out["component_sku"] = df[sku_cols[0]].map(norm_sku)
+    out["fornecedor"] = df[forn_cols[0]].astype(str).str.strip() if forn_cols else ""
     out["status_reposicao"] = df[status_cols[0]].astype(str).str.strip() if status_cols else ""
 
     if preco_cols:
@@ -171,6 +179,7 @@ def _normalize_catalogo(df_raw: pd.DataFrame) -> pd.DataFrame:
     else:
         preco = pd.Series([0.0] * len(out), index=out.index, dtype=float)
 
+    # SAÍDA FINAL COM P MAIÚSCULO, conforme análise:
     out["Preco"] = pd.to_numeric(preco, errors="coerce").fillna(0.0).astype(float)
 
     out = out[out["component_sku"].astype(str).str.len() > 0].drop_duplicates(subset=["component_sku"], keep="last").reset_index(drop=True)
@@ -178,7 +187,7 @@ def _normalize_catalogo(df_raw: pd.DataFrame) -> pd.DataFrame:
 
 def _normalize_kits(df_raw: pd.DataFrame) -> pd.DataFrame:
     """Gera DataFrame de Kits padronizado, usando lógica robusta."""
-    df = normalize_cols(df_raw).copy()
+    df = _to_lc_columns(df_raw).copy()
 
     kit_cols  = [c for c in df.columns if c in ("kit_sku","sku_kit","parent_sku","sku_pai","kit")]
     comp_cols = [c for c in df.columns if "component" in c and "sku" in c] or \
@@ -189,9 +198,9 @@ def _normalize_kits(df_raw: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["kit_sku","component_sku","qty"])
 
     out = pd.DataFrame({
-        "kit_sku":       df[kit_cols[0]].map(norm_sku),
+        "kit_sku": df[kit_cols[0]].map(norm_sku),
         "component_sku": df[comp_cols[0]].map(norm_sku),
-        "qty":           pd.to_numeric(br_to_float(df[qtd_cols[0]]), errors="coerce").fillna(0).astype(int)
+        "qty": pd.to_numeric(br_to_float(df[qtd_cols[0]]), errors="coerce").fillna(0).astype(int)
     })
     
     out = out[(out["kit_sku"] != "") & (out["component_sku"] != "") & (out["qty"] >= 1)].drop_duplicates(subset=["kit_sku","component_sku"], keep="first")
@@ -199,17 +208,16 @@ def _normalize_kits(df_raw: pd.DataFrame) -> pd.DataFrame:
 
 
 def _carregar_padrao_de_content(content_bytes: bytes) -> Catalogo:
-    """Loader principal usando o PATCH hiper-defensivo do usuário (V11.3)."""
+    """Loader principal usando o PATCH hiper-defensivo do usuário (V11.4)."""
     if not content_bytes:
         raise RuntimeError("Arquivo de padrão vazio.")
 
     xls = pd.ExcelFile(io.BytesIO(content_bytes), engine="openpyxl")
 
-    try:
-        df_cat_raw  = _pick_sheet_ci(xls, "catalogo", "catalog", "cat")
-    except Exception as e:
-        raise RuntimeError(f"Erro ao carregar Catálogo (aba): {e}")
-
+    # A lógica de busca por aba e normalização de preço é feita internamente,
+    # prevenindo a ambiguidade no Pandas.
+    df_cat_raw  = _pick_sheet_ci(xls, "catalogo", "catalog", "cat")
+    
     df_kits_raw = None
     try:
         df_kits_raw = _pick_sheet_ci(xls, "kits", "kit")
@@ -222,18 +230,15 @@ def _carregar_padrao_de_content(content_bytes: bytes) -> Catalogo:
 
     return Catalogo(catalogo_simples=catalogo_simples, kits_reais=kits_reais)
 
-# ===================== MAPEAMENTO E CÁLCULO (Restante do Código V11.2) =====================
-# ... (O restante das funções mapear_tipo, mapear_colunas, calcular e exportar_xlsx)
-# ... Apenas a função 'calcular' precisa ser garantida aqui, o resto está no corpo principal
+# ===================== MAPEAMENTO E CÁLCULO (O restante do código V11.2/V11.3) =====================
 def mapear_tipo(df: pd.DataFrame) -> str:
-    # Lógica mapear_tipo V11.2
     cols = [c.lower() for c in df.columns]
-    tem_sku_std  = any(c in {"sku","codigo","codigo_sku"} for c in cols) or any("sku" in c for c in cols)
+    tem_sku_std  = any(c in {"sku","codigo","codigo_sku"} for c in cols) or any("sku" in c for c in cols)
     tem_vendas60 = any(c.startswith("vendas_60d") or c in {"vendas 60d","vendas_qtd_60d"} for c in cols)
     tem_qtd_livre= any(("qtde" in c) or ("quant" in c) or ("venda" in c) or ("order" in c) for c in cols)
     tem_estoque_full_like = any(("estoque" in c and "full" in c) or c=="estoque_full" for c in cols)
-    tem_estoque_generico  = any(c in {"estoque_atual","qtd","quantidade"} or "estoque" in c for c in cols)
-    tem_transito_like     = any(("transito" in c) or c in {"em_transito","em transito","em_transito_full","em_transito_do_anuncio"} for c in cols)
+    tem_estoque_generico  = any(c in {"estoque_atual","qtd","quantidade"} or "estoque" in c for c in cols)
+    tem_transito_like     = any(("transito" in c) or c in {"em_transito","em transito","em_transito_full","em_transito_do_anuncio"} for c in cols)
     tem_preco = any(c in {"preco","preco_compra","preco_medio","custo","custo_medio"} for c in cols)
 
     if tem_sku_std and (tem_vendas60 or tem_estoque_full_like or tem_transito_like): return "FULL"
@@ -242,7 +247,6 @@ def mapear_tipo(df: pd.DataFrame) -> str:
     return "DESCONHECIDO"
 
 def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
-    # Lógica mapear_colunas V11.2 (mantida)
     if tipo == "FULL":
         if "sku" in df.columns: df["SKU"] = df["sku"].map(norm_sku)
         elif "codigo" in df.columns: df["SKU"] = df["codigo"].map(norm_sku)
@@ -287,7 +291,6 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
         df["Quantidade"] = df[qcol].map(br_to_float).fillna(0).astype(int)
         return df[["SKU","Quantidade"]].copy()
     raise RuntimeError("Tipo de arquivo desconhecido.")
-# Lógica de cálculo (mantida)
 def construir_kits_efetivo(cat: Catalogo) -> pd.DataFrame:
     kits = cat.kits_reais.copy()
     existentes = set(kits["kit_sku"].unique())
@@ -348,16 +351,15 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
         "SKU","fornecedor","Vendas_h_ML","Vendas_h_Shopee","Estoque_Fisico","Preco","Compra_Sugerida","Valor_Compra_R$",
         "ML_60d","Shopee_60d","TOTAL_60d","Reserva_30d","Folga_Fisico","Necessidade"
     ]].reset_index(drop=True)
-    fis_unid  = int(fis.get("Estoque_Fisico", pd.Series([0])).sum())
+    fis_unid  = int(fis.get("Estoque_Fisico", pd.Series([0])).sum())
     fis_valor = float((fis.get("Estoque_Fisico", pd.Series([0])) * fis.get("Preco_Fisico", pd.Series([0.0]))).sum())
     full_stock_comp = explodir_por_kits(full[["SKU","Estoque_Full"]].rename(columns={"SKU":"kit_sku","Estoque_Full":"Qtd"}), kits,"kit_sku","Qtd")
     full_stock_comp = full_stock_comp.merge(fis[["SKU","Preco_Fisico"]].rename(columns={"Preco_Fisico":"Preco"}), on="SKU", how="left")
-    full_unid  = int(full["Estoque_Full"].sum())
+    full_unid  = int(full["Estoque_Full"].sum())
     full_valor = float((full_stock_comp["Quantidade"].fillna(0) * full_stock_comp["Preco"].fillna(0.0)).sum())
     painel = {"full_unid": full_unid, "full_valor": full_valor, "fisico_unid": fis_unid, "fisico_valor": fis_valor}
     return df_final, painel
 def exportar_xlsx(df_final: pd.DataFrame, h: int, params: dict, pendencias: list | None = None) -> bytes:
-    # Lógica de exportação V11.2 (mantida)
     int_cols = ["Vendas_h_ML","Vendas_h_Shopee","Estoque_Fisico","Compra_Sugerida","Reserva_30d","Folga_Fisico","Necessidade","ML_60d","Shopee_60d","TOTAL_60d"]
     for c in int_cols:
         if c in df_final.columns:
