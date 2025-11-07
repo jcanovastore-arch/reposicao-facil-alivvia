@@ -1,6 +1,6 @@
 # logica_compra.py - V11.4 (PATCH HIPER-DEFENSIVO - FINAL CLEAN)
 # - FIX: Remove caracteres invisíveis que causaram o erro fatal de sintaxe.
-# - Contém a lógica robusta (V11.3) de checagem de abas/colunas/preços em Pandas.
+# - Implementa a lógica robusta do usuário para resolver ambiguidade e abas.
 
 import io
 import re
@@ -143,7 +143,7 @@ def _to_lc_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=m)
 
 def _pick_sheet_ci(xls: pd.ExcelFile, *candidates) -> pd.DataFrame:
-    """Escolhe aba por substring case-insensitive. (Sua lógica limpa)"""
+    """Escolhe aba por substring case-insensitive."""
     names = {name.lower(): name for name in xls.sheet_names}
     for cand in candidates:
         cand_lc = cand.lower()
@@ -167,7 +167,6 @@ def _normalize_catalogo(df_raw: pd.DataFrame) -> pd.DataFrame:
         raise RuntimeError("CATALOGO: coluna de SKU não encontrada (ex.: component_sku/sku).")
 
     out = pd.DataFrame()
-    # LINHAS ATRIBUÍDAS LIMPAS:
     out["component_sku"] = df[sku_cols[0]].map(norm_sku)
     out["fornecedor"] = df[forn_cols[0]].astype(str).str.strip() if forn_cols else ""
     out["status_reposicao"] = df[status_cols[0]].astype(str).str.strip() if status_cols else ""
@@ -177,7 +176,7 @@ def _normalize_catalogo(df_raw: pd.DataFrame) -> pd.DataFrame:
     else:
         preco = pd.Series([0.0] * len(out), index=out.index, dtype=float)
 
-    # SAÍDA FINAL COM P MAIÚSCULO, conforme análise:
+    # SAÍDA FINAL COM P MAIÚSCULO:
     out["Preco"] = pd.to_numeric(preco, errors="coerce").fillna(0.0).astype(float)
 
     out = out[out["component_sku"].astype(str).str.len() > 0].drop_duplicates(subset=["component_sku"], keep="last").reset_index(drop=True)
@@ -212,8 +211,6 @@ def _carregar_padrao_de_content(content_bytes: bytes) -> Catalogo:
 
     xls = pd.ExcelFile(io.BytesIO(content_bytes), engine="openpyxl")
 
-    # A lógica de busca por aba e normalização de preço é feita internamente,
-    # prevenindo a ambiguidade no Pandas.
     df_cat_raw  = _pick_sheet_ci(xls, "catalogo", "catalog", "cat")
     
     df_kits_raw = None
