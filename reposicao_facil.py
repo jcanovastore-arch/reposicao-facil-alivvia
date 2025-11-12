@@ -1,6 +1,6 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# ARQUITETURA CONSOLIDADA V2.2 (com correção definitiva de tipos para o Styler)
+# ARQUITETURA CONSOLIDADA V2.3 (Refino da tipagem no st.dataframe)
 
 import io
 import re
@@ -122,7 +122,7 @@ def exige_colunas(df: pd.DataFrame, obrig: list, nome: str):
     if faltam:
         raise ValueError(f"Colunas obrigatórias ausentes em {nome}: {faltam}\nColunas lidas: {list(df.columns)}")
 
-# NOVO: Função para forçar os tipos numéricos antes de estilizar (CORREÇÃO DE ERRO)
+# Função para forçar os tipos numéricos antes de estilizar (CORREÇÃO DE ERRO)
 def enforce_numeric_types(df: pd.DataFrame) -> pd.DataFrame:
     """Garante que colunas numéricas chave sejam float ou int para o Styler."""
     df = df.copy()
@@ -767,7 +767,7 @@ with tab2:
                     carrinho_df.columns = ["Empresa", "SKU", "Fornecedor", "Preco_Custo", "Qtd_Sugerida", "Valor_Sugerido_R$"]
                     carrinho_df["Qtd_Ajustada"] = carrinho_df["Qtd_Sugerida"]
                     
-                    # Força a tipagem antes de salvar no carrinho
+                    # Força a tipagem antes de salvar no carrinho (CRUCIAL)
                     carrinho_df = enforce_numeric_types(carrinho_df)
 
                     st.session_state.carrinho_compras = [carrinho_df.reset_index(drop=True)]
@@ -974,4 +974,4 @@ with tab4:
             except Exception as e:
                 st.error(str(e))
 
-st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V2.2 (Correção de Formatação)")
+st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V2.3 (Refino da tipagem)")
