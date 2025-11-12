@@ -1,6 +1,6 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# ARQUITETURA ESTÁVEL V3.1.1 (Reversão completa para V3.1 + Correção de execução do Botão "Adicionar ao Carrinho")
+# ARQUITETURA ESTÁVEL V3.1.2 (Correção de Estabilidade de Estado e Seleção)
 
 import io
 import re
@@ -868,10 +868,10 @@ with tab2:
             if df_A_filt is not None and not df_A_filt.empty:
                 st.markdown("### ALIVVIA")
                 
-                # Força a tipagem antes de estilizar (CORREÇÃO DE ERRO)
+                # Força a tipagem antes de estilizar (CRUCIAL)
                 df_A_filt_typed = enforce_numeric_types(df_A_filt)
                 
-                # Garante que a lista de seleção tem o tamanho correto para o DataFrame filtrado
+                # FIX V3.1.2: Garante que a lista de seleção tem o tamanho correto para o DataFrame FILTRADO
                 current_sel_A = st.session_state.get('sel_A', [])
                 if len(current_sel_A) != len(df_A_filt_typed):
                      # Se o tamanho mudou (por causa do filtro), reseta a seleção
@@ -890,6 +890,7 @@ with tab2:
                 )
                 # Atualiza o estado da seleção (após a edição na tabela)
                 if isinstance(edited_df_A, pd.DataFrame) and "Selecionar" in edited_df_A.columns:
+                    # FIX V3.1.2: AQUI ELE SALVA A SELEÇÃO ATUALIZADA
                     st.session_state.sel_A = edited_df_A["Selecionar"].tolist()
             else:
                  st.info("ALIVVIA: Nenhum item corresponde aos filtros.")
@@ -897,10 +898,10 @@ with tab2:
 
             if df_J_filt is not None and not df_J_filt.empty:
                 st.markdown("### JCA")
-                # Força a tipagem antes de estilizar (CORREÇÃO DE ERRO)
+                # Força a tipagem antes de estilizar (CRUCIAL)
                 df_J_filt_typed = enforce_numeric_types(df_J_filt)
 
-                # Garante que a lista de seleção tem o tamanho correto para o DataFrame filtrado
+                # FIX V3.1.2: Garante que a lista de seleção tem o tamanho correto para o DataFrame FILTRADO
                 current_sel_J = st.session_state.get('sel_J', [])
                 if len(current_sel_J) != len(df_J_filt_typed):
                     # Se o tamanho mudou (por causa do filtro), reseta a seleção
@@ -919,6 +920,7 @@ with tab2:
                 )
                 # Atualiza o estado da seleção (após a edição na tabela)
                 if isinstance(edited_df_J, pd.DataFrame) and "Selecionar" in edited_df_J.columns:
+                    # FIX V3.1.2: AQUI ELE SALVA A SELEÇÃO ATUALIZADA
                     st.session_state.sel_J = edited_df_J["Selecionar"].tolist()
             else:
                 st.info("JCA: Nenhum item corresponde aos filtros.")
@@ -1077,4 +1079,4 @@ with tab4:
             except Exception as e:
                 st.error(str(e))
 
-st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V3.1.1 (Estabilidade do Botão Adicionar ao Carrinho)")
+st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V3.1.2 (Estabilidade do Estado de Seleção)")
