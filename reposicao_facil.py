@@ -1,6 +1,6 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# ARQUITETURA ESTÁVEL V3.1.3 (Máxima Estabilidade: Limpeza de Estado após Filtro)
+# ARQUITETURA ESTÁVEL V3.1.4 (Proteção Máxima de Estado - Reset em Qualquer Filtro)
 
 import io
 import re
@@ -14,8 +14,9 @@ import numpy as np
 import pandas as pd
 from unidecode import unidecode
 import streamlit as st
-import requests
+from streamlit.runtime.scriptrunner import get_script_run_ctx
 from requests.adapters import HTTPAdapter, Retry
+import requests
 
 # ===================== CONFIG BÁSICA =====================
 st.set_page_config(page_title="Reposição Logística — Alivvia", layout="wide")
@@ -78,7 +79,7 @@ def _ensure_state():
 
 _ensure_state()
 
-# FIX V3.1.3: Função para limpar estado de seleção
+# FIX V3.1.4: Função única de reset para ser chamada em todos os filtros
 def reset_selection():
     """Zera o estado de seleção do carrinho quando um filtro muda."""
     st.session_state.sel_A = []
@@ -814,8 +815,8 @@ with tab2:
             # Filtros dinâmicos
             c1, c2 = st.columns(2)
             with c1:
-                # O filtro por SKU não tem on_change, pois o filtro de Fornecedor é a principal causa de KeyError
-                sku_filter = st.text_input("Filtro por SKU (contém)", key="filt_sku").upper().strip()
+                # FIX V3.1.4: Adiciona o callback para limpar o estado de seleção ao mudar o SKU
+                sku_filter = st.text_input("Filtro por SKU (contém)", key="filt_sku", on_change=reset_selection).upper().strip()
             with c2:
                 fornecedor_opc = df_full["fornecedor"].unique().tolist() if df_full is not None else []
                 fornecedor_opc.insert(0, "TODOS")
@@ -839,10 +840,9 @@ with tab2:
             st.markdown("---")
             st.subheader("Seleção de Itens para Compra (Carrinho)")
 
-            if st.button("🛒 Adicionar Itens Selecionados ao Pedido", type="secondary", key="add_to_cart_btn"): # FIX V3.1.1: Adicionado KEY para forçar execução do botão
+            if st.button("🛒 Adicionar Itens Selecionados ao Pedido", type="secondary", key="add_to_cart_btn"): 
                 carrinho = []
                 # Processa ALIVVIA
-                # Usa a lógica de reset forçado na V3.1.2 para obter o tamanho correto
                 selec_A = df_A_filt[st.session_state.get('sel_A', [False] * len(df_A_filt))[:len(df_A_filt)]] if df_A_filt is not None else pd.DataFrame()
                 if not selec_A.empty:
                     selec_A = selec_A[selec_A["Compra_Sugerida"] > 0].copy()
@@ -1088,4 +1088,4 @@ with tab4:
             except Exception as e:
                 st.error(str(e))
 
-st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V3.1.3 (Máxima Estabilidade de Estado)")
+st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V3.1.4 (Proteção Máxima de Estado)")
