@@ -1,6 +1,8 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# ARQUITETURA ESTÁVEL V3.1.5 (Máxima Estabilidade: Downgrade Streamlit + Remoção Filtro SKU)
+# ARQUITETURA ESTÁVEL V3.1.4 (Proteção Máxima de Estado - Reset em Qualquer Filtro)
+# Versão V3.1.4 re-enviada para garantir integridade.
+# **Requer Streamlit==1.35.0 no requirements.txt para estabilidade máxima.**
 
 import io
 import re
@@ -78,7 +80,7 @@ def _ensure_state():
 
 _ensure_state()
 
-# FIX V3.1.3/V3.1.5: Função única de reset para ser chamada em todos os filtros
+# FIX V3.1.4: Função única de reset para ser chamada em todos os filtros
 def reset_selection():
     """Zera o estado de seleção do carrinho quando um filtro muda."""
     st.session_state.sel_A = []
@@ -814,9 +816,8 @@ with tab2:
             # Filtros dinâmicos
             c1, c2 = st.columns(2)
             with c1:
-                # FIX V3.1.5: Remove o filtro de SKU (caixa de texto) para isolar a falha de estado.
-                sku_filter = ""
-                st.markdown("**(Filtro por SKU desativado temporariamente para estabilidade)**")
+                # FIX V3.1.4: Adiciona o callback para limpar o estado de seleção ao mudar o SKU
+                sku_filter = st.text_input("Filtro por SKU (contém)", key="filt_sku", on_change=reset_selection).upper().strip()
             with c2:
                 fornecedor_opc = df_full["fornecedor"].unique().tolist() if df_full is not None else []
                 fornecedor_opc.insert(0, "TODOS")
@@ -1088,4 +1089,4 @@ with tab4:
             except Exception as e:
                 st.error(str(e))
 
-st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V3.1.5 (Máxima Estabilidade de Estado)")
+st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V3.1.4 (Proteção Máxima de Estado)")
