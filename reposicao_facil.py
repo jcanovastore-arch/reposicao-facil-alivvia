@@ -1,6 +1,6 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# ARQUITETURA CONSOLIDADA V2.4 (com persistência de uploads no cache de disco)
+# ARQUITETURA CONSOLIDADA V2.5 (Correção Determinística de Persistência)
 
 import io
 import re
@@ -8,7 +8,7 @@ import hashlib
 import datetime as dt
 from dataclasses import dataclass
 from typing import Optional, Tuple
-import os # NOVO: Para manipulação de arquivos no disco
+import os # Para persistência de disco
 
 import numpy as np
 import pandas as pd
@@ -26,15 +26,19 @@ DEFAULT_SHEET_LINK = (
 )
 DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"  # fixo
 
-# NOVO: Diretório de persistência no Streamlit Cloud
+# NOVO: Diretório de persistência de uploads no disco
 STORAGE_DIR = ".streamlit/uploaded_files_cache"
+if not os.path.exists(STORAGE_DIR):
+    os.makedirs(STORAGE_DIR, exist_ok=True)
 
-# Helper function to get the local disk path for a file
-def get_local_file_path(empresa: str, tipo: str, name: str) -> str:
-    # Usa hash do nome para evitar colisões e mantém o nome original
-    hash_name = hashlib.md5(name.encode()).hexdigest()
-    # Path: .streamlit/uploaded_files_cache/ALIVVIA/FULL/hash_nome.csv
-    return os.path.join(STORAGE_DIR, empresa, tipo, hash_name + "_" + name)
+# Helper function para caminho determinístico no disco
+def get_local_file_path(empresa: str, tipo: str) -> str:
+    return os.path.join(STORAGE_DIR, f"{empresa}_{tipo}.bin")
+
+# Helper function para caminho determinístico do nome original
+def get_local_name_path(empresa: str, tipo: str) -> str:
+    return os.path.join(STORAGE_DIR, f"{empresa}_{tipo}_name.txt")
+
 
 # ===================== ESTADO =====================
 def _ensure_state():
@@ -43,42 +47,37 @@ def _ensure_state():
     st.session_state.setdefault("loaded_at", None)
     st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK)
 
+    # NOVO: Persistência dos resultados de cálculo
     st.session_state.setdefault("resultado_ALIVVIA", None)
     st.session_state.setdefault("resultado_JCA", None)
+    
+    # NOVO: Carrinho de compras (Lista de DataFrames, pois são de empresas diferentes)
     st.session_state.setdefault("carrinho_compras", [])
 
     st.session_state.setdefault('sel_A', [])
     st.session_state.setdefault('sel_J', [])
 
-    # Cria o diretório de persistência se não existir
-    if not os.path.exists(STORAGE_DIR):
-        os.makedirs(STORAGE_DIR, exist_ok=True)
-        
+    # uploads por empresa
     for emp in ["ALIVVIA", "JCA"]:
         st.session_state.setdefault(emp, {})
         for file_type in ["FULL", "VENDAS", "ESTOQUE"]:
-            st.session_state[emp].setdefault(file_type, {"name": None, "bytes": None})
+            state = st.session_state[emp].setdefault(file_type, {"name": None, "bytes": None})
             
-            # NOVO: Tenta carregar do disco se o servidor reiniciou (session_state limpo)
-            if not st.session_state[emp][file_type]["name"]:
-                # Assume que o path para o arquivo está salvo em um local persistente ou pode ser inferido
+            # NOVO: Tenta carregar do disco na inicialização se a sessão estiver vazia
+            if not state["name"]:
+                path_bin = get_local_file_path(emp, file_type)
+                path_name = get_local_name_path(emp, file_type)
                 
-                # Se houver um arquivo na pasta de cache, carregue o mais recente
-                cache_dir = os.path.join(STORAGE_DIR, emp, file_type)
-                if os.path.exists(cache_dir):
-                    cached_files = [f for f in os.listdir(cache_dir) if f.split('_', 1)[1].lower().endswith(('.csv', '.xlsx', '.xls'))]
-                    if cached_files:
-                        # Pega o arquivo mais recente
-                        latest_file = max(cached_files, key=lambda f: os.path.getmtime(os.path.join(cache_dir, f)))
-                        cache_path = os.path.join(cache_dir, latest_file)
-                        
-                        try:
-                            with open(cache_path, 'rb') as f:
-                                st.session_state[emp][file_type]["bytes"] = f.read()
-                                st.session_state[emp][file_type]["name"] = latest_file.split('_', 1)[1]
-                                st.session_state[emp][file_type]['is_cached'] = True
-                        except Exception as e:
-                            st.warning(f"Falha ao carregar {file_type} de {emp} do disco: {e}")
+                if os.path.exists(path_bin) and os.path.exists(path_name):
+                    try:
+                        with open(path_bin, 'rb') as f_bin:
+                            state["bytes"] = f_bin.read()
+                        with open(path_name, 'r', encoding='utf-8') as f_name:
+                            state["name"] = f_name.read().strip()
+                        state['is_cached'] = True
+                    except Exception:
+                        # Se falhar ao ler, limpa a entrada
+                        state["name"] = None; state["bytes"] = None
 
 
 _ensure_state()
@@ -636,12 +635,14 @@ with tab1:
         def handle_upload(up_file, file_type):
             if up_file is not None:
                 up_bytes = up_file.read()
-                local_path = get_local_file_path(emp, file_type, up_file.name)
+                path_bin = get_local_file_path(emp, file_type)
+                path_name = get_local_name_path(emp, file_type)
                 
-                # Salva no disco
-                os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                with open(local_path, 'wb') as f:
-                    f.write(up_bytes)
+                # Salva no disco (bytes e nome)
+                with open(path_bin, 'wb') as f_bin:
+                    f_bin.write(up_bytes)
+                with open(path_name, 'w', encoding='utf-8') as f_name:
+                    f_name.write(up_file.name)
                     
                 # Salva metadados na sessão
                 st.session_state[emp][file_type]["name"]  = up_file.name
@@ -651,7 +652,7 @@ with tab1:
         
         def display_status(file_type):
             if st.session_state[emp][file_type]["name"]:
-                status = "(No cache)" if st.session_state[emp][file_type].get('is_cached') else "(Na memória)"
+                status = "✅ No disco (persiste)" if st.session_state[emp][file_type].get('is_cached') else "(Na memória, temporário)"
                 st.caption(f"{file_type} salvo: **{st.session_state[emp][file_type]['name']}** {status}")
 
         # FULL
@@ -682,10 +683,10 @@ with tab1:
             if st.button(f"Limpar {emp} e Cache", use_container_width=True, key=f"clr_{emp}"):
                 # NOVO: Limpa os arquivos do disco
                 for file_type in ["FULL", "VENDAS", "ESTOQUE"]:
-                    cache_dir = os.path.join(STORAGE_DIR, emp, file_type)
-                    if os.path.exists(cache_dir):
-                        for f in os.listdir(cache_dir):
-                            os.remove(os.path.join(cache_dir, f))
+                    if os.path.exists(get_local_file_path(emp, file_type)):
+                        os.remove(get_local_file_path(emp, file_type))
+                    if os.path.exists(get_local_name_path(emp, file_type)):
+                        os.remove(get_local_name_path(emp, file_type))
                 
                 # Limpa a sessão
                 st.session_state[emp] = {"FULL":{"name":None,"bytes":None},
@@ -1022,4 +1023,4 @@ with tab4:
             except Exception as e:
                 st.error(str(e))
 
-st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V2.4 (Persistência de Uploads)")
+st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V2.5 (Persistência Determinística)")
