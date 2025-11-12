@@ -1,11 +1,6 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# - Sem acesso automático ao Google Sheets (só quando clicar).
-# - Padrão KITS/CAT via Google Sheets (XLSX inteiro), autodetectando abas.
-# - UPLOADS salvos na sessão por empresa (até limpar).
-# - Compra Automática usa arquivos salvos (FULL + Estoque + Shopee).
-# - Alocação de Compra (proporcional às vendas FULL+Shopee) usa arquivos salvos (sem estoque).
-# - Mensagens de erro explícitas e auditoria simples.
+# ARQUITETURA CONSOLIDADA V2.0 (por Gemini)
 
 import io
 import re
@@ -37,6 +32,13 @@ def _ensure_state():
     st.session_state.setdefault("loaded_at", None)
     st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK)
 
+    # NOVO: Persistência dos resultados de cálculo
+    st.session_state.setdefault("resultado_ALIVVIA", None)
+    st.session_state.setdefault("resultado_JCA", None)
+    
+    # NOVO: Carrinho de compras (Lista de DataFrames, pois são de empresas diferentes)
+    st.session_state.setdefault("carrinho_compras", [])
+
     # uploads por empresa
     for emp in ["ALIVVIA", "JCA"]:
         st.session_state.setdefault(emp, {})
@@ -47,6 +49,7 @@ def _ensure_state():
 _ensure_state()
 
 # ===================== HTTP / GOOGLE SHEETS =====================
+# Funções inalteradas: _requests_session, gs_export_xlsx_url, extract_sheet_id_from_url, baixar_xlsx_por_link_google, baixar_xlsx_do_sheets
 def _requests_session() -> requests.Session:
     s = requests.Session()
     retries = Retry(total=3, backoff_factor=0.6, status_forcelist=[429,500,502,503,504], allowed_methods=["GET"])
@@ -84,6 +87,7 @@ def baixar_xlsx_do_sheets(sheet_id: str) -> bytes:
     return r.content
 
 # ===================== UTILS DE DADOS =====================
+# Funções inalteradas: norm_header, normalize_cols, br_to_float, norm_sku, exige_colunas
 def norm_header(s: str) -> str:
     s = (s or "").strip()
     s = unidecode(s).lower()
@@ -117,6 +121,7 @@ def exige_colunas(df: pd.DataFrame, obrig: list, nome: str):
         raise ValueError(f"Colunas obrigatórias ausentes em {nome}: {faltam}\nColunas lidas: {list(df.columns)}")
 
 # ===================== LEITURA DE ARQUIVOS =====================
+# Funções inalteradas: load_any_table, load_any_table_from_bytes
 def load_any_table(uploaded_file) -> Optional[pd.DataFrame]:
     if uploaded_file is None:
         return None
@@ -190,6 +195,7 @@ def load_any_table_from_bytes(file_name: str, blob: bytes) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 # ===================== PADRÃO KITS/CAT =====================
+# Classes e funções inalteradas: Catalogo, _carregar_padrao_de_content, carregar_padrao_do_xlsx, carregar_padrao_do_link, construir_kits_efetivo
 @dataclass
 class Catalogo:
     catalogo_simples: pd.DataFrame  # component_sku, fornecedor, status_reposicao
@@ -278,6 +284,7 @@ def construir_kits_efetivo(cat: Catalogo) -> pd.DataFrame:
     return kits
 
 # ===================== MAPEAMENTO FULL/FISICO/VENDAS =====================
+# Funções inalteradas: mapear_tipo, mapear_colunas
 def mapear_tipo(df: pd.DataFrame) -> str:
     cols = [c.lower() for c in df.columns]
     tem_sku_std  = any(c in {"sku","codigo","codigo_sku"} for c in cols) or any("sku" in c for c in cols)
@@ -362,6 +369,7 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
     raise RuntimeError("Tipo de arquivo desconhecido.")
 
 # ===================== KITS (EXPLOSÃO) =====================
+# Função inalterada: explodir_por_kits
 def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_col: str) -> pd.DataFrame:
     base = df.copy()
     base["kit_sku"] = base[sku_col].map(norm_sku)
@@ -375,6 +383,7 @@ def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_co
     return out
 
 # ===================== COMPRA AUTOMÁTICA (LÓGICA ORIGINAL) =====================
+# ATENÇÃO: Alteração na seleção final de colunas para atender ao novo requisito de layout
 def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     kits = construir_kits_efetivo(cat)
     full = full_df.copy()
@@ -399,6 +408,9 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     demanda = cat_df.merge(ml_comp, on="SKU", how="left").merge(shopee_comp, on="SKU", how="left")
     demanda[["ML_60d","Shopee_60d"]] = demanda[["ML_60d","Shopee_60d"]].fillna(0).astype(int)
     demanda["TOTAL_60d"] = np.maximum(demanda["ML_60d"] + demanda["Shopee_60d"], demanda["ML_60d"]).astype(int)
+    
+    # NOVO: Vendas Total 60d (soma simples)
+    demanda["Vendas_Total_60d"] = demanda["ML_60d"] + demanda["Shopee_60d"] 
 
     fis = fisico_df.copy()
     fis["SKU"] = fis["SKU"].map(norm_sku)
@@ -408,6 +420,10 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     base = demanda.merge(fis, on="SKU", how="left")
     base["Estoque_Fisico"] = base["Estoque_Fisico"].fillna(0).astype(int)
     base["Preco"] = base["Preco"].fillna(0.0)
+
+    # Adicionar Estoque_Full do FULL
+    base = base.merge(full[["SKU", "Estoque_Full"]], on="SKU", how="left").fillna({"Estoque_Full": 0})
+    base["Estoque_Full"] = base["Estoque_Full"].astype(int)
 
     fator = (1.0 + g/100.0) ** (h/30.0)
     fk = full.copy()
@@ -433,19 +449,17 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     base.loc[mask_nao, "Compra_Sugerida"] = 0
 
     base["Valor_Compra_R$"] = (base["Compra_Sugerida"].astype(float) * base["Preco"].astype(float)).round(2)
-    base["Vendas_h_ML"]     = np.round(base["ML_60d"] * (h/60.0)).astype(int)
-    base["Vendas_h_Shopee"] = np.round(base["Shopee_60d"] * (h/60.0)).astype(int)
-
-    base = base.sort_values(["fornecedor","Valor_Compra_R$","SKU"], ascending=[True, False, True])
-
+    
+    # ATENÇÃO: Seleção das colunas finais de acordo com a sua solicitação
     df_final = base[[
         "SKU","fornecedor",
-        "Vendas_h_ML","Vendas_h_Shopee",
+        "Vendas_Total_60d", # NOVO
+        "Estoque_Full",     # NOVO
         "Estoque_Fisico","Preco","Compra_Sugerida","Valor_Compra_R$",
-        "ML_60d","Shopee_60d","TOTAL_60d","Reserva_30d","Folga_Fisico","Necessidade"
+        "ML_60d","Shopee_60d","TOTAL_60d","Reserva_30d","Folga_Fisico","Necessidade" # Colunas de auditoria
     ]].reset_index(drop=True)
 
-    # Painel
+    # Painel (mantido o original para métricas)
     fis_unid  = int(fis["Estoque_Fisico"].sum())
     fis_valor = float((fis["Estoque_Fisico"] * fis["Preco"]).sum())
     full_stock_comp = explodir_por_kits(
@@ -458,59 +472,43 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     painel = {"full_unid": full_unid, "full_valor": full_valor, "fisico_unid": fis_unid, "fisico_valor": fis_valor}
     return df_final, painel
 
-# ===================== EXPORT XLSX =====================
-def sha256_of_csv(df: pd.DataFrame) -> str:
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
-    return hashlib.sha256(csv_bytes).hexdigest()
+# ===================== EXPORT CSV / STYLER =====================
+def exportar_carrinho_csv(df: pd.DataFrame) -> bytes:
+    df["Data_Hora_OC"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return df.to_csv(index=False).encode("utf-8")
 
-def exportar_xlsx(df_final: pd.DataFrame, h: int, params: dict, pendencias: list | None = None) -> bytes:
-    int_cols = ["Vendas_h_ML","Vendas_h_Shopee","Estoque_Fisico","Compra_Sugerida","Reserva_30d","Folga_Fisico","Necessidade","ML_60d","Shopee_60d","TOTAL_60d"]
-    for c in int_cols:
-        bad = df_final.index[(df_final[c] < 0) | (df_final[c].astype(float) % 1 != 0)]
-        if len(bad) > 0:
-            linha = int(bad[0]) + 2
-            sku = df_final.loc[bad[0], "SKU"] if "SKU" in df_final.columns else "?"
-            raise RuntimeError(f"Auditoria: coluna '{c}' precisa ser inteiro ≥ 0. Ex.: linha {linha} (SKU={sku}).")
+def style_df_compra(df: pd.DataFrame):
+    """Aplica o destaque na coluna Compra_Sugerida."""
+    # Definição do formato
+    format_mapping = {
+        'Estoque_Fisico': '{:,}'.replace(",", "."),
+        'Compra_Sugerida': '{:,}'.replace(",", "."),
+        'Vendas_Total_60d': '{:,}'.replace(",", "."),
+        'Estoque_Full': '{:,}'.replace(",", "."),
+        'Preco': 'R$ {:,.2f}'.replace(",", "X").replace(".", ",").replace("X", "."), # R$ 0.000,00
+        'Valor_Compra_R$': 'R$ {:,.2f}'.replace(",", "X").replace(".", ",").replace("X", ".")
+    }
+    
+    # Aplica o formato nas colunas existentes
+    styler = df.style.format({c: fmt for c, fmt in format_mapping.items() if c in df.columns})
+    
+    # Aplica cor de fundo se Compra_Sugerida for > 0
+    def highlight_compra(s):
+        is_compra = s.name == 'Compra_Sugerida'
+        if is_compra:
+            return ['background-color: #A93226; color: white' if v > 0 else '' for v in s]
+        return ['' for _ in s]
 
-    calc = (df_final["Compra_Sugerida"] * df_final["Preco"]).round(2).values
-    if not np.allclose(df_final["Valor_Compra_R$"].values, calc):
-        bad = np.where(~np.isclose(df_final["Valor_Compra_R$"].values, calc))[0]
-        linha = int(bad[0]) + 2 if len(bad) else "?"
-        sku = df_final.iloc[bad[0]]["SKU"] if len(bad) and "SKU" in df_final.columns else "?"
-        raise RuntimeError(f"Auditoria: 'Valor_Compra_R$' ≠ 'Compra_Sugerida × Preco'. Ex.: linha {linha} (SKU={sku}).")
-
-    hash_str = sha256_of_csv(df_final)
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as w:
-        lista = df_final[df_final["Compra_Sugerida"] > 0].copy()
-        lista.to_excel(w, sheet_name="Lista_Final", index=False)
-        ws = w.sheets["Lista_Final"]
-        for i, col in enumerate(lista.columns):
-            width = max(12, int(lista[col].astype(str).map(len).max()) + 2)
-            ws.set_column(i, i, min(width, 40))
-        ws.freeze_panes(1, 0); ws.autofilter(0, 0, len(lista), len(lista.columns)-1)
-
-        if pendencias:
-            pd.DataFrame(pendencias).to_excel(w, sheet_name="Pendencias", index=False)
-
-        ctrl = pd.DataFrame([{
-            "data_hora": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "h": h,
-            "linhas_Lista_Final": int((df_final["Compra_Sugerida"] > 0).sum()),
-            "soma_Compra_Sugerida": int(df_final["Compra_Sugerida"].sum()),
-            "soma_Valor_Compra_R$": float(df_final["Valor_Compra_R$"].sum()),
-            "hash_sha256": hash_str,
-        } | params])
-        ctrl.to_excel(w, sheet_name="Controle", index=False)
-    output.seek(0)
-    return output.read()
+    styler = styler.apply(highlight_compra, axis=0, subset=['Compra_Sugerida'])
+    
+    return styler
 
 # ===================== UI: SIDEBAR (PADRÃO) =====================
 with st.sidebar:
     st.subheader("Parâmetros")
-    h  = st.selectbox("Horizonte (dias)", [30, 60, 90], index=1)
-    g  = st.number_input("Crescimento % ao mês", value=0.0, step=1.0)
-    LT = st.number_input("Lead time (dias)", value=0, step=1, min_value=0)
+    h  = st.selectbox("Horizonte (dias)", [30, 60, 90], index=1, key="param_h")
+    g  = st.number_input("Crescimento % ao mês", value=0.0, step=1.0, key="param_g")
+    LT = st.number_input("Lead time (dias)", value=0, step=1, min_value=0, key="param_lt")
 
     st.markdown("---")
     st.subheader("Padrão (KITS/CAT) — Google Sheets")
@@ -542,14 +540,22 @@ with st.sidebar:
         except Exception as e:
             st.session_state.catalogo_df = None; st.session_state.kits_df = None; st.session_state.loaded_at = None
             st.error(str(e))
+            
+    if st.session_state.loaded_at:
+        st.caption(f"Padrão carregado em: {st.session_state.loaded_at}")
 
 # ===================== TÍTULO =====================
 st.title("Reposição Logística — Alivvia")
 if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
     st.warning("► Carregue o **Padrão (KITS/CAT)** no sidebar antes de usar as abas.")
 
-# ===================== ABAS =====================
-tab1, tab2, tab3 = st.tabs(["📂 Dados das Empresas", "🧮 Compra Automática", "📦 Alocação de Compra"])
+# ===================== ABAS (NOVA ESTRUTURA) =====================
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📂 Dados das Empresas", 
+    "🔍 Análise de Compra (Consolidado)", 
+    "🛒 Pedido de Compra",
+    "📦 Alocação de Compra"
+])
 
 # ---------- TAB 1: UPLOADS ----------
 with tab1:
@@ -601,34 +607,31 @@ with tab1:
                 st.session_state[emp] = {"FULL":{"name":None,"bytes":None},
                                          "VENDAS":{"name":None,"bytes":None},
                                          "ESTOQUE":{"name":None,"bytes":None}}
-                st.info(f"{emp} limpo.")
+                # Limpa também o resultado do cálculo
+                st.session_state[f"resultado_{emp}"] = None
+                st.info(f"{emp} limpo e resultado de cálculo zerado.")
 
         st.divider()
 
     bloco_empresa("ALIVVIA")
     bloco_empresa("JCA")
 
-# ---------- TAB 2: COMPRA AUTOMÁTICA ----------
+# ---------- TAB 2: ANÁLISE DE COMPRA (CONSOLIDADO) ----------
 with tab2:
-    st.subheader("Gerar Compra (por empresa) — lógica original")
+    st.subheader("Gerar e Analisar Compra (Consolidado) — Lógica Original")
 
     if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
         st.info("Carregue o **Padrão (KITS/CAT)** no sidebar.")
     else:
-        empresa = st.radio("Empresa ativa", ["ALIVVIA", "JCA"], horizontal=True, key="empresa_ca")
-        dados = st.session_state[empresa]
-
-        col = st.columns(3)
-        col[0].info(f"FULL: {dados['FULL']['name'] or '—'}")
-        col[1].info(f"Shopee/MT: {dados['VENDAS']['name'] or '—'}")
-        col[2].info(f"Estoque: {dados['ESTOQUE']['name'] or '—'}")
-
-        if st.button(f"Gerar Compra — {empresa}", type="primary"):
+        
+        # --- Cálculo/Persistência ---
+        def run_calculo(empresa: str):
+            dados = st.session_state[empresa]
             try:
                 # valida presença
                 for k, rot in [("FULL","FULL"),("VENDAS","Shopee/MT"),("ESTOQUE","Estoque")]:
                     if not (dados[k]["name"] and dados[k]["bytes"]):
-                        raise RuntimeError(f"Arquivo '{rot}' não foi salvo para {empresa}. Vá em **Dados das Empresas** e salve.")
+                        raise RuntimeError(f"Arquivo '{rot}' não foi salvo para {empresa}.")
 
                 # leitura pelos BYTES
                 full_raw   = load_any_table_from_bytes(dados["FULL"]["name"], dados["FULL"]["bytes"])
@@ -639,9 +642,9 @@ with tab2:
                 t_full = mapear_tipo(full_raw)
                 t_v    = mapear_tipo(vendas_raw)
                 t_f    = mapear_tipo(fisico_raw)
-                if t_full != "FULL":   raise RuntimeError("FULL inválido: precisa de SKU e Vendas_60d/Estoque_full.")
-                if t_v    != "VENDAS": raise RuntimeError("Vendas inválido: não achei coluna de quantidade.")
-                if t_f    != "FISICO": raise RuntimeError("Estoque inválido: precisa de Estoque e Preço.")
+                if t_full != "FULL":   raise RuntimeError("FULL inválido.")
+                if t_v    != "VENDAS": raise RuntimeError("Vendas inválido.")
+                if t_f    != "FISICO": raise RuntimeError("Estoque inválido.")
 
                 full_df   = mapear_colunas(full_raw, t_full)
                 vendas_df = mapear_colunas(vendas_raw, t_v)
@@ -651,30 +654,201 @@ with tab2:
                     catalogo_simples=st.session_state.catalogo_df.rename(columns={"sku":"component_sku"}),
                     kits_reais=st.session_state.kits_df
                 )
-                df_final, painel = calcular(full_df, fisico_df, vendas_df, cat, h=h, g=g, LT=LT)
-
-                st.success("Cálculo concluído.")
-                cA, cB, cC, cD = st.columns(4)
-                cA.metric("Full (un)",  f"{painel['full_unid']:,}".replace(",", "."))
-                cB.metric("Full (R$)",  f"R$ {painel['full_valor']:,.2f}")
-                cC.metric("Físico (un)",f"{painel['fisico_unid']:,}".replace(",", "."))
-                cD.metric("Físico (R$)",f"R$ {painel['fisico_valor']:,.2f}")
-
-                st.dataframe(df_final, use_container_width=True, height=500)
-
-                if st.checkbox("Gerar XLSX (Lista_Final + Controle)", key="chk_xlsx"):
-                    xlsx = exportar_xlsx(df_final, h=h, params={"g":g,"LT":LT,"empresa":empresa})
-                    st.download_button(
-                        "Baixar XLSX", data=xlsx,
-                        file_name=f"Compra_Sugerida_{empresa}_{h}d.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-
+                df_final, painel = calcular(full_df, fisico_df, vendas_df, cat, h=st.session_state.param_h, g=st.session_state.param_g, LT=st.session_state.param_lt)
+                
+                # NOVO: Persiste o resultado
+                st.session_state[f"resultado_{empresa}"] = df_final
+                st.success(f"Cálculo para {empresa} concluído.")
+                
             except Exception as e:
-                st.error(str(e))
+                st.error(f"Erro ao calcular {empresa}: {str(e)}")
 
-# ---------- TAB 3: ALOCAÇÃO DE COMPRA (sem estoque) ----------
+        colC, colD = st.columns(2)
+        with colC:
+            if st.button("Gerar Compra — ALIVVIA", type="primary"):
+                run_calculo("ALIVVIA")
+        with colD:
+            if st.button("Gerar Compra — JCA", type="primary"):
+                run_calculo("JCA")
+
+        # --- Filtros e Visualização ---
+        st.markdown("---")
+        st.subheader("Filtros de Análise (Aplicado em Ambas Empresas)")
+        
+        df_A = st.session_state.resultado_ALIVVIA
+        df_J = st.session_state.resultado_JCA
+        
+        if df_A is None and df_J is None:
+            st.info("Gere o cálculo para pelo menos uma empresa acima para visualizar e filtrar.")
+        else:
+            df_full = pd.concat([df_A, df_J], ignore_index=True) if df_A is not None and df_J is not None else (df_A if df_A is not None else df_J)
+            
+            # Filtros dinâmicos
+            c1, c2 = st.columns(2)
+            with c1:
+                sku_filter = st.text_input("Filtro por SKU (contém)", key="filt_sku").upper().strip()
+            with c2:
+                fornecedor_opc = df_full["fornecedor"].unique().tolist() if df_full is not None else []
+                fornecedor_opc.insert(0, "TODOS")
+                fornecedor_filter = st.selectbox("Filtro por Fornecedor", fornecedor_opc, key="filt_forn")
+            
+            # Aplica filtros
+            def aplicar_filtro(df: pd.DataFrame) -> pd.DataFrame:
+                if df is None: return None
+                df_filt = df.copy()
+                if sku_filter:
+                    df_filt = df_filt[df_filt["SKU"].str.contains(sku_filter, na=False)]
+                if fornecedor_filter != "TODOS":
+                    df_filt = df_filt[df_filt["fornecedor"] == fornecedor_filter]
+                return df_filt
+
+            df_A_filt = aplicar_filtro(df_A)
+            df_J_filt = aplicar_filtro(df_J)
+
+            # --- Adicionar ao Carrinho ---
+            st.markdown("---")
+            st.subheader("Seleção de Itens para Compra (Carrinho)")
+
+            if st.button("🛒 Adicionar Itens Selecionados ao Pedido", type="secondary"):
+                carrinho = []
+                # Processa ALIVVIA
+                selec_A = df_A_filt[st.session_state.get('sel_A', [False] * len(df_A_filt))]
+                if not selec_A.empty:
+                    selec_A = selec_A[selec_A["Compra_Sugerida"] > 0].copy()
+                    selec_A["Empresa"] = "ALIVVIA"
+                    carrinho.append(selec_A)
+                
+                # Processa JCA
+                selec_J = df_J_filt[st.session_state.get('sel_J', [False] * len(df_J_filt))]
+                if not selec_J.empty:
+                    selec_J = selec_J[selec_J["Compra_Sugerida"] > 0].copy()
+                    selec_J["Empresa"] = "JCA"
+                    carrinho.append(selec_J)
+                
+                if carrinho:
+                    # Remove colunas de auditoria para o carrinho
+                    cols_carrinho = ["Empresa", "SKU", "fornecedor", "Preco", "Compra_Sugerida", "Valor_Compra_R$"]
+                    carrinho_df = pd.concat(carrinho)[cols_carrinho]
+                    carrinho_df.columns = ["Empresa", "SKU", "Fornecedor", "Preco_Custo", "Qtd_Sugerida", "Valor_Sugerido_R$"]
+                    carrinho_df["Qtd_Ajustada"] = carrinho_df["Qtd_Sugerida"]
+                    
+                    st.session_state.carrinho_compras = [carrinho_df.reset_index(drop=True)]
+                    st.success(f"Adicionado {len(carrinho_df)} itens ao Pedido de Compra.")
+                else:
+                    st.warning("Nenhum item com Compra Sugerida > 0 foi selecionado.")
+
+            # --- Visualização de Resultados ---
+            if df_A_filt is not None and not df_A_filt.empty:
+                st.markdown("### ALIVVIA")
+                # Cria a coluna de seleção
+                df_A_filt["Selecionar"] = st.session_state.get('sel_A', [False] * len(df_A_filt))[:len(df_A_filt)]
+                
+                col_order = ["Selecionar", "SKU", "fornecedor", "Vendas_Total_60d", "Estoque_Full", "Estoque_Fisico", "Preco", "Compra_Sugerida", "Valor_Compra_R$"]
+                
+                edited_df_A = st.dataframe(
+                    style_df_compra(df_A_filt[col_order]),
+                    use_container_width=True,
+                    column_order=col_order,
+                    column_config={"Selecionar": st.column_config.CheckboxColumn("Comprar", default=False)},
+                    key="df_view_A"
+                )
+                # Atualiza o estado da seleção (após a edição na tabela)
+                if edited_df_A:
+                    st.session_state.sel_A = edited_df_A["Selecionar"].tolist()
+
+            if df_J_filt is not None and not df_J_filt.empty:
+                st.markdown("### JCA")
+                # Cria a coluna de seleção
+                df_J_filt["Selecionar"] = st.session_state.get('sel_J', [False] * len(df_J_filt))[:len(df_J_filt)]
+                
+                col_order = ["Selecionar", "SKU", "fornecedor", "Vendas_Total_60d", "Estoque_Full", "Estoque_Fisico", "Preco", "Compra_Sugerida", "Valor_Compra_R$"]
+                
+                edited_df_J = st.dataframe(
+                    style_df_compra(df_J_filt[col_order]),
+                    use_container_width=True,
+                    column_order=col_order,
+                    column_config={"Selecionar": st.column_config.CheckboxColumn("Comprar", default=False)},
+                    key="df_view_J"
+                )
+                # Atualiza o estado da seleção (após a edição na tabela)
+                if edited_df_J:
+                    st.session_state.sel_J = edited_df_J["Selecionar"].tolist()
+
+# ---------- TAB 3: PEDIDO DE COMPRA ----------
 with tab3:
+    st.subheader("🛒 Revisão e Finalização do Pedido de Compra")
+    
+    if not st.session_state.carrinho_compras:
+        st.info("O carrinho de compras está vazio. Adicione itens na aba **Análise de Compra (Consolidado)**.")
+    else:
+        df_carrinho = st.session_state.carrinho_compras[0].copy()
+        
+        # Auditoria/Detalhes da OC
+        st.markdown("---")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.text_input("Fornecedor Principal do Pedido:", key="oc_fornecedor", value=df_carrinho["Fornecedor"].iloc[0] if not df_carrinho.empty else "")
+        with c2:
+            st.text_input("Número da Ordem de Compra (OC):", key="oc_num")
+        st.text_area("Nota/Observação:", key="oc_obs")
+        st.markdown("---")
+
+        st.markdown("### Ajuste de Quantidades")
+        
+        # Configura a coluna Qtd_Ajustada para ser editável (inteiro > 0)
+        col_config = {
+            "Qtd_Ajustada": st.column_config.NumberColumn(
+                "Qtd. Ajustada (Final)",
+                help="Quantidade final para compra.",
+                min_value=1,
+                format="%d",
+                default=1
+            )
+        }
+        
+        # Exibe o editor de dados
+        edited_carrinho = st.data_editor(
+            df_carrinho,
+            use_container_width=True,
+            column_config=col_config,
+            disabled=["Empresa", "SKU", "Fornecedor", "Preco_Custo", "Qtd_Sugerida", "Valor_Sugerido_R$"]
+        )
+        
+        # Recalcula o valor total com a quantidade ajustada
+        edited_carrinho["Valor_Ajustado_R$"] = (edited_carrinho["Qtd_Ajustada"] * edited_carrinho["Preco_Custo"]).round(2)
+        
+        # Atualiza o estado para persistir as alterações
+        st.session_state.carrinho_compras[0] = edited_carrinho
+
+        # Métricas Finais
+        total_unidades = int(edited_carrinho["Qtd_Ajustada"].sum())
+        total_valor_oc = float(edited_carrinho["Valor_Ajustado_R$"].sum())
+        
+        c3, c4 = st.columns(2)
+        c3.metric("Total de Itens", f"{len(edited_carrinho)}")
+        c4.metric("Valor Total do Pedido", f"R$ {total_valor_oc:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+
+        st.markdown("---")
+        
+        # Botão de Exportação Final (CSV)
+        if st.button("📥 Exportar Pedido Final (CSV)", type="primary"):
+            df_export = edited_carrinho.copy()
+            # Adiciona colunas de auditoria
+            df_export["OC_Fornecedor"] = st.session_state.oc_fornecedor
+            df_export["OC_Numero"] = st.session_state.oc_num
+            df_export["OC_Obs"] = st.session_state.oc_obs
+            
+            csv = exportar_carrinho_csv(df_export)
+            st.download_button(
+                "Baixar CSV para Ordem de Compra",
+                data=csv,
+                file_name=f"OC_{st.session_state.oc_fornecedor.replace(' ', '_')}_{dt.datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv"
+            )
+            st.success("CSV gerado! Use este arquivo para alimentar o seu relatório de Ordem de Compra no Google Looker Studio.")
+
+# ---------- TAB 4: ALOCAÇÃO DE COMPRA (sem estoque) ----------
+with tab4:
     st.subheader("Distribuir quantidade entre empresas — proporcional às vendas (FULL + Shopee)")
 
     if st.session_state.catalogo_df is None or st.session_state.kits_df is None:
@@ -683,7 +857,7 @@ with tab3:
         CATALOGO = st.session_state.catalogo_df
         sku_opcoes = CATALOGO["sku"].dropna().astype(str).sort_values().unique().tolist()
         sku_escolhido = st.selectbox("SKU do componente para alocar", sku_opcoes, key="alloc_sku")
-        qtd_lote = st.number_input("Quantidade total do lote (ex.: 400)", min_value=1, value=1000, step=50)
+        qtd_lote = st.number_input("Quantidade total do lote (ex.: 400)", min_value=1, value=1000, step=50, key="alloc_qtd")
 
         if st.button("Calcular alocação proporcional"):
             try:
@@ -753,4 +927,4 @@ with tab3:
             except Exception as e:
                 st.error(str(e))
 
-st.caption("© Alivvia — simples, robusto e auditável.")
+st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V2.0")
