@@ -1,6 +1,6 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# ARQUITETURA ESTÁVEL V3.1.2 (Correção de Estabilidade de Estado e Seleção)
+# ARQUITETURA ESTÁVEL V3.1.3 (Máxima Estabilidade: Limpeza de Estado após Filtro)
 
 import io
 import re
@@ -78,6 +78,12 @@ def _ensure_state():
 
 _ensure_state()
 
+# FIX V3.1.3: Função para limpar estado de seleção
+def reset_selection():
+    """Zera o estado de seleção do carrinho quando um filtro muda."""
+    st.session_state.sel_A = []
+    st.session_state.sel_J = []
+    
 # ===================== HTTP / GOOGLE SHEETS =====================
 def _requests_session() -> requests.Session:
     s = requests.Session()
@@ -808,11 +814,13 @@ with tab2:
             # Filtros dinâmicos
             c1, c2 = st.columns(2)
             with c1:
+                # O filtro por SKU não tem on_change, pois o filtro de Fornecedor é a principal causa de KeyError
                 sku_filter = st.text_input("Filtro por SKU (contém)", key="filt_sku").upper().strip()
             with c2:
                 fornecedor_opc = df_full["fornecedor"].unique().tolist() if df_full is not None else []
                 fornecedor_opc.insert(0, "TODOS")
-                fornecedor_filter = st.selectbox("Filtro por Fornecedor", fornecedor_opc, key="filt_forn")
+                # FIX V3.1.3: Adiciona o callback para limpar o estado de seleção ao mudar o fornecedor
+                fornecedor_filter = st.selectbox("Filtro por Fornecedor", fornecedor_opc, key="filt_forn", on_change=reset_selection)
             
             # Aplica filtros
             def aplicar_filtro(df: pd.DataFrame) -> pd.DataFrame:
@@ -834,6 +842,7 @@ with tab2:
             if st.button("🛒 Adicionar Itens Selecionados ao Pedido", type="secondary", key="add_to_cart_btn"): # FIX V3.1.1: Adicionado KEY para forçar execução do botão
                 carrinho = []
                 # Processa ALIVVIA
+                # Usa a lógica de reset forçado na V3.1.2 para obter o tamanho correto
                 selec_A = df_A_filt[st.session_state.get('sel_A', [False] * len(df_A_filt))[:len(df_A_filt)]] if df_A_filt is not None else pd.DataFrame()
                 if not selec_A.empty:
                     selec_A = selec_A[selec_A["Compra_Sugerida"] > 0].copy()
@@ -871,7 +880,7 @@ with tab2:
                 # Força a tipagem antes de estilizar (CRUCIAL)
                 df_A_filt_typed = enforce_numeric_types(df_A_filt)
                 
-                # FIX V3.1.2: Garante que a lista de seleção tem o tamanho correto para o DataFrame FILTRADO
+                # Garante que a lista de seleção tem o tamanho correto para o DataFrame FILTRADO
                 current_sel_A = st.session_state.get('sel_A', [])
                 if len(current_sel_A) != len(df_A_filt_typed):
                      # Se o tamanho mudou (por causa do filtro), reseta a seleção
@@ -890,7 +899,7 @@ with tab2:
                 )
                 # Atualiza o estado da seleção (após a edição na tabela)
                 if isinstance(edited_df_A, pd.DataFrame) and "Selecionar" in edited_df_A.columns:
-                    # FIX V3.1.2: AQUI ELE SALVA A SELEÇÃO ATUALIZADA
+                    # AQUI ELE SALVA A SELEÇÃO ATUALIZADA
                     st.session_state.sel_A = edited_df_A["Selecionar"].tolist()
             else:
                  st.info("ALIVVIA: Nenhum item corresponde aos filtros.")
@@ -901,7 +910,7 @@ with tab2:
                 # Força a tipagem antes de estilizar (CRUCIAL)
                 df_J_filt_typed = enforce_numeric_types(df_J_filt)
 
-                # FIX V3.1.2: Garante que a lista de seleção tem o tamanho correto para o DataFrame FILTRADO
+                # Garante que a lista de seleção tem o tamanho correto para o DataFrame FILTRADO
                 current_sel_J = st.session_state.get('sel_J', [])
                 if len(current_sel_J) != len(df_J_filt_typed):
                     # Se o tamanho mudou (por causa do filtro), reseta a seleção
@@ -920,7 +929,7 @@ with tab2:
                 )
                 # Atualiza o estado da seleção (após a edição na tabela)
                 if isinstance(edited_df_J, pd.DataFrame) and "Selecionar" in edited_df_J.columns:
-                    # FIX V3.1.2: AQUI ELE SALVA A SELEÇÃO ATUALIZADA
+                    # AQUI ELE SALVA A SELEÇÃO ATUALIZADA
                     st.session_state.sel_J = edited_df_J["Selecionar"].tolist()
             else:
                 st.info("JCA: Nenhum item corresponde aos filtros.")
@@ -1079,4 +1088,4 @@ with tab4:
             except Exception as e:
                 st.error(str(e))
 
-st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V3.1.2 (Estabilidade do Estado de Seleção)")
+st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V3.1.3 (Máxima Estabilidade de Estado)")
