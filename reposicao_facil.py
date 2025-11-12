@@ -1,6 +1,6 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# ARQUITETURA CONSOLIDADA V2.0 (por Gemini)
+# ARQUITETURA CONSOLIDADA V2.1 (com correção de formatação do Styler)
 
 import io
 import re
@@ -46,10 +46,13 @@ def _ensure_state():
         st.session_state[emp].setdefault("VENDAS", {"name": None, "bytes": None})
         st.session_state[emp].setdefault("ESTOQUE",{"name": None, "bytes": None})
 
+    # NOVO: Persistência da seleção de checkbox por filtro
+    st.session_state.setdefault('sel_A', [])
+    st.session_state.setdefault('sel_J', [])
+
 _ensure_state()
 
 # ===================== HTTP / GOOGLE SHEETS =====================
-# Funções inalteradas: _requests_session, gs_export_xlsx_url, extract_sheet_id_from_url, baixar_xlsx_por_link_google, baixar_xlsx_do_sheets
 def _requests_session() -> requests.Session:
     s = requests.Session()
     retries = Retry(total=3, backoff_factor=0.6, status_forcelist=[429,500,502,503,504], allowed_methods=["GET"])
@@ -87,7 +90,6 @@ def baixar_xlsx_do_sheets(sheet_id: str) -> bytes:
     return r.content
 
 # ===================== UTILS DE DADOS =====================
-# Funções inalteradas: norm_header, normalize_cols, br_to_float, norm_sku, exige_colunas
 def norm_header(s: str) -> str:
     s = (s or "").strip()
     s = unidecode(s).lower()
@@ -121,7 +123,6 @@ def exige_colunas(df: pd.DataFrame, obrig: list, nome: str):
         raise ValueError(f"Colunas obrigatórias ausentes em {nome}: {faltam}\nColunas lidas: {list(df.columns)}")
 
 # ===================== LEITURA DE ARQUIVOS =====================
-# Funções inalteradas: load_any_table, load_any_table_from_bytes
 def load_any_table(uploaded_file) -> Optional[pd.DataFrame]:
     if uploaded_file is None:
         return None
@@ -195,7 +196,6 @@ def load_any_table_from_bytes(file_name: str, blob: bytes) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 # ===================== PADRÃO KITS/CAT =====================
-# Classes e funções inalteradas: Catalogo, _carregar_padrao_de_content, carregar_padrao_do_xlsx, carregar_padrao_do_link, construir_kits_efetivo
 @dataclass
 class Catalogo:
     catalogo_simples: pd.DataFrame  # component_sku, fornecedor, status_reposicao
@@ -284,7 +284,6 @@ def construir_kits_efetivo(cat: Catalogo) -> pd.DataFrame:
     return kits
 
 # ===================== MAPEAMENTO FULL/FISICO/VENDAS =====================
-# Funções inalteradas: mapear_tipo, mapear_colunas
 def mapear_tipo(df: pd.DataFrame) -> str:
     cols = [c.lower() for c in df.columns]
     tem_sku_std  = any(c in {"sku","codigo","codigo_sku"} for c in cols) or any("sku" in c for c in cols)
@@ -369,7 +368,6 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
     raise RuntimeError("Tipo de arquivo desconhecido.")
 
 # ===================== KITS (EXPLOSÃO) =====================
-# Função inalterada: explodir_por_kits
 def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_col: str) -> pd.DataFrame:
     base = df.copy()
     base["kit_sku"] = base[sku_col].map(norm_sku)
@@ -383,7 +381,6 @@ def explodir_por_kits(df: pd.DataFrame, kits: pd.DataFrame, sku_col: str, qtd_co
     return out
 
 # ===================== COMPRA AUTOMÁTICA (LÓGICA ORIGINAL) =====================
-# ATENÇÃO: Alteração na seleção final de colunas para atender ao novo requisito de layout
 def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     kits = construir_kits_efetivo(cat)
     full = full_df.copy()
@@ -477,29 +474,48 @@ def exportar_carrinho_csv(df: pd.DataFrame) -> bytes:
     df["Data_Hora_OC"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return df.to_csv(index=False).encode("utf-8")
 
+# FUNÇÃO CORRIGIDA PARA TRATAR O VALOR ERROR (NaN)
 def style_df_compra(df: pd.DataFrame):
-    """Aplica o destaque na coluna Compra_Sugerida."""
-    # Definição do formato
+    """Aplica o destaque na coluna Compra_Sugerida e formata valores."""
+    
+    # Formato para valores inteiros
+    int_format = '{:,.0f}'.replace(",", "X").replace(".", ",").replace("X", ".")
+    
+    # Formato para moeda
+    currency_format = 'R$ {:,.2f}'.replace(",", "X").replace(".", ",").replace("X", ".")
+
     format_mapping = {
-        'Estoque_Fisico': '{:,}'.replace(",", "."),
-        'Compra_Sugerida': '{:,}'.replace(",", "."),
-        'Vendas_Total_60d': '{:,}'.replace(",", "."),
-        'Estoque_Full': '{:,}'.replace(",", "."),
-        'Preco': 'R$ {:,.2f}'.replace(",", "X").replace(".", ",").replace("X", "."), # R$ 0.000,00
-        'Valor_Compra_R$': 'R$ {:,.2f}'.replace(",", "X").replace(".", ",").replace("X", ".")
+        'Estoque_Fisico': int_format,
+        'Compra_Sugerida': int_format,
+        'Vendas_Total_60d': int_format,
+        'Estoque_Full': int_format,
+        'Preco': currency_format,
+        'Valor_Compra_R$': currency_format,
+        'Qtd_Ajustada': int_format,
+        'Preco_Custo': currency_format,
+        'Valor_Ajustado_R$': currency_format,
+        'Valor_Sugerido_R$': currency_format,
     }
     
-    # Aplica o formato nas colunas existentes
-    styler = df.style.format({c: fmt for c, fmt in format_mapping.items() if c in df.columns})
+    # Aplica o formato nas colunas existentes, usando na_rep='-' para NaN (CORREÇÃO DE ERRO)
+    styler = df.style.format({c: fmt for c, fmt in format_mapping.items() if c in df.columns}, na_rep='-')
     
     # Aplica cor de fundo se Compra_Sugerida for > 0
     def highlight_compra(s):
-        is_compra = s.name == 'Compra_Sugerida'
+        is_compra = s.name == 'Compra_Sugerida' or s.name == 'Qtd_Ajustada'
+        
+        # Garante que s é numérico antes de comparar (CORREÇÃO DE ERRO)
+        s_numeric = pd.to_numeric(s, errors='coerce').fillna(0)
+        
         if is_compra:
-            return ['background-color: #A93226; color: white' if v > 0 else '' for v in s]
+            return ['background-color: #A93226; color: white' if v > 0 else '' for v in s_numeric]
         return ['' for _ in s]
 
-    styler = styler.apply(highlight_compra, axis=0, subset=['Compra_Sugerida'])
+    # Aplica o destaque
+    if 'Compra_Sugerida' in df.columns:
+        styler = styler.apply(highlight_compra, axis=0, subset=['Compra_Sugerida'])
+    if 'Qtd_Ajustada' in df.columns:
+        styler = styler.apply(highlight_compra, axis=0, subset=['Qtd_Ajustada'])
     
     return styler
 
@@ -631,7 +647,7 @@ with tab2:
                 # valida presença
                 for k, rot in [("FULL","FULL"),("VENDAS","Shopee/MT"),("ESTOQUE","Estoque")]:
                     if not (dados[k]["name"] and dados[k]["bytes"]):
-                        raise RuntimeError(f"Arquivo '{rot}' não foi salvo para {empresa}.")
+                        raise RuntimeError(f"Arquivo '{rot}' não foi salvo para {empresa}. Vá em **Dados das Empresas** e salve.")
 
                 # leitura pelos BYTES
                 full_raw   = load_any_table_from_bytes(dados["FULL"]["name"], dados["FULL"]["bytes"])
@@ -642,9 +658,9 @@ with tab2:
                 t_full = mapear_tipo(full_raw)
                 t_v    = mapear_tipo(vendas_raw)
                 t_f    = mapear_tipo(fisico_raw)
-                if t_full != "FULL":   raise RuntimeError("FULL inválido.")
-                if t_v    != "VENDAS": raise RuntimeError("Vendas inválido.")
-                if t_f    != "FISICO": raise RuntimeError("Estoque inválido.")
+                if t_full != "FULL":   raise RuntimeError("FULL inválido: precisa de SKU e Vendas_60d/Estoque_full.")
+                if t_v    != "VENDAS": raise RuntimeError("Vendas inválido: não achei coluna de quantidade.")
+                if t_f    != "FISICO": raise RuntimeError("Estoque inválido: precisa de Estoque e Preço.")
 
                 full_df   = mapear_colunas(full_raw, t_full)
                 vendas_df = mapear_colunas(vendas_raw, t_v)
@@ -681,7 +697,7 @@ with tab2:
         if df_A is None and df_J is None:
             st.info("Gere o cálculo para pelo menos uma empresa acima para visualizar e filtrar.")
         else:
-            df_full = pd.concat([df_A, df_J], ignore_index=True) if df_A is not None and df_J is not None else (df_A if df_A is not None else df_J)
+            df_full = pd.concat([df for df in [df_A, df_J] if df is not None], ignore_index=True)
             
             # Filtros dinâmicos
             c1, c2 = st.columns(2)
@@ -712,14 +728,15 @@ with tab2:
             if st.button("🛒 Adicionar Itens Selecionados ao Pedido", type="secondary"):
                 carrinho = []
                 # Processa ALIVVIA
-                selec_A = df_A_filt[st.session_state.get('sel_A', [False] * len(df_A_filt))]
+                # Usa a lista de seleção do state, limitada ao tamanho do DataFrame filtrado
+                selec_A = df_A_filt[st.session_state.get('sel_A', [False] * len(df_A_filt))[:len(df_A_filt)]] if df_A_filt is not None else pd.DataFrame()
                 if not selec_A.empty:
                     selec_A = selec_A[selec_A["Compra_Sugerida"] > 0].copy()
                     selec_A["Empresa"] = "ALIVVIA"
                     carrinho.append(selec_A)
                 
                 # Processa JCA
-                selec_J = df_J_filt[st.session_state.get('sel_J', [False] * len(df_J_filt))]
+                selec_J = df_J_filt[st.session_state.get('sel_J', [False] * len(df_J_filt))[:len(df_J_filt)]] if df_J_filt is not None else pd.DataFrame()
                 if not selec_J.empty:
                     selec_J = selec_J[selec_J["Compra_Sugerida"] > 0].copy()
                     selec_J["Empresa"] = "JCA"
@@ -733,17 +750,19 @@ with tab2:
                     carrinho_df["Qtd_Ajustada"] = carrinho_df["Qtd_Sugerida"]
                     
                     st.session_state.carrinho_compras = [carrinho_df.reset_index(drop=True)]
-                    st.success(f"Adicionado {len(carrinho_df)} itens ao Pedido de Compra.")
+                    st.success(f"Adicionado {len(carrinho_df)} itens ao Pedido de Compra. Vá para a aba '🛒 Pedido de Compra' para finalizar.")
                 else:
                     st.warning("Nenhum item com Compra Sugerida > 0 foi selecionado.")
-
+            
             # --- Visualização de Resultados ---
+            col_order = ["Selecionar", "SKU", "fornecedor", "Vendas_Total_60d", "Estoque_Full", "Estoque_Fisico", "Preco", "Compra_Sugerida", "Valor_Compra_R$"]
+            
             if df_A_filt is not None and not df_A_filt.empty:
                 st.markdown("### ALIVVIA")
                 # Cria a coluna de seleção
-                df_A_filt["Selecionar"] = st.session_state.get('sel_A', [False] * len(df_A_filt))[:len(df_A_filt)]
-                
-                col_order = ["Selecionar", "SKU", "fornecedor", "Vendas_Total_60d", "Estoque_Full", "Estoque_Fisico", "Preco", "Compra_Sugerida", "Valor_Compra_R$"]
+                current_sel_A = st.session_state.get('sel_A', [False] * len(df_A_filt))
+                # Garante que o tamanho da lista de seleção é compatível com o dataframe filtrado
+                df_A_filt["Selecionar"] = current_sel_A[:len(df_A_filt)] if len(current_sel_A) >= len(df_A_filt) else [False] * len(df_A_filt)
                 
                 edited_df_A = st.dataframe(
                     style_df_compra(df_A_filt[col_order]),
@@ -759,9 +778,9 @@ with tab2:
             if df_J_filt is not None and not df_J_filt.empty:
                 st.markdown("### JCA")
                 # Cria a coluna de seleção
-                df_J_filt["Selecionar"] = st.session_state.get('sel_J', [False] * len(df_J_filt))[:len(df_J_filt)]
-                
-                col_order = ["Selecionar", "SKU", "fornecedor", "Vendas_Total_60d", "Estoque_Full", "Estoque_Fisico", "Preco", "Compra_Sugerida", "Valor_Compra_R$"]
+                current_sel_J = st.session_state.get('sel_J', [False] * len(df_J_filt))
+                # Garante que o tamanho da lista de seleção é compatível com o dataframe filtrado
+                df_J_filt["Selecionar"] = current_sel_J[:len(df_J_filt)] if len(current_sel_J) >= len(df_J_filt) else [False] * len(df_J_filt)
                 
                 edited_df_J = st.dataframe(
                     style_df_compra(df_J_filt[col_order]),
@@ -808,7 +827,7 @@ with tab3:
         
         # Exibe o editor de dados
         edited_carrinho = st.data_editor(
-            df_carrinho,
+            style_df_compra(df_carrinho), # Usa a função de estilo na edição
             use_container_width=True,
             column_config=col_config,
             disabled=["Empresa", "SKU", "Fornecedor", "Preco_Custo", "Qtd_Sugerida", "Valor_Sugerido_R$"]
@@ -927,4 +946,4 @@ with tab4:
             except Exception as e:
                 st.error(str(e))
 
-st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V2.0")
+st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V2.1 (Com correção de formatação)")
