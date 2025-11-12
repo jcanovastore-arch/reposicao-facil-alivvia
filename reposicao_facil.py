@@ -1,6 +1,6 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# ARQUITETURA CONSOLIDADA V2.9 (SKU ÚNICO e Filtro de Status na origem)
+# ARQUITETURA CONSOLIDADA V3.0 (Estabilidade de Colunas e Correção de Seleção)
 
 import io
 import re
@@ -160,7 +160,7 @@ def enforce_numeric_types(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors='coerce').round(2).astype(float)
             
     # Colunas que devem ser tratadas como inteiros (quantidade)
-    for col in ["Vendas_Total_60d", "Estoque_Full", "Estoque_Fisico", "Compra_Sugerida", "Qtd_Sugerida", "Qtd_Ajustada"]:
+    for col in ["Vendas_Total_60d", "Estoque_Full", "Estoque_Fisico", "Compra_Sugerida", "Qtd_Sugerida", "Qtd_Ajustada", "Em_Transito"]:
         if col in df.columns:
             # Converte para numérico (erros para NaN), preenche NaN com 0 e converte para int
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
@@ -386,7 +386,8 @@ def mapear_colunas(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
         df["Estoque_Full"] = df[c_e[0]].map(br_to_float).fillna(0).astype(int)
 
         c_t = [c for c in df.columns if c in ["em_transito","em transito","em_transito_full","em_transito_do_anuncio"] or ("transito" in c)]
-        df["Em_Transito"] = df[c_t[0]].map(br_to_float).fillna(0).astype(int) if c_t else 0
+        # FIX V3.0: Garante que a coluna Em_Transito exista, mesmo que seja 0.
+        df["Em_Transito"] = df[c_t[0]].map(br_to_float).fillna(0).astype(int) if c_t else 0 
 
         return df[["SKU","Vendas_Qtd_60d","Estoque_Full","Em_Transito"]].copy()
 
@@ -455,7 +456,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     full["SKU"] = full["SKU"].map(norm_sku)
     full["Vendas_Qtd_60d"] = full["Vendas_Qtd_60d"].astype(int)
     full["Estoque_Full"]   = full["Estoque_Full"].astype(int)
-    full["Em_Transito"]    = full["Em_Transito"].astype(int)
+    full["Em_Transito"]    = full["Em_Transito"].astype(int) # FIX V3.0: Coluna garantida em mapear_colunas
 
     shp = vendas_df.copy()
     shp["SKU"] = shp["SKU"].map(norm_sku)
@@ -486,11 +487,16 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     base = demanda.merge(fis, on="SKU", how="left")
     base["Estoque_Fisico"] = base["Estoque_Fisico"].fillna(0).astype(int)
     base["Preco"] = base["Preco"].fillna(0.0)
-    base = base.merge(full[["SKU", "Estoque_Full", "Em_Transito"]], on="SKU", how="left").fillna({"Estoque_Full": 0, "Em_Transito": 0})
-    base["Estoque_Full"] = base["Estoque_Full"].astype(int)
-    base["Em_Transito"] = base["Em_Transito"].astype(int)
-
-
+    
+    # FIX V3.0: Merge com Full, garantindo que Estoque_Full e Em_Transito não sumam
+    base = base.merge(full[["SKU", "Estoque_Full", "Em_Transito"]], on="SKU", how="left", suffixes=('_base', '_full'))
+    
+    # Se a coluna veio do full, usa o valor de lá. Caso contrário (SKU só no catálogo físico), zera.
+    # Isto garante que a coluna Em_Transito exista no DataFrame base.
+    base["Estoque_Full"] = base["Estoque_Full_full"].fillna(base["Estoque_Full_base"]).fillna(0).astype(int)
+    base["Em_Transito"] = base["Em_Transito"].fillna(0).astype(int) 
+    base = base.drop(columns=['Estoque_Full_base', 'Estoque_Full_full'], errors='ignore') # Limpa colunas duplicadas
+    
     # 4. Cálculo de Necessidade (Target)
     fator = (1.0 + g/100.0) ** (h/30.0)
     fk = full.copy()
@@ -511,8 +517,6 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     base["Folga_Fisico"] = (base["Estoque_Fisico"] - base["Reserva_30d"]).clip(lower=0).astype(int)
 
     base["Compra_Sugerida"] = (base["Necessidade"] - base["Folga_Fisico"]).clip(lower=0).astype(int)
-
-    # Nota: O filtro "nao_repor" já foi aplicado na origem (CATALOGO_SIMPLES), removendo a necessidade de zerar a compra aqui.
 
     base["Valor_Compra_R$"] = (base["Compra_Sugerida"].astype(float) * base["Preco"].astype(float)).round(2)
     
@@ -568,6 +572,7 @@ def style_df_compra(df: pd.DataFrame):
         'Compra_Sugerida': lambda x: format_br_int(x),
         'Vendas_Total_60d': lambda x: format_br_int(x),
         'Estoque_Full': lambda x: format_br_int(x),
+        'Em_Transito': lambda x: format_br_int(x), # FIX V3.0: Formatação de Em_Transito
         'Preco': lambda x: format_br_currency(x),
         'Valor_Compra_R$': lambda x: format_br_currency(x),
         'Qtd_Ajustada': lambda x: format_br_int(x),
@@ -825,6 +830,7 @@ with tab2:
             if st.button("🛒 Adicionar Itens Selecionados ao Pedido", type="secondary"):
                 carrinho = []
                 # Processa ALIVVIA
+                # FIX V3.0: Usa o df_A_filt para a seleção, garantindo que o índice seja compatível
                 selec_A = df_A_filt[st.session_state.get('sel_A', [False] * len(df_A_filt))[:len(df_A_filt)]] if df_A_filt is not None else pd.DataFrame()
                 if not selec_A.empty:
                     selec_A = selec_A[selec_A["Compra_Sugerida"] > 0].copy()
@@ -832,6 +838,7 @@ with tab2:
                     carrinho.append(selec_A)
                 
                 # Processa JCA
+                # FIX V3.0: Usa o df_J_filt para a seleção, garantindo que o índice seja compatível
                 selec_J = df_J_filt[st.session_state.get('sel_J', [False] * len(df_J_filt))[:len(df_J_filt)]] if df_J_filt is not None else pd.DataFrame()
                 if not selec_J.empty:
                     selec_J = selec_J[selec_J["Compra_Sugerida"] > 0].copy()
@@ -861,10 +868,15 @@ with tab2:
                 # Força a tipagem antes de estilizar (CORREÇÃO DE ERRO)
                 df_A_filt_typed = enforce_numeric_types(df_A_filt)
                 
+                # FIX V3.0: Garante que a lista de seleção tem o tamanho correto para o DataFrame filtrado
+                current_sel_A = st.session_state.get('sel_A', [])
+                if len(current_sel_A) != len(df_A_filt_typed):
+                     # Se o tamanho mudou (por causa do filtro), reseta a seleção
+                    st.session_state.sel_A = [False] * len(df_A_filt_typed)
+                    current_sel_A = st.session_state.sel_A
+                
                 # Cria a coluna de seleção
-                current_sel_A = st.session_state.get('sel_A', [False] * len(df_A_filt_typed))
-                # Garante que o tamanho da lista de seleção é compatível com o dataframe filtrado
-                df_A_filt_typed["Selecionar"] = current_sel_A[:len(df_A_filt_typed)] if len(current_sel_A) >= len(df_A_filt_typed) else [False] * len(df_A_filt_typed)
+                df_A_filt_typed["Selecionar"] = current_sel_A
                 
                 edited_df_A = st.dataframe(
                     style_df_compra(df_A_filt_typed[col_order]),
@@ -874,7 +886,6 @@ with tab2:
                     key="df_view_A"
                 )
                 # Atualiza o estado da seleção (após a edição na tabela)
-                # FIX V2.8/V2.9: Adiciona checagem de tipo explícita para evitar TypeError
                 if isinstance(edited_df_A, pd.DataFrame) and "Selecionar" in edited_df_A.columns:
                     st.session_state.sel_A = edited_df_A["Selecionar"].tolist()
 
@@ -883,10 +894,15 @@ with tab2:
                 # Força a tipagem antes de estilizar (CORREÇÃO DE ERRO)
                 df_J_filt_typed = enforce_numeric_types(df_J_filt)
 
+                # FIX V3.0: Garante que a lista de seleção tem o tamanho correto para o DataFrame filtrado
+                current_sel_J = st.session_state.get('sel_J', [])
+                if len(current_sel_J) != len(df_J_filt_typed):
+                    # Se o tamanho mudou (por causa do filtro), reseta a seleção
+                    st.session_state.sel_J = [False] * len(df_J_filt_typed)
+                    current_sel_J = st.session_state.sel_J
+
                 # Cria a coluna de seleção
-                current_sel_J = st.session_state.get('sel_J', [False] * len(df_J_filt_typed))
-                # Garante que o tamanho da lista de seleção é compatível com o dataframe filtrado
-                df_J_filt_typed["Selecionar"] = current_sel_J[:len(df_J_filt_typed)] if len(current_sel_J) >= len(df_J_filt_typed) else [False] * len(df_J_filt_typed)
+                df_J_filt_typed["Selecionar"] = current_sel_J
                 
                 edited_df_J = st.dataframe(
                     style_df_compra(df_J_filt_typed[col_order]),
@@ -896,7 +912,6 @@ with tab2:
                     key="df_view_J"
                 )
                 # Atualiza o estado da seleção (após a edição na tabela)
-                # FIX V2.8/V2.9: Adiciona checagem de tipo explícita para evitar TypeError
                 if isinstance(edited_df_J, pd.DataFrame) and "Selecionar" in edited_df_J.columns:
                     st.session_state.sel_J = edited_df_J["Selecionar"].tolist()
 
@@ -1054,4 +1069,4 @@ with tab4:
             except Exception as e:
                 st.error(str(e))
 
-st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V2.9 (SKU Único e Filtro de Status)")
+st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V3.0 (Estabilidade de Colunas e Correção de Seleção)")
