@@ -1,0 +1,18 @@
+﻿# Python/Streamlit
+venv/
+__pycache__/
+*.pyc
+.streamlit/
+
+# Excel/saídas locais
+ordens_compra/
+docs/
+*.xlsx
+
+# Dumps temporários
+dump_var_*.json
+
+# SO/Editor
+*.log
+.DS_Store
+Thumbs.db

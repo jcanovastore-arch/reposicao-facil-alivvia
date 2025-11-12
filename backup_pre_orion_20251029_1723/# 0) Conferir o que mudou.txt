@@ -1,0 +1,28 @@
+# 0) Conferir o que mudou
+git status
+
+# 1) Criar/entrar na branch de trabalho desta alteração
+git switch -c feat/oc-hook 2>$null; git switch feat/oc-hook
+
+# 2) Adicionar os arquivos alterados (ajuste a lista se tiver mais arquivos)
+git add ".\reposicao_facil.py" ".\pages\2_Ordem_de_Compra.py"
+
+# Se também trocou logos, inclua:
+# git add ".\assets\logos\alivvia_logo.png" ".\assets\logos\jca_logo.png"
+
+# 3) Commit com mensagem clara
+git commit -m "OC: enviar compra (df_final/df_view) para Ordem de Compra via session_state"
+
+# 4) Enviar a branch para o GitHub
+git push -u origin feat/oc-hook
+
+# 5) Trazer a main local atualizada e fazer o merge da feature
+git fetch origin
+git switch main
+git pull --ff-only
+git merge --no-ff feat/oc-hook -m "Merge: OC hook (envio de itens para página Ordem de Compra)"
+git push origin main
+
+
+
+cd "C:\Users\jcano\Documents\Sistema Compras"
