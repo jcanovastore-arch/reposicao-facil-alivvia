@@ -1,6 +1,6 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# ARQUITETURA CONSOLIDADA V2.1 (com correção de formatação do Styler)
+# ARQUITETURA CONSOLIDADA V2.2 (com correção definitiva de tipos para o Styler)
 
 import io
 import re
@@ -121,6 +121,25 @@ def exige_colunas(df: pd.DataFrame, obrig: list, nome: str):
     faltam = [c for c in obrig if c not in df.columns]
     if faltam:
         raise ValueError(f"Colunas obrigatórias ausentes em {nome}: {faltam}\nColunas lidas: {list(df.columns)}")
+
+# NOVO: Função para forçar os tipos numéricos antes de estilizar (CORREÇÃO DE ERRO)
+def enforce_numeric_types(df: pd.DataFrame) -> pd.DataFrame:
+    """Garante que colunas numéricas chave sejam float ou int para o Styler."""
+    df = df.copy()
+    
+    # Colunas que devem ser tratadas como float (moeda/custo)
+    for col in ["Preco", "Valor_Compra_R$", "Preco_Custo", "Valor_Sugerido_R$", "Valor_Ajustado_R$"]:
+        if col in df.columns:
+            # Converte para float, convertendo erros (strings, etc.) para NaN.
+            df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
+            
+    # Colunas que devem ser tratadas como inteiros (quantidade)
+    for col in ["Vendas_Total_60d", "Estoque_Full", "Estoque_Fisico", "Compra_Sugerida", "Qtd_Sugerida", "Qtd_Ajustada"]:
+        if col in df.columns:
+            # Converte para numérico (erros para NaN), preenche NaN com 0 e converte para int
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
+            
+    return df
 
 # ===================== LEITURA DE ARQUIVOS =====================
 def load_any_table(uploaded_file) -> Optional[pd.DataFrame]:
@@ -728,7 +747,6 @@ with tab2:
             if st.button("🛒 Adicionar Itens Selecionados ao Pedido", type="secondary"):
                 carrinho = []
                 # Processa ALIVVIA
-                # Usa a lista de seleção do state, limitada ao tamanho do DataFrame filtrado
                 selec_A = df_A_filt[st.session_state.get('sel_A', [False] * len(df_A_filt))[:len(df_A_filt)]] if df_A_filt is not None else pd.DataFrame()
                 if not selec_A.empty:
                     selec_A = selec_A[selec_A["Compra_Sugerida"] > 0].copy()
@@ -749,6 +767,9 @@ with tab2:
                     carrinho_df.columns = ["Empresa", "SKU", "Fornecedor", "Preco_Custo", "Qtd_Sugerida", "Valor_Sugerido_R$"]
                     carrinho_df["Qtd_Ajustada"] = carrinho_df["Qtd_Sugerida"]
                     
+                    # Força a tipagem antes de salvar no carrinho
+                    carrinho_df = enforce_numeric_types(carrinho_df)
+
                     st.session_state.carrinho_compras = [carrinho_df.reset_index(drop=True)]
                     st.success(f"Adicionado {len(carrinho_df)} itens ao Pedido de Compra. Vá para a aba '🛒 Pedido de Compra' para finalizar.")
                 else:
@@ -759,13 +780,16 @@ with tab2:
             
             if df_A_filt is not None and not df_A_filt.empty:
                 st.markdown("### ALIVVIA")
+                # Força a tipagem antes de estilizar (CORREÇÃO DE ERRO)
+                df_A_filt_typed = enforce_numeric_types(df_A_filt)
+                
                 # Cria a coluna de seleção
-                current_sel_A = st.session_state.get('sel_A', [False] * len(df_A_filt))
+                current_sel_A = st.session_state.get('sel_A', [False] * len(df_A_filt_typed))
                 # Garante que o tamanho da lista de seleção é compatível com o dataframe filtrado
-                df_A_filt["Selecionar"] = current_sel_A[:len(df_A_filt)] if len(current_sel_A) >= len(df_A_filt) else [False] * len(df_A_filt)
+                df_A_filt_typed["Selecionar"] = current_sel_A[:len(df_A_filt_typed)] if len(current_sel_A) >= len(df_A_filt_typed) else [False] * len(df_A_filt_typed)
                 
                 edited_df_A = st.dataframe(
-                    style_df_compra(df_A_filt[col_order]),
+                    style_df_compra(df_A_filt_typed[col_order]),
                     use_container_width=True,
                     column_order=col_order,
                     column_config={"Selecionar": st.column_config.CheckboxColumn("Comprar", default=False)},
@@ -777,13 +801,16 @@ with tab2:
 
             if df_J_filt is not None and not df_J_filt.empty:
                 st.markdown("### JCA")
+                # Força a tipagem antes de estilizar (CORREÇÃO DE ERRO)
+                df_J_filt_typed = enforce_numeric_types(df_J_filt)
+
                 # Cria a coluna de seleção
-                current_sel_J = st.session_state.get('sel_J', [False] * len(df_J_filt))
+                current_sel_J = st.session_state.get('sel_J', [False] * len(df_J_filt_typed))
                 # Garante que o tamanho da lista de seleção é compatível com o dataframe filtrado
-                df_J_filt["Selecionar"] = current_sel_J[:len(df_J_filt)] if len(current_sel_J) >= len(df_J_filt) else [False] * len(df_J_filt)
+                df_J_filt_typed["Selecionar"] = current_sel_J[:len(df_J_filt_typed)] if len(current_sel_J) >= len(df_J_filt_typed) else [False] * len(df_J_filt_typed)
                 
                 edited_df_J = st.dataframe(
-                    style_df_compra(df_J_filt[col_order]),
+                    style_df_compra(df_J_filt_typed[col_order]),
                     use_container_width=True,
                     column_order=col_order,
                     column_config={"Selecionar": st.column_config.CheckboxColumn("Comprar", default=False)},
@@ -800,6 +827,7 @@ with tab3:
     if not st.session_state.carrinho_compras:
         st.info("O carrinho de compras está vazio. Adicione itens na aba **Análise de Compra (Consolidado)**.")
     else:
+        # Puxa o carrinho, que já está com tipos forçados
         df_carrinho = st.session_state.carrinho_compras[0].copy()
         
         # Auditoria/Detalhes da OC
@@ -833,7 +861,7 @@ with tab3:
             disabled=["Empresa", "SKU", "Fornecedor", "Preco_Custo", "Qtd_Sugerida", "Valor_Sugerido_R$"]
         )
         
-        # Recalcula o valor total com a quantidade ajustada
+        # Recalcula o valor total com a quantidade ajustada (já são float devido ao enforce_numeric_types)
         edited_carrinho["Valor_Ajustado_R$"] = (edited_carrinho["Qtd_Ajustada"] * edited_carrinho["Preco_Custo"]).round(2)
         
         # Atualiza o estado para persistir as alterações
@@ -946,4 +974,4 @@ with tab4:
             except Exception as e:
                 st.error(str(e))
 
-st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V2.1 (Com correção de formatação)")
+st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V2.2 (Correção de Formatação)")
