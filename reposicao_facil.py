@@ -1,6 +1,6 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# ARQUITETURA CONSOLIDADA V3.2.1 (FIX DE SELEÇÃO E ESTADO)
+# ARQUITETURA CONSOLIDADA V3.2.2 (FIX ESTADO: Sincronia SKU-Base)
 
 import io
 import re
@@ -55,8 +55,9 @@ def _ensure_state():
     st.session_state.setdefault("resultado_JCA", None)
     st.session_state.setdefault("carrinho_compras", [])
 
-    st.session_state.setdefault('sel_A', [])
-    st.session_state.setdefault('sel_J', [])
+    # FIX V3.2.2: Estado de seleção armazenado como dicionário {SKU: True/False}
+    st.session_state.setdefault('sel_A', {})
+    st.session_state.setdefault('sel_J', {})
 
     # uploads por empresa
     for emp in ["ALIVVIA", "JCA"]:
@@ -82,11 +83,11 @@ def _ensure_state():
 
 _ensure_state()
 
-# FIX V3.2.1: Função única de reset para ser chamada em todos os filtros
+# FIX V3.2.1/V3.2.2: Função única de reset para ser chamada em todos os filtros
 def reset_selection():
-    """Zera o estado de seleção do carrinho quando um filtro ou o SKU muda."""
-    st.session_state.sel_A = []
-    st.session_state.sel_J = []
+    """Zera o estado de seleção do carrinho (dicionário) quando um filtro muda."""
+    st.session_state.sel_A = {}
+    st.session_state.sel_J = {}
 
 # ===================== HTTP / GOOGLE SHEETS =====================
 def _requests_session() -> requests.Session:
@@ -874,17 +875,22 @@ with tab2:
 
             if st.button("🛒 Adicionar Itens Selecionados ao Pedido", type="secondary"):
                 carrinho = []
-                # Processa ALIVVIA
-                # FIX V3.0: Usa o df_A_filt para a seleção, garantindo que o índice seja compatível
-                selec_A = df_A_filt[st.session_state.get('sel_A', [False] * len(df_A_filt))[:len(df_A_filt)]] if df_A_filt is not None else pd.DataFrame()
+                
+                # FIX V3.2.2: Filtra o DataFrame COMPLETO (resultado) usando o dicionário de SKUs selecionados
+                
+                # 1. Processa ALIVVIA
+                selected_skus_A = {sku for sku, selected in st.session_state.sel_A.items() if selected}
+                selec_A = df_A[df_A["SKU"].isin(selected_skus_A)] if df_A is not None else pd.DataFrame()
+                
                 if not selec_A.empty:
                     selec_A = selec_A[selec_A["Compra_Sugerida"] > 0].copy()
                     selec_A["Empresa"] = "ALIVVIA"
                     carrinho.append(selec_A)
                 
-                # Processa JCA
-                # FIX V3.0: Usa o df_J_filt para a seleção, garantindo que o índice seja compatível
-                selec_J = df_J_filt[st.session_state.get('sel_J', [False] * len(df_J_filt))[:len(df_J_filt)]] if df_J_filt is not None else pd.DataFrame()
+                # 2. Processa JCA
+                selected_skus_J = {sku for sku, selected in st.session_state.sel_J.items() if selected}
+                selec_J = df_J[df_J["SKU"].isin(selected_skus_J)] if df_J is not None else pd.DataFrame()
+
                 if not selec_J.empty:
                     selec_J = selec_J[selec_J["Compra_Sugerida"] > 0].copy()
                     selec_J["Empresa"] = "JCA"
@@ -914,27 +920,29 @@ with tab2:
                 # Força a tipagem antes de estilizar (CORREÇÃO DE ERRO)
                 df_A_filt_typed = enforce_numeric_types(df_A_filt)
                 
-                # FIX V3.1: Garante que a lista de seleção tem o tamanho correto para o DataFrame filtrado
-                current_sel_A = st.session_state.get('sel_A', [])
-                if len(current_sel_A) != len(df_A_filt_typed):
-                     # Se o tamanho mudou (por causa do filtro), reseta a seleção
-                    st.session_state.sel_A = [False] * len(df_A_filt_typed)
-                    current_sel_A = st.session_state.sel_A
-                
-                # Cria a coluna de seleção
-                df_A_filt_typed["Selecionar"] = current_sel_A
+                # FIX V3.2.2: Popula a coluna 'Selecionar' do DF FILTRADO a partir do Dicionário global
+                df_A_filt_typed["Selecionar"] = df_A_filt_typed["SKU"].apply(
+                    lambda sku: st.session_state.sel_A.get(sku, False)
+                )
                 
                 edited_df_A = st.dataframe(
-                    # FIX V3.1: O filtro df_A_filt_typed[col_order] só ocorre se o DF não estiver vazio.
                     style_df_compra(df_A_filt_typed[col_order]),
                     use_container_width=True,
                     column_order=col_order,
                     column_config={"Selecionar": st.column_config.CheckboxColumn("Comprar", default=False)},
                     key="df_view_A"
                 )
-                # Atualiza o estado da seleção (após a edição na tabela)
+                
+                # FIX V3.2.2: Processa o output do dataframe para atualizar o Dicionário global (SKU-base)
                 if isinstance(edited_df_A, pd.DataFrame) and "Selecionar" in edited_df_A.columns:
-                    st.session_state.sel_A = edited_df_A["Selecionar"].tolist()
+                    for index, row in edited_df_A.iterrows():
+                        sku = row["SKU"]
+                        is_selected = row["Selecionar"]
+                        
+                        if is_selected:
+                            st.session_state.sel_A[sku] = True
+                        elif sku in st.session_state.sel_A:
+                            st.session_state.sel_A[sku] = False
             else:
                  st.info("ALIVVIA: Nenhum item corresponde aos filtros.")
 
@@ -944,15 +952,10 @@ with tab2:
                 # Força a tipagem antes de estilizar (CORREÇÃO DE ERRO)
                 df_J_filt_typed = enforce_numeric_types(df_J_filt)
 
-                # FIX V3.1: Garante que a lista de seleção tem o tamanho correto para o DataFrame filtrado
-                current_sel_J = st.session_state.get('sel_J', [])
-                if len(current_sel_J) != len(df_J_filt_typed):
-                    # Se o tamanho mudou (por causa do filtro), reseta a seleção
-                    st.session_state.sel_J = [False] * len(df_J_filt_typed)
-                    current_sel_J = st.session_state.sel_J
-
-                # Cria a coluna de seleção
-                df_J_filt_typed["Selecionar"] = current_sel_J
+                # FIX V3.2.2: Popula a coluna 'Selecionar' do DF FILTRADO a partir do Dicionário global
+                df_J_filt_typed["Selecionar"] = df_J_filt_typed["SKU"].apply(
+                    lambda sku: st.session_state.sel_J.get(sku, False)
+                )
                 
                 edited_df_J = st.dataframe(
                     style_df_compra(df_J_filt_typed[col_order]),
@@ -961,9 +964,17 @@ with tab2:
                     column_config={"Selecionar": st.column_config.CheckboxColumn("Comprar", default=False)},
                     key="df_view_J"
                 )
-                # Atualiza o estado da seleção (após a edição na tabela)
+                
+                # FIX V3.2.2: Processa o output do dataframe para atualizar o Dicionário global (SKU-base)
                 if isinstance(edited_df_J, pd.DataFrame) and "Selecionar" in edited_df_J.columns:
-                    st.session_state.sel_J = edited_df_J["Selecionar"].tolist()
+                    for index, row in edited_df_J.iterrows():
+                        sku = row["SKU"]
+                        is_selected = row["Selecionar"]
+                        
+                        if is_selected:
+                            st.session_state.sel_J[sku] = True
+                        elif sku in st.session_state.sel_J:
+                            st.session_state.sel_J[sku] = False
             else:
                 st.info("JCA: Nenhum item corresponde aos filtros.")
 
@@ -971,10 +982,44 @@ with tab2:
 with tab3:
     st.subheader("🛒 Revisão e Finalização do Pedido de Compra")
     
-    if not st.session_state.carrinho_compras:
+    # FIX V3.2.2: Agora o carrinho usa o dicionário de seleção global para filtrar o resultado COMPLETO.
+    
+    # Lógica para popular o carrinho (reutilizada e ajustada)
+    selected_skus_A = {sku for sku, selected in st.session_state.sel_A.items() if selected}
+    selected_skus_J = {sku for sku, selected in st.session_state.sel_J.items() if selected}
+    
+    df_A = st.session_state.resultado_ALIVVIA
+    df_J = st.session_state.resultado_JCA
+    
+    carrinho_items = []
+    if df_A is not None:
+        selec_A = df_A[df_A["SKU"].isin(selected_skus_A)].copy()
+        if not selec_A.empty:
+            selec_A = selec_A[selec_A["Compra_Sugerida"] > 0].copy()
+            selec_A["Empresa"] = "ALIVVIA"
+            carrinho_items.append(selec_A)
+            
+    if df_J is not None:
+        selec_J = df_J[df_J["SKU"].isin(selected_skus_J)].copy()
+        if not selec_J.empty:
+            selec_J = selec_J[selec_J["Compra_Sugerida"] > 0].copy()
+            selec_J["Empresa"] = "JCA"
+            carrinho_items.append(selec_J)
+
+    if not carrinho_items:
         st.info("O carrinho de compras está vazio. Adicione itens na aba **Análise de Compra (Consolidado)**.")
+        # Garante que o estado do carrinho é limpo se não houver itens selecionados
+        st.session_state.carrinho_compras = []
     else:
-        # Puxa o carrinho, que já está com tipos forçados
+        # Constroi o carrinho final (lógica copiada do botão "Adicionar")
+        cols_carrinho = ["Empresa", "SKU", "fornecedor", "Preco", "Compra_Sugerida", "Valor_Compra_R$"]
+        carrinho_df = pd.concat(carrinho_items)[cols_carrinho]
+        carrinho_df.columns = ["Empresa", "SKU", "Fornecedor", "Preco_Custo", "Qtd_Sugerida", "Valor_Sugerido_R$"]
+        carrinho_df["Qtd_Ajustada"] = carrinho_df["Qtd_Sugerida"]
+        carrinho_df = enforce_numeric_types(carrinho_df)
+
+        # Atualiza o estado do carrinho para ser usado pelo data_editor (se for a primeira vez ou se a seleção mudou)
+        st.session_state.carrinho_compras = [carrinho_df.reset_index(drop=True)]
         df_carrinho = st.session_state.carrinho_compras[0].copy()
         
         # Auditoria/Detalhes da OC
@@ -1121,4 +1166,4 @@ with tab4:
             except Exception as e:
                 st.error(str(e))
 
-st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V3.2.1 (FIX DE SELEÇÃO E ESTADO)")
+st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V3.2.2 (FIX ESTADO: Sincronia SKU-Base)")
