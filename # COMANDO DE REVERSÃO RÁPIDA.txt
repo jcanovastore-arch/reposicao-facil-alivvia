@@ -1,0 +1,2 @@
+# COMANDO DE REVERSÃO RÁPIDA:
+git checkout V3.2_ESTAVEL
