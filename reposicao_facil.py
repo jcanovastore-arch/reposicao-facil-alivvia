@@ -1,6 +1,6 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# ARQUITETURA CONSOLIDADA V2.8 (Fix Definitivo de TypeError com checagem de tipo explícita)
+# ARQUITETURA CONSOLIDADA V2.9 (SKU ÚNICO e Filtro de Status na origem)
 
 import io
 import re
@@ -26,7 +26,7 @@ DEFAULT_SHEET_LINK = (
 )
 DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"  # fixo
 
-# NOVO: Diretório de persistência de uploads no disco
+# NOVO: Diretório de persistência de uploads no disco (herdado do V2.5)
 STORAGE_DIR = ".streamlit/uploaded_files_cache"
 if not os.path.exists(STORAGE_DIR):
     os.makedirs(STORAGE_DIR, exist_ok=True)
@@ -279,6 +279,7 @@ def _carregar_padrao_de_content(content: bytes) -> Catalogo:
     df_kits["kit_sku"] = df_kits["kit_sku"].map(norm_sku)
     df_kits["component_sku"] = df_kits["component_sku"].map(norm_sku)
     df_kits["qty"] = df_kits["qty"].map(br_to_float).fillna(0).astype(int)
+    # Garante que não há kits/componentes duplicados
     df_kits = df_kits[df_kits["qty"] >= 1].drop_duplicates(subset=["kit_sku","component_sku"], keep="first")
 
     # CATALOGO
@@ -303,7 +304,14 @@ def _carregar_padrao_de_content(content: bytes) -> Catalogo:
     df_cat["component_sku"] = df_cat["component_sku"].map(norm_sku)
     df_cat["fornecedor"] = df_cat["fornecedor"].fillna("").astype(str)
     df_cat["status_reposicao"] = df_cat["status_reposicao"].fillna("").astype(str)
-    df_cat = df_cat.drop_duplicates(subset=["component_sku"], keep="last")
+    
+    # GARANTE SKUS ÚNICOS e FILTRO DE NÃO REPOR NA ORIGEM (FIX V2.9)
+    # Filtra SKUs que contêm "nao_repor" no status (case insensitive)
+    mask_repor = ~df_cat["status_reposicao"].str.lower().str.contains("nao_repor", na=False)
+    df_cat = df_cat[mask_repor].copy()
+    
+    # Remove duplicatas no catálogo (mantém o último)
+    df_cat = df_cat.drop_duplicates(subset=["component_sku"], keep="last").reset_index(drop=True)
 
     return Catalogo(catalogo_simples=df_cat, kits_reais=df_kits)
 
@@ -317,14 +325,27 @@ def carregar_padrao_do_link(url: str) -> Catalogo:
 
 def construir_kits_efetivo(cat: Catalogo) -> pd.DataFrame:
     kits = cat.kits_reais.copy()
-    existentes = set(kits["kit_sku"].unique())
+    
+    # Obtém os SKUs únicos no catálogo de itens que DEVEM ser repostos
+    componentes_validos = set(cat.catalogo_simples["component_sku"].unique())
+    kits_validos = set(kits["kit_sku"].unique())
+    
+    # 1. Filtra kits e componentes no kits_reais para garantir que só contenha componentes válidos
+    kits = kits[kits["component_sku"].isin(componentes_validos)].copy()
+    
+    # 2. Adiciona o alias (SKU simples) apenas se for um componente válido e NÃO for um kit
     alias = []
-    for s in cat.catalogo_simples["component_sku"].unique().tolist():
+    for s in componentes_validos:
         s = norm_sku(s)
-        if s and s not in existentes:
+        # Adiciona como alias se o SKU existe no catalogo (válido) e não é um kit principal
+        if s not in kits_validos:
             alias.append((s, s, 1))
+            
     if alias:
-        kits = pd.concat([kits, pd.DataFrame(alias, columns=["kit_sku","component_sku","qty"])], ignore_index=True)
+        kits_df_alias = pd.DataFrame(alias, columns=["kit_sku","component_sku","qty"])
+        kits = pd.concat([kits, kits_df_alias], ignore_index=True)
+        
+    # Garante unicidade e remove SKUs inválidos
     kits = kits.drop_duplicates(subset=["kit_sku","component_sku"], keep="first")
     return kits
 
@@ -341,6 +362,8 @@ def mapear_tipo(df: pd.DataFrame) -> str:
 
     if tem_sku_std and (tem_vendas60 or tem_estoque_full_like or tem_transito_like):
         return "FULL"
+    if tem_sku_std and tem_vendas60 and tem_qtd_livre:
+        return "FULL" # Confirma FULL (mais robusto)
     if tem_sku_std and tem_estoque_generico and tem_preco:
         return "FISICO"
     if tem_sku_std and tem_qtd_livre and not tem_preco:
@@ -438,6 +461,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     shp["SKU"] = shp["SKU"].map(norm_sku)
     shp["Quantidade_60d"] = shp["Quantidade"].astype(int)
 
+    # 1. Explode Vendas de FULL/Shopee para nível componente
     ml_comp = explodir_por_kits(
         full[["SKU","Vendas_Qtd_60d"]].rename(columns={"SKU":"kit_sku","Vendas_Qtd_60d":"Qtd"}),
         kits,"kit_sku","Qtd").rename(columns={"Quantidade":"ML_60d"})
@@ -447,11 +471,10 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
 
     cat_df = cat.catalogo_simples[["component_sku","fornecedor","status_reposicao"]].rename(columns={"component_sku":"SKU"})
 
+    # 2. Mescla Catálogo com Demandas (apenas SKUs do catálogo que DEVEM ser repostos)
     demanda = cat_df.merge(ml_comp, on="SKU", how="left").merge(shopee_comp, on="SKU", how="left")
     demanda[["ML_60d","Shopee_60d"]] = demanda[["ML_60d","Shopee_60d"]].fillna(0).astype(int)
     demanda["TOTAL_60d"] = np.maximum(demanda["ML_60d"] + demanda["Shopee_60d"], demanda["ML_60d"]).astype(int)
-    
-    # NOVO: Vendas Total 60d (soma simples)
     demanda["Vendas_Total_60d"] = demanda["ML_60d"] + demanda["Shopee_60d"] 
 
     fis = fisico_df.copy()
@@ -459,14 +482,16 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     fis["Estoque_Fisico"] = fis["Estoque_Fisico"].fillna(0).astype(int)
     fis["Preco"] = fis["Preco"].fillna(0.0)
 
+    # 3. Mescla com Estoque Físico e FULL
     base = demanda.merge(fis, on="SKU", how="left")
     base["Estoque_Fisico"] = base["Estoque_Fisico"].fillna(0).astype(int)
     base["Preco"] = base["Preco"].fillna(0.0)
-
-    # Adicionar Estoque_Full do FULL
-    base = base.merge(full[["SKU", "Estoque_Full"]], on="SKU", how="left").fillna({"Estoque_Full": 0})
+    base = base.merge(full[["SKU", "Estoque_Full", "Em_Transito"]], on="SKU", how="left").fillna({"Estoque_Full": 0, "Em_Transito": 0})
     base["Estoque_Full"] = base["Estoque_Full"].astype(int)
+    base["Em_Transito"] = base["Em_Transito"].astype(int)
 
+
+    # 4. Cálculo de Necessidade (Target)
     fator = (1.0 + g/100.0) ** (h/30.0)
     fk = full.copy()
     fk["vendas_dia"] = fk["Vendas_Qtd_60d"] / 60.0
@@ -487,18 +512,17 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
 
     base["Compra_Sugerida"] = (base["Necessidade"] - base["Folga_Fisico"]).clip(lower=0).astype(int)
 
-    mask_nao = base["status_reposicao"].str.lower().str.contains("nao_repor", na=False)
-    base.loc[mask_nao, "Compra_Sugerida"] = 0
+    # Nota: O filtro "nao_repor" já foi aplicado na origem (CATALOGO_SIMPLES), removendo a necessidade de zerar a compra aqui.
 
     base["Valor_Compra_R$"] = (base["Compra_Sugerida"].astype(float) * base["Preco"].astype(float)).round(2)
     
-    # ATENÇÃO: Seleção das colunas finais de acordo com a sua solicitação
+    # ATENÇÃO: Seleção das colunas finais
     df_final = base[[
         "SKU","fornecedor",
-        "Vendas_Total_60d", # NOVO
-        "Estoque_Full",     # NOVO
+        "Vendas_Total_60d",
+        "Estoque_Full",
         "Estoque_Fisico","Preco","Compra_Sugerida","Valor_Compra_R$",
-        "ML_60d","Shopee_60d","TOTAL_60d","Reserva_30d","Folga_Fisico","Necessidade" # Colunas de auditoria
+        "ML_60d","Shopee_60d","TOTAL_60d","Reserva_30d","Folga_Fisico","Necessidade", "Em_Transito"
     ]].reset_index(drop=True)
 
     # Painel (mantido o original para métricas)
@@ -552,7 +576,6 @@ def style_df_compra(df: pd.DataFrame):
         'Valor_Sugerido_R$': lambda x: format_br_currency(x),
     }
     
-    # O na_rep passa a ser redundante.
     styler = df.style.format({c: fmt for c, fmt in format_mapping.items() if c in df.columns})
     
     # Aplica cor de fundo se Compra_Sugerida for > 0
@@ -831,7 +854,7 @@ with tab2:
                     st.warning("Nenhum item com Compra Sugerida > 0 foi selecionado.")
             
             # --- Visualização de Resultados ---
-            col_order = ["Selecionar", "SKU", "fornecedor", "Vendas_Total_60d", "Estoque_Full", "Estoque_Fisico", "Preco", "Compra_Sugerida", "Valor_Compra_R$"]
+            col_order = ["Selecionar", "SKU", "fornecedor", "Vendas_Total_60d", "Estoque_Full", "Estoque_Fisico", "Preco", "Compra_Sugerida", "Valor_Compra_R$", "Em_Transito"]
             
             if df_A_filt is not None and not df_A_filt.empty:
                 st.markdown("### ALIVVIA")
@@ -851,7 +874,7 @@ with tab2:
                     key="df_view_A"
                 )
                 # Atualiza o estado da seleção (após a edição na tabela)
-                # FIX V2.8: Adiciona checagem de tipo explícita para evitar TypeError
+                # FIX V2.8/V2.9: Adiciona checagem de tipo explícita para evitar TypeError
                 if isinstance(edited_df_A, pd.DataFrame) and "Selecionar" in edited_df_A.columns:
                     st.session_state.sel_A = edited_df_A["Selecionar"].tolist()
 
@@ -873,7 +896,7 @@ with tab2:
                     key="df_view_J"
                 )
                 # Atualiza o estado da seleção (após a edição na tabela)
-                # FIX V2.8: Adiciona checagem de tipo explícita para evitar TypeError
+                # FIX V2.8/V2.9: Adiciona checagem de tipo explícita para evitar TypeError
                 if isinstance(edited_df_J, pd.DataFrame) and "Selecionar" in edited_df_J.columns:
                     st.session_state.sel_J = edited_df_J["Selecionar"].tolist()
 
@@ -1031,4 +1054,4 @@ with tab4:
             except Exception as e:
                 st.error(str(e))
 
-st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V2.8 (Fix Definitivo de TypeError)")
+st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V2.9 (SKU Único e Filtro de Status)")
