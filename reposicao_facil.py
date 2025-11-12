@@ -1,6 +1,6 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# ARQUITETURA CONSOLIDADA V3.2.4 (FIX FINAL DEFINITIVO: SELEÇÃO POR LISTA DE SKUS + INDENTAÇÃO CORRIGIDA)
+# ARQUITETURA CONSOLIDADA V3.2.4 (FIX FINAL DEFINITIVO: SELEÇÃO POR LISTA DE SKUS)
 
 import io
 import re
@@ -656,7 +656,7 @@ with st.sidebar:
                 # NOVO V3.2: Chama a função que prioriza o arquivo local
                 cat, origem = carregar_padrao_local_ou_sheets(DEFAULT_SHEET_LINK)
                 
-                st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"sku":"component_sku"})
+                st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku":"sku"})
                 st.session_state.kits_df = cat.kits_reais
                 st.session_state.loaded_at = dt.datetime.now().strftime(f"%Y-%m-%d %H:%M:%S {origem}")
                 st.success(f"Padrão carregado com sucesso (Origem: {origem}).")
@@ -672,7 +672,7 @@ with st.sidebar:
         try:
             # Mantém a lógica de carregamento do link alternativo separada
             cat = carregar_padrao_do_link(st.session_state.alt_sheet_link.strip())
-            st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"sku":"component_sku"})
+            st.session_state.catalogo_df = cat.catalogo_simples.rename(columns={"component_sku":"sku"})
             st.session_state.kits_df = cat.kits_reais
             st.session_state.loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S alt_sheets")
             st.success("Padrão carregado (link alternativo).")
@@ -743,8 +743,7 @@ with tab1:
         # Estoque Físico
         st.markdown("**Estoque Físico — opcional (necessário só para Compra Automática)**")
         up_e = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_e_{emp}")
-        # CORREÇÃO DE INDENTAÇÃO (LINHA 753)
-        handle_upload(up_e, "ESTOQUE")
+        handle_upload(up_e, "ESTOQUE") # CORRIGIDO
         display_status("ESTOQUE")
 
         c3, c4 = st.columns([1,1])
