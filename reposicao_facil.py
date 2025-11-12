@@ -1,6 +1,6 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# ARQUITETURA CONSOLIDADA V3.1 (Correção do KeyError em DataFrame Vazio na Filtragem)
+# ARQUITETURA ESTÁVEL V3.1.1 (Reversão completa para V3.1 + Correção de execução do Botão "Adicionar ao Carrinho")
 
 import io
 import re
@@ -26,7 +26,7 @@ DEFAULT_SHEET_LINK = (
 )
 DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"  # fixo
 
-# NOVO: Diretório de persistência de uploads no disco (herdado do V2.5)
+# Diretório de persistência de uploads no disco (herdado do V2.5)
 STORAGE_DIR = ".streamlit/uploaded_files_cache"
 if not os.path.exists(STORAGE_DIR):
     os.makedirs(STORAGE_DIR, exist_ok=True)
@@ -160,7 +160,6 @@ def enforce_numeric_types(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors='coerce').round(2).astype(float)
             
     # Colunas que devem ser tratadas como inteiros (quantidade)
-    # FIX V3.1: Adicionando 'Em_Transito' na lista de garantia de tipo inteiro
     for col in ["Vendas_Total_60d", "Estoque_Full", "Estoque_Fisico", "Compra_Sugerida", "Qtd_Sugerida", "Qtd_Ajustada", "Em_Transito"]:
         if col in df.columns:
             # Converte para numérico (erros para NaN), preenche NaN com 0 e converte para int
@@ -506,7 +505,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     fk = full.copy()
     fk["vendas_dia"] = fk["Vendas_Qtd_60d"] / 60.0
     fk["alvo"] = np.round(fk["vendas_dia"] * (LT + h) * fator).astype(int)
-    fk["oferta"] = (fk["Estoque_Full"] + fk["Em_Transito"]).astype(int)
+    fk["oferta"] = (full["Estoque_Full"] + full["Em_Transito"]).astype(int) 
     fk["envio_desejado"] = (fk["alvo"] - fk["oferta"]).clip(lower=0).astype(int)
 
     necessidade = explodir_por_kits(
@@ -543,7 +542,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     full_unid  = int(full["Estoque_Full"].sum())
     full_valor = float((full_stock_comp["Quantidade"].fillna(0) * full_stock_comp["Preco"].fillna(0.0)).sum())
 
-    painel = {"full_unid": full_unid, "full_valor": full_valor, "fisico_unid": fis_unid, "fisico_valor": fis_valor}
+    painel = {"full_unid": full_unid, "full_valor": full_valor, "fisico_unid": fis_unid, "fisico_valor": fisico_valor}
     return df_final, painel
 
 # ===================== EXPORT CSV / STYLER =====================
@@ -710,6 +709,7 @@ with tab1:
         # Estoque Físico
         st.markdown("**Estoque Físico — opcional (necessário só para Compra Automática)**")
         up_e = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_e_{emp}")
+            
         handle_upload(up_e, "ESTOQUE")
         display_status("ESTOQUE")
 
@@ -831,10 +831,9 @@ with tab2:
             st.markdown("---")
             st.subheader("Seleção de Itens para Compra (Carrinho)")
 
-            if st.button("🛒 Adicionar Itens Selecionados ao Pedido", type="secondary"):
+            if st.button("🛒 Adicionar Itens Selecionados ao Pedido", type="secondary", key="add_to_cart_btn"): # FIX V3.1.1: Adicionado KEY para forçar execução do botão
                 carrinho = []
                 # Processa ALIVVIA
-                # FIX V3.0: Usa o df_A_filt para a seleção, garantindo que o índice seja compatível
                 selec_A = df_A_filt[st.session_state.get('sel_A', [False] * len(df_A_filt))[:len(df_A_filt)]] if df_A_filt is not None else pd.DataFrame()
                 if not selec_A.empty:
                     selec_A = selec_A[selec_A["Compra_Sugerida"] > 0].copy()
@@ -842,7 +841,6 @@ with tab2:
                     carrinho.append(selec_A)
                 
                 # Processa JCA
-                # FIX V3.0: Usa o df_J_filt para a seleção, garantindo que o índice seja compatível
                 selec_J = df_J_filt[st.session_state.get('sel_J', [False] * len(df_J_filt))[:len(df_J_filt)]] if df_J_filt is not None else pd.DataFrame()
                 if not selec_J.empty:
                     selec_J = selec_J[selec_J["Compra_Sugerida"] > 0].copy()
@@ -873,7 +871,7 @@ with tab2:
                 # Força a tipagem antes de estilizar (CORREÇÃO DE ERRO)
                 df_A_filt_typed = enforce_numeric_types(df_A_filt)
                 
-                # FIX V3.1: Garante que a lista de seleção tem o tamanho correto para o DataFrame filtrado
+                # Garante que a lista de seleção tem o tamanho correto para o DataFrame filtrado
                 current_sel_A = st.session_state.get('sel_A', [])
                 if len(current_sel_A) != len(df_A_filt_typed):
                      # Se o tamanho mudou (por causa do filtro), reseta a seleção
@@ -884,7 +882,6 @@ with tab2:
                 df_A_filt_typed["Selecionar"] = current_sel_A
                 
                 edited_df_A = st.dataframe(
-                    # FIX V3.1: Acesso seguro usando df_A_filt_typed.columns se col_order falhar (embora improvável agora)
                     style_df_compra(df_A_filt_typed[col_order]),
                     use_container_width=True,
                     column_order=col_order,
@@ -903,7 +900,7 @@ with tab2:
                 # Força a tipagem antes de estilizar (CORREÇÃO DE ERRO)
                 df_J_filt_typed = enforce_numeric_types(df_J_filt)
 
-                # FIX V3.1: Garante que a lista de seleção tem o tamanho correto para o DataFrame filtrado
+                # Garante que a lista de seleção tem o tamanho correto para o DataFrame filtrado
                 current_sel_J = st.session_state.get('sel_J', [])
                 if len(current_sel_J) != len(df_J_filt_typed):
                     # Se o tamanho mudou (por causa do filtro), reseta a seleção
@@ -1080,4 +1077,4 @@ with tab4:
             except Exception as e:
                 st.error(str(e))
 
-st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V3.1 (Correção de KeyError em DataFrame Vazio)")
+st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V3.1.1 (Estabilidade do Botão Adicionar ao Carrinho)")
