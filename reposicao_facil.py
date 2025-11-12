@@ -1,6 +1,6 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# ARQUITETURA CONSOLIDADA V2.7 (Fix Definitivo do Styler com funções Lambda)
+# ARQUITETURA CONSOLIDADA V2.8 (Fix Definitivo de TypeError com checagem de tipo explícita)
 
 import io
 import re
@@ -26,7 +26,7 @@ DEFAULT_SHEET_LINK = (
 )
 DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"  # fixo
 
-# NOVO: Diretório de persistência de uploads no disco (herdado do V2.5)
+# NOVO: Diretório de persistência de uploads no disco
 STORAGE_DIR = ".streamlit/uploaded_files_cache"
 if not os.path.exists(STORAGE_DIR):
     os.makedirs(STORAGE_DIR, exist_ok=True)
@@ -552,7 +552,7 @@ def style_df_compra(df: pd.DataFrame):
         'Valor_Sugerido_R$': lambda x: format_br_currency(x),
     }
     
-    # O na_rep passa a ser redundante, mas o deixamos por segurança.
+    # O na_rep passa a ser redundante.
     styler = df.style.format({c: fmt for c, fmt in format_mapping.items() if c in df.columns})
     
     # Aplica cor de fundo se Compra_Sugerida for > 0
@@ -851,7 +851,8 @@ with tab2:
                     key="df_view_A"
                 )
                 # Atualiza o estado da seleção (após a edição na tabela)
-                if edited_df_A:
+                # FIX V2.8: Adiciona checagem de tipo explícita para evitar TypeError
+                if isinstance(edited_df_A, pd.DataFrame) and "Selecionar" in edited_df_A.columns:
                     st.session_state.sel_A = edited_df_A["Selecionar"].tolist()
 
             if df_J_filt is not None and not df_J_filt.empty:
@@ -872,7 +873,8 @@ with tab2:
                     key="df_view_J"
                 )
                 # Atualiza o estado da seleção (após a edição na tabela)
-                if edited_df_J:
+                # FIX V2.8: Adiciona checagem de tipo explícita para evitar TypeError
+                if isinstance(edited_df_J, pd.DataFrame) and "Selecionar" in edited_df_J.columns:
                     st.session_state.sel_J = edited_df_J["Selecionar"].tolist()
 
 # ---------- TAB 3: PEDIDO DE COMPRA ----------
@@ -1029,4 +1031,4 @@ with tab4:
             except Exception as e:
                 st.error(str(e))
 
-st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V2.7 (Fix Definitivo do Styler)")
+st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V2.8 (Fix Definitivo de TypeError)")
