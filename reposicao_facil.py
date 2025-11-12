@@ -1,6 +1,6 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# ARQUITETURA CONSOLIDADA V3.2 (Carregamento Prioritário de Arquivo Padrão Local)
+# ARQUITETURA CONSOLIDADA V3.2.1 (FIX DE SELEÇÃO E ESTADO)
 
 import io
 import re
@@ -9,7 +9,7 @@ import datetime as dt
 from dataclasses import dataclass
 from typing import Optional, Tuple
 import os 
-import time # Adicionado para usar sleep no carregamento
+import time
 
 import numpy as np
 import pandas as pd
@@ -81,6 +81,12 @@ def _ensure_state():
 
 
 _ensure_state()
+
+# FIX V3.2.1: Função única de reset para ser chamada em todos os filtros
+def reset_selection():
+    """Zera o estado de seleção do carrinho quando um filtro ou o SKU muda."""
+    st.session_state.sel_A = []
+    st.session_state.sel_J = []
 
 # ===================== HTTP / GOOGLE SHEETS =====================
 def _requests_session() -> requests.Session:
@@ -569,7 +575,7 @@ def calcular(full_df, fisico_df, vendas_df, cat: Catalogo, h=60, g=0.0, LT=0):
     full_unid  = int(full["Estoque_Full"].sum())
     full_valor = float((full_stock_comp["Quantidade"].fillna(0) * full_stock_comp["Preco"].fillna(0.0)).sum())
 
-    painel = {"full_unid": full_unid, "full_valor": full_valor, "fisico_unid": fis_unid, "fisico_valor": fis_valor}
+    painel = {"full_unid": full_unid, "full_valor": full_valor, "fisico_unid": fis_unid, "fisico_valor": fisico_valor}
     return df_final, painel
 
 # ===================== EXPORT CSV / STYLER =====================
@@ -841,11 +847,13 @@ with tab2:
             # Filtros dinâmicos
             c1, c2 = st.columns(2)
             with c1:
-                sku_filter = st.text_input("Filtro por SKU (contém)", key="filt_sku").upper().strip()
+                # FIX V3.2.1: Adiciona o callback on_change para resetar a seleção ao filtrar por SKU
+                sku_filter = st.text_input("Filtro por SKU (contém)", key="filt_sku", on_change=reset_selection).upper().strip()
             with c2:
                 fornecedor_opc = df_full["fornecedor"].unique().tolist() if df_full is not None else []
                 fornecedor_opc.insert(0, "TODOS")
-                fornecedor_filter = st.selectbox("Filtro por Fornecedor", fornecedor_opc, key="filt_forn")
+                # FIX V3.2.1: Adiciona o callback on_change para resetar a seleção ao filtrar por Fornecedor
+                fornecedor_filter = st.selectbox("Filtro por Fornecedor", fornecedor_opc, key="filt_forn", on_change=reset_selection)
             
             # Aplica filtros
             def aplicar_filtro(df: pd.DataFrame) -> pd.DataFrame:
@@ -1113,4 +1121,4 @@ with tab4:
             except Exception as e:
                 st.error(str(e))
 
-st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V3.2 (Carregamento Prioritário de Arquivo Padrão Local)")
+st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V3.2.1 (FIX DE SELEÇÃO E ESTADO)")
