@@ -1,6 +1,6 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# ARQUITETURA CONSOLIDADA V2.6 (Arredondamento Defensivo para evitar ValueError)
+# ARQUITETURA CONSOLIDADA V2.7 (Fix Definitivo do Styler com funções Lambda)
 
 import io
 import re
@@ -157,7 +157,6 @@ def enforce_numeric_types(df: pd.DataFrame) -> pd.DataFrame:
     for col in ["Preco", "Valor_Compra_R$", "Preco_Custo", "Valor_Sugerido_R$", "Valor_Ajustado_R$"]:
         if col in df.columns:
             # Converte para float, convertendo erros (strings, etc.) para NaN, ARREDONDA para 2 casas e converte.
-            # O arredondamento ajuda a limpar ruídos de precisão que podem quebrar o Styler.
             df[col] = pd.to_numeric(df[col], errors='coerce').round(2).astype(float)
             
     # Colunas que devem ser tratadas como inteiros (quantidade)
@@ -520,31 +519,41 @@ def exportar_carrinho_csv(df: pd.DataFrame) -> bytes:
     df["Data_Hora_OC"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return df.to_csv(index=False).encode("utf-8")
 
-# FUNÇÃO CORRIGIDA PARA TRATAR O VALOR ERROR (NaN)
-def style_df_compra(df: pd.DataFrame):
-    """Aplica o destaque na coluna Compra_Sugerida e formata valores."""
-    
-    # Formato para valores inteiros
-    int_format = '{:,.0f}'.replace(",", "X").replace(".", ",").replace("X", ".")
-    
-    # Formato para moeda
-    currency_format = 'R$ {:,.2f}'.replace(",", "X").replace(".", ",").replace("X", ".")
+# FUNÇÕES CUSTOMIZADAS DE FORMATO (MAIOR ESTABILIDADE)
+def format_br_float(x):
+    if pd.isna(x): return '-'
+    # Formata como float com 2 casas e troca os separadores (1,000.50 -> 1.000,50)
+    return f"{x:,.2f}".replace('.', 'TEMP').replace(',', '.').replace('TEMP', ',')
 
+def format_br_currency(x):
+    if pd.isna(x): return '-'
+    # Formata como moeda BR
+    return f"R$ {format_br_float(x)}"
+
+def format_br_int(x):
+    if pd.isna(x): return '-'
+    # Formata como inteiro e troca os separadores (1,000 -> 1.000)
+    return f"{x:,.0f}".replace('.', 'TEMP').replace(',', '.').replace('TEMP', ',')
+
+def style_df_compra(df: pd.DataFrame):
+    """Aplica o destaque na coluna Compra_Sugerida e formata valores usando funções lambda."""
+    
+    # NOVO: USANDO LAMBDAS PARA FORÇAR FORMATO E RESOLVER O VALUERROR
     format_mapping = {
-        'Estoque_Fisico': int_format,
-        'Compra_Sugerida': int_format,
-        'Vendas_Total_60d': int_format,
-        'Estoque_Full': int_format,
-        'Preco': currency_format,
-        'Valor_Compra_R$': currency_format,
-        'Qtd_Ajustada': int_format,
-        'Preco_Custo': currency_format,
-        'Valor_Ajustado_R$': currency_format,
-        'Valor_Sugerido_R$': currency_format,
+        'Estoque_Fisico': lambda x: format_br_int(x),
+        'Compra_Sugerida': lambda x: format_br_int(x),
+        'Vendas_Total_60d': lambda x: format_br_int(x),
+        'Estoque_Full': lambda x: format_br_int(x),
+        'Preco': lambda x: format_br_currency(x),
+        'Valor_Compra_R$': lambda x: format_br_currency(x),
+        'Qtd_Ajustada': lambda x: format_br_int(x),
+        'Preco_Custo': lambda x: format_br_currency(x),
+        'Valor_Ajustado_R$': lambda x: format_br_currency(x),
+        'Valor_Sugerido_R$': lambda x: format_br_currency(x),
     }
     
-    # Aplica o formato nas colunas existentes, usando na_rep='-' para NaN (CORREÇÃO DE ERRO)
-    styler = df.style.format({c: fmt for c, fmt in format_mapping.items() if c in df.columns}, na_rep='-')
+    # O na_rep passa a ser redundante, mas o deixamos por segurança.
+    styler = df.style.format({c: fmt for c, fmt in format_mapping.items() if c in df.columns})
     
     # Aplica cor de fundo se Compra_Sugerida for > 0
     def highlight_compra(s):
@@ -669,12 +678,7 @@ with tab1:
         # Estoque Físico
         st.markdown("**Estoque Físico — opcional (necessário só para Compra Automática)**")
         up_e = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_e_{emp}")
-            # Se o arquivo já foi carregado e está no cache, não sobrescreva com None
-        if st.session_state[emp]["ESTOQUE"]["name"] is None:
-            handle_upload(up_e, "ESTOQUE")
-        else:
-            handle_upload(up_e, "ESTOQUE")
-
+        handle_upload(up_e, "ESTOQUE")
         display_status("ESTOQUE")
 
         c3, c4 = st.columns([1,1])
@@ -1025,4 +1029,4 @@ with tab4:
             except Exception as e:
                 st.error(str(e))
 
-st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V2.6 (Arredondamento Defensivo)")
+st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V2.7 (Fix Definitivo do Styler)")
