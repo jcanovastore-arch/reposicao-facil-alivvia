@@ -1,6 +1,6 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# ARQUITETURA CONSOLIDADA V3.2.2 (FIX ESTADO: Sincronia SKU-Base)
+# ARQUITETURA CONSOLIDADA V3.2.3 (FIX ESTADO: BLINDAGEM CONTRA ESTADO CORROMPIDO)
 
 import io
 import re
@@ -750,7 +750,7 @@ with tab1:
         # Estoque Físico
         st.markdown("**Estoque Físico — opcional (necessário só para Compra Automática)**")
         up_e = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_e_{emp}")
-        handle_upload(up_e, "ESTOQUE")
+            handle_upload(up_e, "ESTOQUE")
         display_status("ESTOQUE")
 
         c3, c4 = st.columns([1,1])
@@ -840,6 +840,14 @@ with tab2:
         df_A = st.session_state.resultado_ALIVVIA
         df_J = st.session_state.resultado_JCA
         
+        # BLINDAGEM V3.2.3: Garante que o estado de seleção é um dicionário antes de usá-lo
+        if not isinstance(st.session_state.sel_A, dict):
+            st.session_state.sel_A = {}
+            st.warning("Estado de seleção ALIVVIA redefinido para corrigir o erro.")
+        if not isinstance(st.session_state.sel_J, dict):
+            st.session_state.sel_J = {}
+            st.warning("Estado de seleção JCA redefinido para corrigir o erro.")
+
         if df_A is None and df_J is None:
             st.info("Gere o cálculo para pelo menos uma empresa acima para visualizar e filtrar.")
         else:
@@ -981,8 +989,6 @@ with tab2:
 # ---------- TAB 3: PEDIDO DE COMPRA ----------
 with tab3:
     st.subheader("🛒 Revisão e Finalização do Pedido de Compra")
-    
-    # FIX V3.2.2: Agora o carrinho usa o dicionário de seleção global para filtrar o resultado COMPLETO.
     
     # Lógica para popular o carrinho (reutilizada e ajustada)
     selected_skus_A = {sku for sku, selected in st.session_state.sel_A.items() if selected}
@@ -1166,4 +1172,4 @@ with tab4:
             except Exception as e:
                 st.error(str(e))
 
-st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V3.2.2 (FIX ESTADO: Sincronia SKU-Base)")
+st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V3.2.3 (FIX ESTADO: BLINDAGEM CONTRA ESTADO CORROMPIDO)")
