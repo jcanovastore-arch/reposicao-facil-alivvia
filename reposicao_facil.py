@@ -1,6 +1,6 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# ARQUITETURA CONSOLIDADA V2.5 (Correção Determinística de Persistência)
+# ARQUITETURA CONSOLIDADA V2.6 (Arredondamento Defensivo para evitar ValueError)
 
 import io
 import re
@@ -8,7 +8,7 @@ import hashlib
 import datetime as dt
 from dataclasses import dataclass
 from typing import Optional, Tuple
-import os # Para persistência de disco
+import os 
 
 import numpy as np
 import pandas as pd
@@ -26,7 +26,7 @@ DEFAULT_SHEET_LINK = (
 )
 DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"  # fixo
 
-# NOVO: Diretório de persistência de uploads no disco
+# NOVO: Diretório de persistência de uploads no disco (herdado do V2.5)
 STORAGE_DIR = ".streamlit/uploaded_files_cache"
 if not os.path.exists(STORAGE_DIR):
     os.makedirs(STORAGE_DIR, exist_ok=True)
@@ -47,11 +47,8 @@ def _ensure_state():
     st.session_state.setdefault("loaded_at", None)
     st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK)
 
-    # NOVO: Persistência dos resultados de cálculo
     st.session_state.setdefault("resultado_ALIVVIA", None)
     st.session_state.setdefault("resultado_JCA", None)
-    
-    # NOVO: Carrinho de compras (Lista de DataFrames, pois são de empresas diferentes)
     st.session_state.setdefault("carrinho_compras", [])
 
     st.session_state.setdefault('sel_A', [])
@@ -63,7 +60,7 @@ def _ensure_state():
         for file_type in ["FULL", "VENDAS", "ESTOQUE"]:
             state = st.session_state[emp].setdefault(file_type, {"name": None, "bytes": None})
             
-            # NOVO: Tenta carregar do disco na inicialização se a sessão estiver vazia
+            # Tenta carregar do disco na inicialização
             if not state["name"]:
                 path_bin = get_local_file_path(emp, file_type)
                 path_name = get_local_name_path(emp, file_type)
@@ -76,7 +73,6 @@ def _ensure_state():
                             state["name"] = f_name.read().strip()
                         state['is_cached'] = True
                     except Exception:
-                        # Se falhar ao ler, limpa a entrada
                         state["name"] = None; state["bytes"] = None
 
 
@@ -160,8 +156,9 @@ def enforce_numeric_types(df: pd.DataFrame) -> pd.DataFrame:
     # Colunas que devem ser tratadas como float (moeda/custo)
     for col in ["Preco", "Valor_Compra_R$", "Preco_Custo", "Valor_Sugerido_R$", "Valor_Ajustado_R$"]:
         if col in df.columns:
-            # Converte para float, convertendo erros (strings, etc.) para NaN.
-            df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
+            # Converte para float, convertendo erros (strings, etc.) para NaN, ARREDONDA para 2 casas e converte.
+            # O arredondamento ajuda a limpar ruídos de precisão que podem quebrar o Styler.
+            df[col] = pd.to_numeric(df[col], errors='coerce').round(2).astype(float)
             
     # Colunas que devem ser tratadas como inteiros (quantidade)
     for col in ["Vendas_Total_60d", "Estoque_Full", "Estoque_Fisico", "Compra_Sugerida", "Qtd_Sugerida", "Qtd_Ajustada"]:
@@ -672,7 +669,12 @@ with tab1:
         # Estoque Físico
         st.markdown("**Estoque Físico — opcional (necessário só para Compra Automática)**")
         up_e = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_e_{emp}")
-        handle_upload(up_e, "ESTOQUE")
+            # Se o arquivo já foi carregado e está no cache, não sobrescreva com None
+        if st.session_state[emp]["ESTOQUE"]["name"] is None:
+            handle_upload(up_e, "ESTOQUE")
+        else:
+            handle_upload(up_e, "ESTOQUE")
+
         display_status("ESTOQUE")
 
         c3, c4 = st.columns([1,1])
@@ -681,7 +683,7 @@ with tab1:
             st.button(f"Salvar {emp} (Uploads Persistem)", use_container_width=True, key=f"save_{emp}")
         with c4:
             if st.button(f"Limpar {emp} e Cache", use_container_width=True, key=f"clr_{emp}"):
-                # NOVO: Limpa os arquivos do disco
+                # Limpa os arquivos do disco
                 for file_type in ["FULL", "VENDAS", "ESTOQUE"]:
                     if os.path.exists(get_local_file_path(emp, file_type)):
                         os.remove(get_local_file_path(emp, file_type))
@@ -1023,4 +1025,4 @@ with tab4:
             except Exception as e:
                 st.error(str(e))
 
-st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V2.5 (Persistência Determinística)")
+st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V2.6 (Arredondamento Defensivo)")
