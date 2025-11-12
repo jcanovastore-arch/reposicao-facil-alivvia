@@ -1,6 +1,6 @@
 # reposicao_facil.py
 # Reposição Logística — Alivvia (Streamlit)
-# ARQUITETURA CONSOLIDADA V2.3 (Refino da tipagem no st.dataframe)
+# ARQUITETURA CONSOLIDADA V2.4 (com persistência de uploads no cache de disco)
 
 import io
 import re
@@ -8,6 +8,7 @@ import hashlib
 import datetime as dt
 from dataclasses import dataclass
 from typing import Optional, Tuple
+import os # NOVO: Para manipulação de arquivos no disco
 
 import numpy as np
 import pandas as pd
@@ -25,6 +26,16 @@ DEFAULT_SHEET_LINK = (
 )
 DEFAULT_SHEET_ID = "1cTLARjq-B5g50dL6tcntg7lb_Iu0ta43"  # fixo
 
+# NOVO: Diretório de persistência no Streamlit Cloud
+STORAGE_DIR = ".streamlit/uploaded_files_cache"
+
+# Helper function to get the local disk path for a file
+def get_local_file_path(empresa: str, tipo: str, name: str) -> str:
+    # Usa hash do nome para evitar colisões e mantém o nome original
+    hash_name = hashlib.md5(name.encode()).hexdigest()
+    # Path: .streamlit/uploaded_files_cache/ALIVVIA/FULL/hash_nome.csv
+    return os.path.join(STORAGE_DIR, empresa, tipo, hash_name + "_" + name)
+
 # ===================== ESTADO =====================
 def _ensure_state():
     st.session_state.setdefault("catalogo_df", None)
@@ -32,23 +43,43 @@ def _ensure_state():
     st.session_state.setdefault("loaded_at", None)
     st.session_state.setdefault("alt_sheet_link", DEFAULT_SHEET_LINK)
 
-    # NOVO: Persistência dos resultados de cálculo
     st.session_state.setdefault("resultado_ALIVVIA", None)
     st.session_state.setdefault("resultado_JCA", None)
-    
-    # NOVO: Carrinho de compras (Lista de DataFrames, pois são de empresas diferentes)
     st.session_state.setdefault("carrinho_compras", [])
 
-    # uploads por empresa
-    for emp in ["ALIVVIA", "JCA"]:
-        st.session_state.setdefault(emp, {})
-        st.session_state[emp].setdefault("FULL",   {"name": None, "bytes": None})
-        st.session_state[emp].setdefault("VENDAS", {"name": None, "bytes": None})
-        st.session_state[emp].setdefault("ESTOQUE",{"name": None, "bytes": None})
-
-    # NOVO: Persistência da seleção de checkbox por filtro
     st.session_state.setdefault('sel_A', [])
     st.session_state.setdefault('sel_J', [])
+
+    # Cria o diretório de persistência se não existir
+    if not os.path.exists(STORAGE_DIR):
+        os.makedirs(STORAGE_DIR, exist_ok=True)
+        
+    for emp in ["ALIVVIA", "JCA"]:
+        st.session_state.setdefault(emp, {})
+        for file_type in ["FULL", "VENDAS", "ESTOQUE"]:
+            st.session_state[emp].setdefault(file_type, {"name": None, "bytes": None})
+            
+            # NOVO: Tenta carregar do disco se o servidor reiniciou (session_state limpo)
+            if not st.session_state[emp][file_type]["name"]:
+                # Assume que o path para o arquivo está salvo em um local persistente ou pode ser inferido
+                
+                # Se houver um arquivo na pasta de cache, carregue o mais recente
+                cache_dir = os.path.join(STORAGE_DIR, emp, file_type)
+                if os.path.exists(cache_dir):
+                    cached_files = [f for f in os.listdir(cache_dir) if f.split('_', 1)[1].lower().endswith(('.csv', '.xlsx', '.xls'))]
+                    if cached_files:
+                        # Pega o arquivo mais recente
+                        latest_file = max(cached_files, key=lambda f: os.path.getmtime(os.path.join(cache_dir, f)))
+                        cache_path = os.path.join(cache_dir, latest_file)
+                        
+                        try:
+                            with open(cache_path, 'rb') as f:
+                                st.session_state[emp][file_type]["bytes"] = f.read()
+                                st.session_state[emp][file_type]["name"] = latest_file.split('_', 1)[1]
+                                st.session_state[emp][file_type]['is_cached'] = True
+                        except Exception as e:
+                            st.warning(f"Falha ao carregar {file_type} de {emp} do disco: {e}")
+
 
 _ensure_state()
 
@@ -594,57 +625,74 @@ tab1, tab2, tab3, tab4 = st.tabs([
 
 # ---------- TAB 1: UPLOADS ----------
 with tab1:
-    st.subheader("Uploads fixos por empresa (mantidos até você limpar)")
-    st.caption("Salvamos FULL e Shopee/MT (e opcionalmente Estoque) por empresa na sessão. Clique **Salvar** para fixar.")
+    st.subheader("Uploads fixos por empresa (mantidos no cache de disco)")
+    st.caption("Ao fazer upload, o arquivo é salvo no cache do servidor para persistir reinicializações.")
 
     def bloco_empresa(emp: str):
         st.markdown(f"### {emp}")
         c1, c2 = st.columns(2)
+        
+        # Funções para upload e persistência
+        def handle_upload(up_file, file_type):
+            if up_file is not None:
+                up_bytes = up_file.read()
+                local_path = get_local_file_path(emp, file_type, up_file.name)
+                
+                # Salva no disco
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                with open(local_path, 'wb') as f:
+                    f.write(up_bytes)
+                    
+                # Salva metadados na sessão
+                st.session_state[emp][file_type]["name"]  = up_file.name
+                st.session_state[emp][file_type]["bytes"] = up_bytes
+                st.session_state[emp][file_type]['is_cached'] = True
+                st.success(f"{file_type} carregado e salvo: {up_file.name}")
+        
+        def display_status(file_type):
+            if st.session_state[emp][file_type]["name"]:
+                status = "(No cache)" if st.session_state[emp][file_type].get('is_cached') else "(Na memória)"
+                st.caption(f"{file_type} salvo: **{st.session_state[emp][file_type]['name']}** {status}")
+
         # FULL
         with c1:
             st.markdown(f"**FULL — {emp}**")
             up_full = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_full_{emp}")
-            if up_full is not None:
-                st.session_state[emp]["FULL"]["name"]  = up_full.name
-                st.session_state[emp]["FULL"]["bytes"] = up_full.read()
-                st.success(f"FULL carregado: {up_full.name}")
-            if st.session_state[emp]["FULL"]["name"]:
-                st.caption(f"FULL salvo: **{st.session_state[emp]['FULL']['name']}**")
+            handle_upload(up_full, "FULL")
+            display_status("FULL")
+
         # Shopee/MT
         with c2:
             st.markdown(f"**Shopee/MT — {emp}**")
             up_v = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_v_{emp}")
-            if up_v is not None:
-                st.session_state[emp]["VENDAS"]["name"]  = up_v.name
-                st.session_state[emp]["VENDAS"]["bytes"] = up_v.read()
-                st.success(f"Vendas carregado: {up_v.name}")
-            if st.session_state[emp]["VENDAS"]["name"]:
-                st.caption(f"Vendas salvo: **{st.session_state[emp]['VENDAS']['name']}**")
+            handle_upload(up_v, "VENDAS")
+            display_status("VENDAS")
 
-        # Estoque Físico (opcional para compra)
+        # Estoque Físico
         st.markdown("**Estoque Físico — opcional (necessário só para Compra Automática)**")
         up_e = st.file_uploader("CSV/XLSX/XLS", type=["csv","xlsx","xls"], key=f"up_e_{emp}")
-        if up_e is not None:
-            st.session_state[emp]["ESTOQUE"]["name"]  = up_e.name
-            st.session_state[emp]["ESTOQUE"]["bytes"] = up_e.read()
-            st.success(f"Estoque carregado: {up_e.name}")
-        if st.session_state[emp]["ESTOQUE"]["name"]:
-            st.caption(f"Estoque salvo: **{st.session_state[emp]['ESTOQUE']['name']}**")
+        handle_upload(up_e, "ESTOQUE")
+        display_status("ESTOQUE")
 
         c3, c4 = st.columns([1,1])
         with c3:
-            if st.button(f"Salvar {emp}", use_container_width=True, key=f"save_{emp}"):
-                st.success(f"Status {emp}: FULL [{'OK' if st.session_state[emp]['FULL']['name'] else '–'}] • "
-                           f"Shopee [{'OK' if st.session_state[emp]['VENDAS']['name'] else '–'}] • "
-                           f"Estoque [{'OK' if st.session_state[emp]['ESTOQUE']['name'] else '–'}]")
+            # Botão Salvar (apenas um feedback, pois o salvamento é automático no upload)
+            st.button(f"Salvar {emp} (Uploads Persistem)", use_container_width=True, key=f"save_{emp}")
         with c4:
-            if st.button(f"Limpar {emp}", use_container_width=True, key=f"clr_{emp}"):
+            if st.button(f"Limpar {emp} e Cache", use_container_width=True, key=f"clr_{emp}"):
+                # NOVO: Limpa os arquivos do disco
+                for file_type in ["FULL", "VENDAS", "ESTOQUE"]:
+                    cache_dir = os.path.join(STORAGE_DIR, emp, file_type)
+                    if os.path.exists(cache_dir):
+                        for f in os.listdir(cache_dir):
+                            os.remove(os.path.join(cache_dir, f))
+                
+                # Limpa a sessão
                 st.session_state[emp] = {"FULL":{"name":None,"bytes":None},
                                          "VENDAS":{"name":None,"bytes":None},
                                          "ESTOQUE":{"name":None,"bytes":None}}
-                # Limpa também o resultado do cálculo
                 st.session_state[f"resultado_{emp}"] = None
-                st.info(f"{emp} limpo e resultado de cálculo zerado.")
+                st.info(f"{emp} limpo e cache de disco apagado.")
 
         st.divider()
 
@@ -974,4 +1022,4 @@ with tab4:
             except Exception as e:
                 st.error(str(e))
 
-st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V2.3 (Refino da tipagem)")
+st.caption("© Alivvia — simples, robusto e auditável. Arquitetura V2.4 (Persistência de Uploads)")
