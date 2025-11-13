@@ -911,40 +911,82 @@ with tab2:
                 else:
                     st.warning("Nenhum item com Compra Sugerida > 0 foi selecionado.")
             
-            # --- Visualização de Resultados ---
-            col_order = ["Selecionar", "SKU", "fornecedor", "Vendas_Total_60d", "Estoque_Full", "Estoque_Fisico", "Preco", "Compra_Sugerida", "Valor_Compra_R$", "Em_Transito"]
+                     # --- Visualização de Resultados ---
+            col_order = ["Selecionar", "SKU", "fornecedor", "Vendas_Total_60d",
+                         "Estoque_Full", "Estoque_Fisico", "Preco",
+                         "Compra_Sugerida", "Valor_Compra_R$", "Em_Transito"]
             
+            # -------- ALIVVIA --------
             if df_A_filt is not None and not df_A_filt.empty:
                 st.markdown("### ALIVVIA")
                 
-                # Força a tipagem antes de estilizar (CORREÇÃO DE ERRO)
+                # Força a tipagem antes de estilizar
                 df_A_filt_typed = enforce_numeric_types(df_A_filt)
                 
-                # FIX V3.2.2: Popula a coluna 'Selecionar' do DF FILTRADO a partir do Dicionário global
+                # Popula a coluna 'Selecionar' a partir do dicionário global
                 df_A_filt_typed["Selecionar"] = df_A_filt_typed["SKU"].apply(
                     lambda sku: st.session_state.sel_A.get(sku, False)
                 )
-                
-                edited_df_A = st.dataframe(
-                    style_df_compra(df_A_filt_typed[col_order]),
+
+                # EDITOR interativo (agora sim os checkboxes funcionam)
+                edited_df_A = st.data_editor(
+                    df_A_filt_typed[col_order],
                     use_container_width=True,
                     column_order=col_order,
-                    column_config={"Selecionar": st.column_config.CheckboxColumn("Comprar", default=False)},
+                    column_config={
+                        "Selecionar": st.column_config.CheckboxColumn("Comprar", default=False)
+                    },
+                    disabled=[c for c in col_order if c != "Selecionar"],
                     key="df_view_A"
                 )
                 
-                # FIX V3.2.2: Processa o output do dataframe para atualizar o Dicionário global (SKU-base)
+                # Atualiza o dicionário global com base no que o usuário marcou
                 if isinstance(edited_df_A, pd.DataFrame) and "Selecionar" in edited_df_A.columns:
-                    for index, row in edited_df_A.iterrows():
+                    for _, row in edited_df_A.iterrows():
                         sku = row["SKU"]
-                        is_selected = row["Selecionar"]
-                        
+                        is_selected = bool(row["Selecionar"])
                         if is_selected:
                             st.session_state.sel_A[sku] = True
                         elif sku in st.session_state.sel_A:
                             st.session_state.sel_A[sku] = False
             else:
-                 st.info("ALIVVIA: Nenhum item corresponde aos filtros.")
+                st.info("ALIVVIA: Nenhum item corresponde aos filtros.")
+
+            # -------- JCA --------
+            if df_J_filt is not None and not df_J_filt.empty:
+                st.markdown("### JCA")
+                
+                # Força a tipagem antes de estilizar
+                df_J_filt_typed = enforce_numeric_types(df_J_filt)
+
+                # Popula a coluna 'Selecionar' a partir do dicionário global
+                df_J_filt_typed["Selecionar"] = df_J_filt_typed["SKU"].apply(
+                    lambda sku: st.session_state.sel_J.get(sku, False)
+                )
+                
+                edited_df_J = st.data_editor(
+                    df_J_filt_typed[col_order],
+                    use_container_width=True,
+                    column_order=col_order,
+                    column_config={
+                        "Selecionar": st.column_config.CheckboxColumn("Comprar", default=False)
+                    },
+                    disabled=[c for c in col_order if c != "Selecionar"],
+                    key="df_view_J"
+                )
+                
+                # Atualiza o dicionário global com base no que o usuário marcou
+                if isinstance(edited_df_J, pd.DataFrame) and "Selecionar" in edited_df_J.columns:
+                    for _, row in edited_df_J.iterrows():
+                        sku = row["SKU"]
+                        is_selected = bool(row["Selecionar"])
+                        if is_selected:
+                            st.session_state.sel_J[sku] = True
+                        elif sku in st.session_state.sel_J:
+                            st.session_state.sel_J[sku] = False
+            else:
+                st.info("JCA: Nenhum item corresponde aos filtros.")
+
 
 
             if df_J_filt is not None and not df_J_filt.empty:
