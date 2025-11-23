@@ -1,7 +1,7 @@
 services:
   - type: web
-    name: reposicao-facil
+    name: reposicao-facil-alivvia
     env: python
-    runtime: "python3.10"
     buildCommand: "pip install -r requirements.txt"
     startCommand: "uvicorn v4_api.api_compras:app --host 0.0.0.0 --port 10000"
+    pythonVersion: 3.10.14
