@@ -1,35 +1,46 @@
-from typing import Any
-from fastapi import FastAPI, Request, Body
-from fastapi.middleware.cors import CORSMiddleware
-
-app = FastAPI(title="API Reposição Alivvia v4 (debug)")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-@app.get("/health")
-def health():
-    print(">> /health foi chamado")
-    return {"status": "ok"}
-
+from fastapi import UploadFile
+from engine_compras import calcular_compra_engine
+from supabase_client import download_file_from_supabase
 
 @app.post("/calcular-compra")
 async def api_calcular_compra(body: dict = Body(...)) -> Any:
     """
-    MODO DEBUG:
-    - não faz cálculo
-    - só mostra no terminal o que chegar
-    - devolve o mesmo JSON de volta
+    Versão real do cálculo:
+    - baixa arquivos do Supabase
+    - processa CSV/XLSX
+    - explode kits
+    - une vendas
+    - aplica estoques
+    - retorna tabela consolidada
     """
+
     print("\n===============================")
     print("PAYLOAD RECEBIDO EM /calcular-compra:")
     print(body)
     print("===============================\n")
 
-    return body
+    # 1) Extrair parâmetros
+    horizonte = body.get("horizonte", 60)
+    crescimento = body.get("crescimento", 0)
+    leadtime = body.get("leadTime", 0)
+    arqs = body.get("arquivos", {})
+
+    # 2) Baixar arquivos enviados via Supabase
+    arquivos_dict = {}
+
+    for empresa, arquivos_empresa in arqs.items():
+        arquivos_dict[empresa] = {}
+        for tipo, path in arquivos_empresa.items():
+            conteudo = download_file_from_supabase(path)
+            arquivos_dict[empresa][tipo] = conteudo
+
+    # 3) Rodar o motor real de cálculo (engine)
+    resultado = calcular_compra_engine(
+        arquivos=arquivos_dict,
+        horizonte=horizonte,
+        crescimento=crescimento,
+        leadtime=leadtime
+    )
+
+    # 4) Devolver no formato esperado pelo Lovable
+    return {"resultado": resultado}
