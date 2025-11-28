@@ -1,6 +1,6 @@
 from typing import Any
 from fastapi import Body
-from engine_compras import calcular_compra
+from engine_compras import calcular_compra_engine
 from supabase_client import download_file_from_supabase
 
 
@@ -12,32 +12,31 @@ async def api_calcular_compra(body: dict = Body(...)) -> Any:
     print(body)
     print("===============================\n")
 
-    # 1) Parâmetros
+    # 1) Parâmetros enviados pelo Lovable
     horizonte = body.get("horizonte", 60)
     crescimento = body.get("crescimento", 0)
     leadtime = body.get("leadTime", 0)
     arqs = body.get("arquivos", {})
 
-    # 2) Carregar arquivos ALI e JCA
-    # Cada empresa vira um dicionário com: full / vendas / estoque
-    arquivos = {}
+    # 2) Baixar arquivos do Supabase (ALI e JCA)
+    arquivos_dict = {}
 
     for empresa, itens in arqs.items():
-        arquivos[empresa] = {}
+        arquivos_dict[empresa] = {}
         for tipo, path in itens.items():
-            df = download_file_from_supabase(path)
-            arquivos[empresa][tipo] = df
+            conteudo = download_file_from_supabase(path)
+            arquivos_dict[empresa][tipo] = conteudo
 
-    # 3) Rodar motor de cálculo real
-    df_final, painel = calcular_compra(
-        arquivos=arquivos,
+    # 3) Rodar o motor real de cálculo
+    resultado_df, painel = calcular_compra_engine(
+        arquivos=arquivos_dict,
         horizonte=horizonte,
         crescimento=crescimento,
         leadtime=leadtime
     )
 
-    # 4) Voltar para o Lovable em formato JSON
+    # 4) Enviar resposta ao Lovable
     return {
-        "tabela": df_final.to_dict(orient="records"),
+        "tabela": resultado_df.to_dict(orient="records"),
         "painel": painel
     }
