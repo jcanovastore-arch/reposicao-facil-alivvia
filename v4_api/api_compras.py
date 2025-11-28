@@ -1,7 +1,8 @@
 from typing import Any
 from fastapi import Body
-from engine_compras import calcular_compra
-from supabase_client import download_file_from_supabase
+from .engine_compras import calcular_compra
+from .supabase_client import download_file_from_supabase
+
 
 
 @app.post("/calcular-compra")
