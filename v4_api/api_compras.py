@@ -1,13 +1,16 @@
 # v4_api/api_compras.py
+# API final — compatível com engine novo (sem Google Sheets)
 
 from fastapi import FastAPI, Body
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Any
+from typing import Any, Dict
 
-from v4_api.supabase_client import download_file_from_supabase
 from v4_api.engine_compras import calcular_compra
+from v4_api.supabase_client import download_file_from_supabase
 
-app = FastAPI(title="API Reposição Alivvia v4 (motor real)")
+
+app = FastAPI(title="API Reposição Alivvia v4 — Final")
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,46 +20,79 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 
+
+# ===============================================================
+#                ENDPOINT PRINCIPAL /calcular-compra
+# ===============================================================
+
 @app.post("/calcular-compra")
 async def api_calcular_compra(body: dict = Body(...)) -> Any:
+    """
+    RECEBE DO LOVABLE:
+    -------------------
+    {
+      horizonte: 60,
+      crescimento: 0,
+      leadTime: 30,
+      arquivos: {
+        alivvia: {full, fisico, vendas},
+        jca: {full, fisico, vendas}
+      }
+    }
 
-    print("\n=== PAYLOAD RECEBIDO ===")
+    DEVOLVE PARA O LOVABLE:
+    ------------------------
+    {
+      ALIVVIA: { tabela, painel },
+      JCA: { tabela, painel }
+    }
+    """
+
+    print("\n========== PAYLOAD RECEBIDO ==========")
     print(body)
-    print("========================\n")
+    print("======================================\n")
 
     horizonte = body.get("horizonte", 60)
     crescimento = body.get("crescimento", 0)
     leadtime = body.get("leadTime", 0)
 
-    arqs = body.get("arquivos", {})
+    arquivos_input: Dict = body.get("arquivos", {})
 
-    arquivos = {
+    # Montar estrutura final de arquivos
+    arquivos_final = {
         "alivvia": {},
-        "jca": {}
+        "jca": {},
     }
 
-    # ALIVVIA
-    for tipo, path in arqs.get("alivvia", {}).items():
-        arquivos["alivvia"][tipo] = download_file_from_supabase(path)
+    # ---------------- ALIVVIA ----------------
+    alivvia_dict = arquivos_input.get("alivvia", {})
+    for tipo, path in alivvia_dict.items():
+        arquivos_final["alivvia"][tipo] = download_file_from_supabase(path)
 
-    # JCA
-    for tipo, path in arqs.get("jca", {}).items():
-        arquivos["jca"][tipo] = download_file_from_supabase(path)
+    # ---------------- JCA ----------------
+    jca_dict = arquivos_input.get("jca", {})
+    for tipo, path in jca_dict.items():
+        arquivos_final["jca"][tipo] = download_file_from_supabase(path)
 
-    # Catálogo e Kits
-    arquivos["catalogo"] = download_file_from_supabase(arqs["catalogo"])
-    arquivos["kits"] = download_file_from_supabase(arqs["kits"])
+    # ===============================================================
+    #               RODAR O MOTOR REAL DE COMPRA
+    # ===============================================================
 
-    resultado = calcular_compra(
-        arquivos=arquivos,
+    resultado, painel = calcular_compra(
+        arquivos=arquivos_final,
         horizonte=horizonte,
         crescimento=crescimento,
         leadtime=leadtime
     )
+
+    print("\n====== RETORNO PARA O LOVABLE ======")
+    print(resultado)
+    print("====================================\n")
 
     return resultado
